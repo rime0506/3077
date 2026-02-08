@@ -2197,88 +2197,94 @@ async function migratePhoneAndSmsToIndexedDB() {
 
         // 核心：保存所有设置到DEXie (保留原有逻辑，仅排除 AI 相关 key 防止覆盖)
         async function saveAllSetting() {
-            // ... (AI配置独立保存，这里只负责个性化设置)
-            // 整理所有要存储的数据
-            const saveData = {
-                wallpaper: document.getElementById('desktop-body').style.backgroundImage.replace(/url\(|\)|"/g, ''),
-                widgetIcon: document.getElementById('widget-icon').style.backgroundImage.replace(/url\(|\)|"/g, ''),
-                widgetTitle: document.getElementById('widget-title-input').value.trim() || '{`{ lovely Day ¸.*・~ ★`}',
-                widgetSubtext: document.getElementById('widget-subtext-input').value.trim() || '世界破破烂烂小猫缝缝补补 🐾',
-                photoLeft: document.getElementById('img-left').style.backgroundImage.replace(/url\(|\)|"/g, ''),
-                photoRight: document.getElementById('img-right').style.backgroundImage.replace(/url\(|\)|"/g, ''),
-                avatar1: document.getElementById('avatar-img-1').style.backgroundImage.replace(/url\(|\)|"/g, ''),
-                avatar2: document.getElementById('avatar-img-2').style.backgroundImage.replace(/url\(|\)|"/g, ''),
-                avatar1Bubble: document.getElementById('avatar1-bubble-input').value.trim() || '> .. <',
-                avatar1Name: document.getElementById('avatar1-name-input').value.trim() || '> .. <',
-                avatar2Bubble: document.getElementById('avatar2-bubble-input').value.trim() || 'gw..♡',
-                avatar2Name: document.getElementById('avatar2-name-input').value.trim() || 'gw..♡',
-                daysText: document.getElementById('days-input').value.trim() || '446 days'
-            };
-            
-            // ... (后续逻辑不变，但注意 clear() 会清除 AI 配置，需要修改)
-            
-            // ★ 修改点：不能直接 db.dexiData.clear()，因为会删掉 AI 配置
-            // 方案：只 put 更新这些 UI 相关的 key，不使用 clear
-            
-            // 存储应用图标
-            const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
-            iconIds.forEach(id => {
-                const el = document.getElementById(`icon-${id}`)?.querySelector('.icon');
-                if (el) saveData[`icon${id.charAt(0).toUpperCase() + id.slice(1)}`] = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
-            });
-            // 存储Dock图标
-            const dockIds = ['setting','custom','message','phone'];
-            dockIds.forEach(id => {
-                const el = document.getElementById(`dock-${id}`)?.querySelector('.icon');
-                if (el) saveData[`dock${id.charAt(0).toUpperCase() + id.slice(1)}`] = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
-            });
+            try {
+                // 读取所有输入值
+                const saveData = {
+                    wallpaper: document.getElementById('desktop-body')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '',
+                    widgetIcon: document.getElementById('widget-icon')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '',
+                    widgetTitle: document.getElementById('widget-title-input')?.value?.trim() || document.getElementById('widget-title')?.innerText?.trim() || 'lovely Day',
+                    widgetSubtext: document.getElementById('widget-subtext-input')?.value?.trim() || document.getElementById('widget-subtext')?.innerText?.trim() || '世界破破烂烂小猫缝缝补补 🐾',
+                    photoLeft: document.getElementById('img-left')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '',
+                    photoRight: document.getElementById('img-right')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '',
+                    avatar1: document.getElementById('avatar-img-1')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '',
+                    avatar2: document.getElementById('avatar-img-2')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '',
+                    avatar1Bubble: document.getElementById('avatar1-bubble-input')?.value?.trim() || '> .. <',
+                    avatar1Name: document.getElementById('avatar1-name-input')?.value?.trim() || '> .. <',
+                    avatar2Bubble: document.getElementById('avatar2-bubble-input')?.value?.trim() || 'gw..♡',
+                    avatar2Name: document.getElementById('avatar2-name-input')?.value?.trim() || 'gw..♡',
+                    daysText: document.getElementById('days-input')?.value?.trim() || '446 days'
+                };
+                
+                // 存储应用图标
+                const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
+                iconIds.forEach(id => {
+                    const el = document.getElementById(`icon-${id}`)?.querySelector('.icon');
+                    if (el) saveData[`icon${id.charAt(0).toUpperCase() + id.slice(1)}`] = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
+                });
+                // 存储Dock图标
+                const dockIds = ['setting','custom','message','phone'];
+                dockIds.forEach(id => {
+                    const el = document.getElementById(`dock-${id}`)?.querySelector('.icon');
+                    if (el) saveData[`dock${id.charAt(0).toUpperCase() + id.slice(1)}`] = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
+                });
 
-            // 保存椭圆形颜色
-            const capsuleColor = document.getElementById('capsule-color-input').value;
-            const bubbleColor = document.getElementById('bubble-color-input').value;
-            saveData.capsuleColor = capsuleColor;
-            saveData.bubbleColor = bubbleColor;
+                // 保存椭圆形颜色
+                const capsuleColor = document.getElementById('capsule-color-input')?.value || '#FFF7FA';
+                const bubbleColor = document.getElementById('bubble-color-input')?.value || '#FFF7FA';
+                saveData.capsuleColor = capsuleColor;
+                saveData.bubbleColor = bubbleColor;
 
-            // 保存自定义字体
-            const customFontUrl = document.getElementById('custom-font-input').value.trim();
-            const customFontName = document.getElementById('custom-font-name-input').value.trim();
-            saveData.customFontUrl = customFontUrl;
-            saveData.customFontName = customFontName;
+                // 保存自定义字体
+                const customFontUrl = document.getElementById('custom-font-input')?.value?.trim() || '';
+                const customFontName = document.getElementById('custom-font-name-input')?.value?.trim() || '';
+                saveData.customFontUrl = customFontUrl;
+                saveData.customFontName = customFontName;
 
-            // 保存自定义CSS
-            const customCssCode = document.getElementById('custom-css-input').value;
-            saveData.customCssCode = customCssCode;
+                // 保存自定义CSS
+                const customCssCode = document.getElementById('custom-css-input')?.value || '';
+                saveData.customCssCode = customCssCode;
 
-            // 循环保存
-            for (const [key, value] of Object.entries(saveData)) {
-                await db.dexiData.put({ key, value });
+                // 循环保存到数据库
+                for (const [key, value] of Object.entries(saveData)) {
+                    await db.dexiData.put({ key, value });
+                }
+
+                // 实时更新页面显示
+                const widgetTitle = document.getElementById('widget-title');
+                const widgetSubtext = document.getElementById('widget-subtext');
+                const bubble1 = document.getElementById('avatar-bubble1');
+                const name1 = document.getElementById('avatar-name1');
+                const bubble2 = document.getElementById('avatar-bubble2');
+                const name2 = document.getElementById('avatar-name2');
+                const daysText = document.getElementById('days-text');
+                
+                if (widgetTitle) widgetTitle.innerText = saveData.widgetTitle;
+                if (widgetSubtext) widgetSubtext.innerText = saveData.widgetSubtext;
+                if (bubble1) bubble1.innerText = saveData.avatar1Bubble;
+                if (name1) name1.innerText = saveData.avatar1Name;
+                if (bubble2) bubble2.innerText = saveData.avatar2Bubble;
+                if (name2) name2.innerText = saveData.avatar2Name;
+                if (daysText) daysText.innerText = saveData.daysText;
+                
+                // 应用椭圆形颜色
+                document.documentElement.style.setProperty('--capsule-bg', capsuleColor);
+                document.documentElement.style.setProperty('--bubble-bg', bubbleColor);
+
+                // 应用自定义字体到全局
+                if (customFontUrl && customFontName) {
+                    loadCustomFont(customFontUrl, customFontName, false);
+                }
+
+                // 应用自定义CSS
+                applyCustomCSS();
+
+                // 保存提示
+                showToast('✅ 保存成功');
+                console.log('[SaveSetting] ✓ 个性化设置保存成功', saveData);
+            } catch (error) {
+                console.error('[SaveSetting] ✗ 保存失败:', error);
+                showToast('❌ 保存失败: ' + error.message);
             }
-
-            // 实时更新页面显示
-            document.getElementById('widget-title').innerText = saveData.widgetTitle;
-            document.getElementById('widget-subtext').innerText = saveData.widgetSubtext;
-            document.getElementById('avatar-bubble1').innerText = saveData.avatar1Bubble;
-            document.getElementById('avatar-name1').innerText = saveData.avatar1Name;
-            document.getElementById('avatar-bubble2').innerText = saveData.avatar2Bubble;
-            document.getElementById('avatar-name2').innerText = saveData.avatar2Name;
-            document.getElementById('days-text').innerText = saveData.daysText;
-            
-            // 应用椭圆形颜色
-            document.documentElement.style.setProperty('--capsule-bg', capsuleColor);
-            document.documentElement.style.setProperty('--bubble-bg', bubbleColor);
-
-            // 应用自定义字体到全局
-            if (customFontUrl && customFontName) {
-                loadCustomFont(customFontUrl, customFontName, false);
-            }
-
-            // 应用自定义CSS
-            applyCustomCSS();
-
-            // 保存提示
-            const tip = document.getElementById('save-tip');
-            tip.style.display = 'block';
-            setTimeout(() => tip.style.display = 'none', 1500);
         }
 
 // --- 日历时间设定逻辑 (Premium Pink Pro) ---
@@ -22578,12 +22584,41 @@ function showLorebookPage() {
                 img2.style.backgroundImage = `url(${dataMap.avatar2})`;
                 img2.classList.add('has-image');
             }
-            if (dataMap.avatar1Bubble) document.getElementById('avatar-bubble1').innerText = dataMap.avatar1Bubble;
-            if (dataMap.avatar1Name) document.getElementById('avatar-name1').innerText = dataMap.avatar1Name;
-            if (dataMap.avatar2Bubble) document.getElementById('avatar-bubble2').innerText = dataMap.avatar2Bubble;
-            if (dataMap.avatar2Name) document.getElementById('avatar-name2').innerText = dataMap.avatar2Name;
+            if (dataMap.avatar1Bubble) {
+                document.getElementById('avatar-bubble1').innerText = dataMap.avatar1Bubble;
+                const input1b = document.getElementById('avatar1-bubble-input');
+                if (input1b) input1b.value = dataMap.avatar1Bubble;
+            }
+            if (dataMap.avatar1Name) {
+                document.getElementById('avatar-name1').innerText = dataMap.avatar1Name;
+                const input1n = document.getElementById('avatar1-name-input');
+                if (input1n) input1n.value = dataMap.avatar1Name;
+            }
+            if (dataMap.avatar2Bubble) {
+                document.getElementById('avatar-bubble2').innerText = dataMap.avatar2Bubble;
+                const input2b = document.getElementById('avatar2-bubble-input');
+                if (input2b) input2b.value = dataMap.avatar2Bubble;
+            }
+            if (dataMap.avatar2Name) {
+                document.getElementById('avatar-name2').innerText = dataMap.avatar2Name;
+                const input2n = document.getElementById('avatar2-name-input');
+                if (input2n) input2n.value = dataMap.avatar2Name;
+            }
             // 恢复倒数日
-            if (dataMap.daysText) document.getElementById('days-text').innerText = dataMap.daysText;
+            if (dataMap.daysText) {
+                document.getElementById('days-text').innerText = dataMap.daysText;
+                const daysInput = document.getElementById('days-input');
+                if (daysInput) daysInput.value = dataMap.daysText;
+            }
+            // 恢复小组件文本到输入框
+            if (dataMap.widgetTitle) {
+                const wtInput = document.getElementById('widget-title-input');
+                if (wtInput) wtInput.value = dataMap.widgetTitle;
+            }
+            if (dataMap.widgetSubtext) {
+                const wsInput = document.getElementById('widget-subtext-input');
+                if (wsInput) wsInput.value = dataMap.widgetSubtext;
+            }
             // 恢复应用图标
             const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
             iconIds.forEach(id => {
@@ -22602,9 +22637,13 @@ function showLorebookPage() {
         // 恢复椭圆形颜色
         if (dataMap.capsuleColor) {
             document.documentElement.style.setProperty('--capsule-bg', dataMap.capsuleColor);
+            const ccInput = document.getElementById('capsule-color-input');
+            if (ccInput) ccInput.value = dataMap.capsuleColor;
         }
         if (dataMap.bubbleColor) {
             document.documentElement.style.setProperty('--bubble-bg', dataMap.bubbleColor);
+            const bcInput = document.getElementById('bubble-color-input');
+            if (bcInput) bcInput.value = dataMap.bubbleColor;
         }
         
         // 恢复自定义字体
