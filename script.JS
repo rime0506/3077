@@ -1480,35 +1480,90 @@ async function migratePhoneAndSmsToIndexedDB() {
             loadCustomFont(fontUrl, fontName, true);
         }
         
-        // 加载并应用自定义字体
+        // 加载并应用自定义字体（支持 Google Fonts CSS 链接 和 TTF/WOFF/WOFF2/OTF 直链）
         function loadCustomFont(fontUrl, fontName, previewOnly = false) {
             // 移除旧的字体样式
             const oldLink = document.getElementById('custom-font-link');
             if (oldLink) oldLink.remove();
+            const oldFontFace = document.getElementById('custom-font-face');
+            if (oldFontFace) oldFontFace.remove();
             
-            // 创建新的 link 标签加载字体
-            const link = document.createElement('link');
-            link.id = 'custom-font-link';
-            link.rel = 'stylesheet';
-            link.href = fontUrl;
-            document.head.appendChild(link);
+            // 判断是否为字体文件直链（TTF、WOFF、WOFF2、OTF）
+            const fontFileMatch = fontUrl.match(/\.(ttf|woff2?|otf)(\?.*)?$/i);
             
-            // 等待字体加载完成后应用
-            link.onload = function() {
-                if (previewOnly) {
-                    // 仅预览：只应用到预览区域
-                    const previewText = document.getElementById('font-preview-text');
-                    previewText.style.fontFamily = `"${fontName}", sans-serif`;
-                    previewText.innerText = `这是字体预览效果 ABC 123\n${fontName}`;
+            if (fontFileMatch) {
+                // === 字体文件直链模式：使用 @font-face 加载 ===
+                const ext = fontFileMatch[1].toLowerCase();
+                let format = 'truetype';
+                if (ext === 'woff') format = 'woff';
+                else if (ext === 'woff2') format = 'woff2';
+                else if (ext === 'otf') format = 'opentype';
+                
+                const fontFaceStyle = document.createElement('style');
+                fontFaceStyle.id = 'custom-font-face';
+                fontFaceStyle.textContent = `
+                    @font-face {
+                        font-family: "${fontName}";
+                        src: url("${fontUrl}") format("${format}");
+                        font-weight: normal;
+                        font-style: normal;
+                        font-display: swap;
+                    }
+                `;
+                document.head.appendChild(fontFaceStyle);
+                
+                // 使用 FontFace API 检测字体是否加载成功
+                if (window.FontFace) {
+                    const font = new FontFace(fontName, `url(${fontUrl})`);
+                    font.load().then(() => {
+                        document.fonts.add(font);
+                        console.log(`[Font] ✓ 字体 "${fontName}" 加载成功 (${ext}直链)`);
+                        if (previewOnly) {
+                            const previewText = document.getElementById('font-preview-text');
+                            previewText.style.fontFamily = `"${fontName}", sans-serif`;
+                            previewText.innerText = `这是字体预览效果 ABC 123\n${fontName}`;
+                        } else {
+                            applyFontGlobal(fontName);
+                        }
+                    }).catch(err => {
+                        console.error(`[Font] ✗ 字体加载失败:`, err);
+                        showToast('❌ 字体加载失败，请检查链接是否正确');
+                    });
                 } else {
-                    // 全局应用
-                    applyFontGlobal(fontName);
+                    // 降级：等待一小段时间后尝试应用
+                    setTimeout(() => {
+                        if (previewOnly) {
+                            const previewText = document.getElementById('font-preview-text');
+                            previewText.style.fontFamily = `"${fontName}", sans-serif`;
+                            previewText.innerText = `这是字体预览效果 ABC 123\n${fontName}`;
+                        } else {
+                            applyFontGlobal(fontName);
+                        }
+                    }, 2000);
                 }
-            };
-            
-            link.onerror = function() {
-                alert('字体加载失败，请检查链接是否正确');
-            };
+            } else {
+                // === CSS 链接模式（Google Fonts 等）===
+                const link = document.createElement('link');
+                link.id = 'custom-font-link';
+                link.rel = 'stylesheet';
+                link.href = fontUrl;
+                document.head.appendChild(link);
+                
+                link.onload = function() {
+                    console.log(`[Font] ✓ 字体样式表加载成功: ${fontUrl}`);
+                    if (previewOnly) {
+                        const previewText = document.getElementById('font-preview-text');
+                        previewText.style.fontFamily = `"${fontName}", sans-serif`;
+                        previewText.innerText = `这是字体预览效果 ABC 123\n${fontName}`;
+                    } else {
+                        applyFontGlobal(fontName);
+                    }
+                };
+                
+                link.onerror = function() {
+                    showToast('❌ 字体加载失败，请检查链接是否正确');
+                };
+            }
         }
         
         // 应用字体到全局
@@ -1539,6 +1594,10 @@ async function migratePhoneAndSmsToIndexedDB() {
             const fontLink = document.getElementById('custom-font-link');
             if (fontLink) fontLink.remove();
             
+            // 移除 @font-face 样式（TTF直链模式）
+            const fontFace = document.getElementById('custom-font-face');
+            if (fontFace) fontFace.remove();
+            
             if (customFontStyleElement) {
                 customFontStyleElement.remove();
                 customFontStyleElement = null;
@@ -1549,7 +1608,7 @@ async function migratePhoneAndSmsToIndexedDB() {
             previewText.style.fontFamily = '';
             previewText.innerText = '这是字体预览效果 ABC 123';
             
-            alert('已恢复默认字体');
+            showToast('✅ 已恢复默认字体');
         }
 
         // 同步预览区和输入框
