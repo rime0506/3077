@@ -1660,7 +1660,7 @@ async function migratePhoneAndSmsToIndexedDB() {
             document.getElementById('home-page').style.display = 'block';
         }
 
-        // 各项自定义方法
+        // 各项自定义方法（修改后自动保存到Dexie）
         function setWallpaper(input) {
             const file = input.files[0];
             if (file) {
@@ -1669,6 +1669,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                     document.getElementById('desktop-body').style.backgroundImage = `url(${e.target.result})`;
                     document.getElementById('wallpaper-preview').style.backgroundImage = `url(${e.target.result})`;
                     document.getElementById('wallpaper-preview').innerText = '';
+                    autoSaveCustomization(); // 自动保存
                 };
                 reader.readAsDataURL(file);
             }
@@ -1685,6 +1686,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                 reader.onload = e => {
                     let iconDom = document.getElementById(`icon-${currentSelectIcon}`)?.querySelector('.icon') || document.getElementById(`dock-${currentSelectIcon}`)?.querySelector('.icon');
                     if (iconDom) iconDom.style.backgroundImage = `url(${e.target.result})`;
+                    autoSaveCustomization(); // 自动保存
                 };
                 reader.readAsDataURL(file);
             }
@@ -1697,6 +1699,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                 reader.onload = e => {
                     document.getElementById('widget-icon').style.backgroundImage = `url(${e.target.result})`;
                     document.getElementById('widget-icon-preview').style.backgroundImage = `url(${e.target.result})`;
+                    autoSaveCustomization(); // 自动保存
                 };
                 reader.readAsDataURL(file);
             }
@@ -1709,6 +1712,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                 reader.onload = e => {
                     document.getElementById(`img-${pos}`).style.backgroundImage = `url(${e.target.result})`;
                     document.getElementById(`photo-${pos}-preview`).style.backgroundImage = `url(${e.target.result})`;
+                    autoSaveCustomization(); // 自动保存
                 };
                 reader.readAsDataURL(file);
             }
@@ -1723,10 +1727,72 @@ async function migratePhoneAndSmsToIndexedDB() {
                     img.style.backgroundImage = `url(${e.target.result})`;
                     img.classList.add('has-image');
                     document.getElementById(`avatar${id}-preview`).style.backgroundImage = `url(${e.target.result})`;
+                    autoSaveCustomization(); // 自动保存
                 };
                 reader.readAsDataURL(file);
             }
             input.value = '';
+        }
+        
+        // 自动保存个性化设置（防抖，避免频繁写入）
+        let _autoSaveTimer = null;
+        function autoSaveCustomization() {
+            if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
+            _autoSaveTimer = setTimeout(async () => {
+                try {
+                    // 保存所有图片相关的数据到Dexie
+                    const saveItems = {};
+                    
+                    // 壁纸
+                    const wallpaper = document.getElementById('desktop-body')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                    if (wallpaper) saveItems.wallpaper = wallpaper;
+                    
+                    // 小组件图标
+                    const widgetIcon = document.getElementById('widget-icon')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                    if (widgetIcon) saveItems.widgetIcon = widgetIcon;
+                    
+                    // 拍立得
+                    const photoLeft = document.getElementById('img-left')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                    const photoRight = document.getElementById('img-right')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                    if (photoLeft) saveItems.photoLeft = photoLeft;
+                    if (photoRight) saveItems.photoRight = photoRight;
+                    
+                    // 头像
+                    const avatar1 = document.getElementById('avatar-img-1')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                    const avatar2 = document.getElementById('avatar-img-2')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                    if (avatar1) saveItems.avatar1 = avatar1;
+                    if (avatar2) saveItems.avatar2 = avatar2;
+                    
+                    // 应用图标
+                    const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
+                    iconIds.forEach(id => {
+                        const el = document.getElementById(`icon-${id}`)?.querySelector('.icon');
+                        if (el?.style.backgroundImage) {
+                            const val = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
+                            if (val) saveItems[`icon${id.charAt(0).toUpperCase() + id.slice(1)}`] = val;
+                        }
+                    });
+                    
+                    // Dock图标
+                    const dockIds = ['setting','custom','message','phone'];
+                    dockIds.forEach(id => {
+                        const el = document.getElementById(`dock-${id}`)?.querySelector('.icon');
+                        if (el?.style.backgroundImage) {
+                            const val = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
+                            if (val) saveItems[`dock${id.charAt(0).toUpperCase() + id.slice(1)}`] = val;
+                        }
+                    });
+                    
+                    // 写入Dexie
+                    for (const [key, value] of Object.entries(saveItems)) {
+                        await db.dexiData.put({ key, value });
+                    }
+                    
+                    console.log('[AutoSave] ✓ 图标/壁纸自动保存成功');
+                } catch (err) {
+                    console.error('[AutoSave] ✗ 自动保存失败:', err);
+                }
+            }, 500); // 500ms 防抖
         }
 
         // --- API 设置逻辑 (折叠版) ---
