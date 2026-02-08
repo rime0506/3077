@@ -39267,7 +39267,7 @@ const defaultStores = [
         id: 1,
         name: '肯德基',
         description: '炸鸡汉堡 | 配送到家',
-        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%23E4002B%22 width=%22100%22 height=%22100%22/%3E%3Ctext x=%2250%22 y=%2265%22 font-size=%2240%22 text-anchor=%22middle%22 fill=%22%23fff%22%3EKFC%3C/text%3E%3C/svg%3E',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%23E4002B%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2265%22 font-size=%2240%22 text-anchor=%22middle%22 fill=%22%23fff%22 font-weight=%22bold%22%3EKFC%3C/text%3E%3C/svg%3E',
         sales: 5234,
         menu: [
             { id: 101, name: '香辣鸡腿堡', price: 18, image: '🍔' },
@@ -39282,7 +39282,7 @@ const defaultStores = [
         id: 2,
         name: '麦当劳',
         description: '汉堡薯条 | 24小时营业',
-        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%23FFC72C%22 width=%22100%22 height=%22100%22/%3E%3Ctext x=%2250%22 y=%2265%22 font-size=%2235%22 text-anchor=%22middle%22 fill=%22%23DA020E%22%3EM%3C/text%3E%3C/svg%3E',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%23FFC72C%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2265%22 font-size=%2235%22 text-anchor=%22middle%22 fill=%22%23DA020E%22 font-weight=%22bold%22%3EM%3C/text%3E%3C/svg%3E',
         sales: 4892,
         menu: [
             { id: 201, name: '巨无霸', price: 25, image: '🍔' },
@@ -39292,8 +39292,362 @@ const defaultStores = [
             { id: 205, name: '麦旋风', price: 15, image: '🍦' },
             { id: 206, name: '板烧鸡腿堡', price: 22, image: '🍔' }
         ]
+    },
+    {
+        id: 3,
+        name: '蜜雪冰城',
+        description: '冰淇淋与茶 | 超高性价比',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%23E60012%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2245%22 font-size=%2228%22 text-anchor=%22middle%22 fill=%22%23fff%22%3E🍦%3C/text%3E%3Ctext x=%2250%22 y=%2278%22 font-size=%2216%22 text-anchor=%22middle%22 fill=%22%23fff%22 font-weight=%22bold%22%3E蜜雪%3C/text%3E%3C/svg%3E',
+        sales: 8921,
+        menu: [
+            { id: 301, name: '柠檬水', price: 4, image: '🍋' },
+            { id: 302, name: '冰鲜柠檬茶', price: 5, image: '🍵' },
+            { id: 303, name: '摇摇奶昔', price: 6, image: '🥛' },
+            { id: 304, name: '冰淇淋', price: 2, image: '🍦' },
+            { id: 305, name: '棒打鲜橙', price: 6, image: '🍊' },
+            { id: 306, name: '满杯百香果', price: 7, image: '🥝' },
+            { id: 307, name: '珍珠奶茶', price: 7, image: '🧋' }
+        ]
+    },
+    {
+        id: 4,
+        name: '瑞幸咖啡',
+        description: '精品咖啡 | 新用户首杯免费',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%230A3A6B%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2245%22 font-size=%2230%22 text-anchor=%22middle%22 fill=%22%23fff%22%3E☕%3C/text%3E%3Ctext x=%2250%22 y=%2278%22 font-size=%2214%22 text-anchor=%22middle%22 fill=%22%2300AEEF%22 font-weight=%22bold%22%3Eluckin%3C/text%3E%3C/svg%3E',
+        sales: 7653,
+        menu: [
+            { id: 401, name: '生椰拿铁', price: 18, image: '☕' },
+            { id: 402, name: '美式咖啡', price: 12, image: '☕' },
+            { id: 403, name: '拿铁', price: 15, image: '☕' },
+            { id: 404, name: '摩卡', price: 18, image: '☕' },
+            { id: 405, name: '生酪拿铁', price: 20, image: '☕' },
+            { id: 406, name: '椰云拿铁', price: 19, image: '☕' },
+            { id: 407, name: '抹茶拿铁', price: 16, image: '🍵' }
+        ]
+    },
+    {
+        id: 5,
+        name: '必胜客',
+        description: '披萨意面 | 聚餐之选',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%23D4202C%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2245%22 font-size=%2232%22 text-anchor=%22middle%22 fill=%22%23fff%22%3E🍕%3C/text%3E%3Ctext x=%2250%22 y=%2278%22 font-size=%2212%22 text-anchor=%22middle%22 fill=%22%23fff%22 font-weight=%22bold%22%3EPizza Hut%3C/text%3E%3C/svg%3E',
+        sales: 3421,
+        menu: [
+            { id: 501, name: '超级至尊披萨（9寸）', price: 68, image: '🍕' },
+            { id: 502, name: '铁盘牛肉披萨（9寸）', price: 58, image: '🍕' },
+            { id: 503, name: '奶油蘑菇汤', price: 18, image: '🍲' },
+            { id: 504, name: '意式肉酱面', price: 32, image: '🍝' },
+            { id: 505, name: '烤鸡翅（6块）', price: 28, image: '🍗' },
+            { id: 506, name: '芝士蛋糕', price: 22, image: '🍰' }
+        ]
+    },
+    {
+        id: 6,
+        name: '海底捞外送',
+        description: '火锅食材 | 在家吃火锅',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%23C8102E%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2245%22 font-size=%2228%22 text-anchor=%22middle%22 fill=%22%23fff%22%3E🍲%3C/text%3E%3Ctext x=%2250%22 y=%2278%22 font-size=%2216%22 text-anchor=%22middle%22 fill=%22%23fff%22 font-weight=%22bold%22%3E海底捞%3C/text%3E%3C/svg%3E',
+        sales: 2876,
+        menu: [
+            { id: 601, name: '番茄锅底', price: 38, image: '🍅' },
+            { id: 602, name: '麻辣锅底', price: 42, image: '🌶️' },
+            { id: 603, name: '肥牛卷', price: 36, image: '🥩' },
+            { id: 604, name: '虾滑', price: 28, image: '🦐' },
+            { id: 605, name: '毛肚', price: 32, image: '🥓' },
+            { id: 606, name: '土豆片', price: 12, image: '🥔' },
+            { id: 607, name: '豆腐', price: 10, image: '🫘' }
+        ]
+    },
+    {
+        id: 7,
+        name: '沙县小吃',
+        description: '蒸饺拌面 | 实惠管饱',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%23FF6B00%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2245%22 font-size=%2228%22 text-anchor=%22middle%22 fill=%22%23fff%22%3E🥟%3C/text%3E%3Ctext x=%2250%22 y=%2278%22 font-size=%2216%22 text-anchor=%22middle%22 fill=%22%23fff%22 font-weight=%22bold%22%3E沙县%3C/text%3E%3C/svg%3E',
+        sales: 6543,
+        menu: [
+            { id: 701, name: '蒸饺（一笼）', price: 6, image: '🥟' },
+            { id: 702, name: '拌面', price: 7, image: '🍜' },
+            { id: 703, name: '炖罐汤', price: 8, image: '🍲' },
+            { id: 704, name: '扁食（馄饨）', price: 7, image: '🥟' },
+            { id: 705, name: '卤蛋', price: 2, image: '🥚' },
+            { id: 706, name: '青菜', price: 5, image: '🥬' },
+            { id: 707, name: '卤鸡腿', price: 8, image: '🍗' }
+        ]
+    },
+    {
+        id: 8,
+        name: '兰州拉面',
+        description: '手工拉面 | 清真美食',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%2300875A%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2245%22 font-size=%2228%22 text-anchor=%22middle%22 fill=%22%23fff%22%3E🍜%3C/text%3E%3Ctext x=%2250%22 y=%2278%22 font-size=%2216%22 text-anchor=%22middle%22 fill=%22%23fff%22 font-weight=%22bold%22%3E拉面%3C/text%3E%3C/svg%3E',
+        sales: 4321,
+        menu: [
+            { id: 801, name: '牛肉面', price: 15, image: '🍜' },
+            { id: 802, name: '牛肉拌面', price: 16, image: '🍝' },
+            { id: 803, name: '鸡蛋面', price: 10, image: '🍜' },
+            { id: 804, name: '牛肉盖浇饭', price: 18, image: '🍛' },
+            { id: 805, name: '凉皮', price: 8, image: '🥗' },
+            { id: 806, name: '烤羊肉串（5串）', price: 15, image: '🍢' }
+        ]
+    },
+    {
+        id: 9,
+        name: '星巴克',
+        description: '咖啡甜品 | 品质之选',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%2300704A%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2248%22 font-size=%2230%22 text-anchor=%22middle%22 fill=%22%23fff%22%3E☕%3C/text%3E%3Ctext x=%2250%22 y=%2278%22 font-size=%2211%22 text-anchor=%22middle%22 fill=%22%23fff%22 font-weight=%22bold%22%3ESTARBUCKS%3C/text%3E%3C/svg%3E',
+        sales: 5678,
+        menu: [
+            { id: 901, name: '焦糖玛奇朵（大杯）', price: 38, image: '☕' },
+            { id: 902, name: '抹茶星冰乐（大杯）', price: 39, image: '🍵' },
+            { id: 903, name: '美式（大杯）', price: 28, image: '☕' },
+            { id: 904, name: '拿铁（大杯）', price: 33, image: '☕' },
+            { id: 905, name: '蔓越莓司康', price: 18, image: '🧁' },
+            { id: 906, name: '巧克力蛋糕', price: 32, image: '🍰' }
+        ]
+    },
+    {
+        id: 10,
+        name: '喜茶',
+        description: '新式茶饮 | 真茶真果',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%23000000%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2245%22 font-size=%2228%22 text-anchor=%22middle%22 fill=%22%23fff%22%3E🧋%3C/text%3E%3Ctext x=%2250%22 y=%2278%22 font-size=%2216%22 text-anchor=%22middle%22 fill=%22%23fff%22 font-weight=%22bold%22%3EHEYTEA%3C/text%3E%3C/svg%3E',
+        sales: 6234,
+        menu: [
+            { id: 1001, name: '多肉葡萄', price: 25, image: '🍇' },
+            { id: 1002, name: '芝芝芒芒', price: 28, image: '🥭' },
+            { id: 1003, name: '烤黑糖波波牛乳', price: 22, image: '🧋' },
+            { id: 1004, name: '纯绿妍茶后', price: 15, image: '🍵' },
+            { id: 1005, name: '芝芝莓莓', price: 26, image: '🍓' },
+            { id: 1006, name: '多肉芒芒甘露', price: 27, image: '🥭' }
+        ]
+    },
+    {
+        id: 11,
+        name: '华莱士',
+        description: '炸鸡汉堡 | 平价西式',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%23FF4500%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2245%22 font-size=%2228%22 text-anchor=%22middle%22 fill=%22%23fff%22%3E🍔%3C/text%3E%3Ctext x=%2250%22 y=%2278%22 font-size=%2214%22 text-anchor=%22middle%22 fill=%22%23fff%22 font-weight=%22bold%22%3E华莱士%3C/text%3E%3C/svg%3E',
+        sales: 3987,
+        menu: [
+            { id: 1101, name: '香辣鸡腿堡', price: 10, image: '🍔' },
+            { id: 1102, name: '劲辣鸡翅（4个）', price: 12, image: '🍗' },
+            { id: 1103, name: '薯条', price: 6, image: '🍟' },
+            { id: 1104, name: '可乐', price: 4, image: '🥤' },
+            { id: 1105, name: '蛋挞（2个）', price: 6, image: '🥧' },
+            { id: 1106, name: '全家桶', price: 39, image: '🪣' }
+        ]
+    },
+    {
+        id: 12,
+        name: '杨国福麻辣烫',
+        description: '麻辣烫 | 按斤称重',
+        avatar: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22%23CC0000%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2245%22 font-size=%2228%22 text-anchor=%22middle%22 fill=%22%23fff%22%3E🌶️%3C/text%3E%3Ctext x=%2250%22 y=%2278%22 font-size=%2214%22 text-anchor=%22middle%22 fill=%22%23fff%22 font-weight=%22bold%22%3E杨国福%3C/text%3E%3C/svg%3E',
+        sales: 5123,
+        menu: [
+            { id: 1201, name: '麻辣烫（小份）', price: 18, image: '🍲' },
+            { id: 1202, name: '麻辣烫（大份）', price: 28, image: '🍲' },
+            { id: 1203, name: '肥牛卷加料', price: 8, image: '🥩' },
+            { id: 1204, name: '鱼丸加料', price: 5, image: '🐟' },
+            { id: 1205, name: '宽粉加料', price: 4, image: '🍜' },
+            { id: 1206, name: '豆皮加料', price: 3, image: '🫘' },
+            { id: 1207, name: '米饭', price: 2, image: '🍚' }
+        ]
     }
 ];
+
+// 用户自定义店铺（从Dexie加载）
+let customStores = [];
+
+// 获取所有店铺（默认 + 自定义）
+function getAllEmeiStores() {
+    return [...defaultStores, ...customStores];
+}
+
+// 从Dexie加载用户自定义店铺
+async function loadCustomStores() {
+    try {
+        const saved = await db.dexiData.get('emei_custom_stores');
+        if (saved && saved.value) {
+            customStores = JSON.parse(saved.value);
+            console.log(`[饿美了] 加载了 ${customStores.length} 个自定义店铺`);
+        }
+    } catch (e) {
+        console.error('[饿美了] 加载自定义店铺失败:', e);
+    }
+}
+
+// 保存自定义店铺到Dexie
+async function saveCustomStores() {
+    try {
+        await db.dexiData.put({ key: 'emei_custom_stores', value: JSON.stringify(customStores) });
+        console.log(`[饿美了] 保存了 ${customStores.length} 个自定义店铺`);
+    } catch (e) {
+        console.error('[饿美了] 保存自定义店铺失败:', e);
+    }
+}
+
+// 显示添加店铺弹窗
+function showAddStoreModal() {
+    // 生成唯一ID
+    const newId = Date.now();
+    
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'add-store-modal';
+    overlay.style.display = 'flex';
+    overlay.innerHTML = `
+        <div class="modal-box" style="max-height: 85vh; overflow-y: auto; max-width: 380px;">
+            <div style="font-size: 17px; font-weight: 600; text-align: center; margin-bottom: 20px;">添加自定义店铺</div>
+            
+            <div style="margin-bottom: 14px;">
+                <div style="font-size: 12px; color: #999; margin-bottom: 6px;">店铺名称 *</div>
+                <input type="text" id="add-store-name" placeholder="如：小明炒饭" style="width: 100%; padding: 10px 14px; border: 1px solid #e5e5e5; border-radius: 10px; font-size: 14px; outline: none; box-sizing: border-box;">
+            </div>
+            
+            <div style="margin-bottom: 14px;">
+                <div style="font-size: 12px; color: #999; margin-bottom: 6px;">店铺描述</div>
+                <input type="text" id="add-store-desc" placeholder="如：家常炒菜 | 好吃不贵" style="width: 100%; padding: 10px 14px; border: 1px solid #e5e5e5; border-radius: 10px; font-size: 14px; outline: none; box-sizing: border-box;">
+            </div>
+            
+            <div style="margin-bottom: 14px;">
+                <div style="font-size: 12px; color: #999; margin-bottom: 6px;">店铺图标 (emoji)</div>
+                <input type="text" id="add-store-emoji" placeholder="如：🍳" value="🍽️" style="width: 100%; padding: 10px 14px; border: 1px solid #e5e5e5; border-radius: 10px; font-size: 14px; outline: none; box-sizing: border-box;">
+            </div>
+            
+            <div style="margin-bottom: 14px;">
+                <div style="font-size: 12px; color: #999; margin-bottom: 6px;">主题色</div>
+                <input type="color" id="add-store-color" value="#FF6B9D" style="width: 100%; height: 40px; border: 1px solid #e5e5e5; border-radius: 10px; cursor: pointer; padding: 2px;">
+            </div>
+            
+            <div style="margin-bottom: 14px;">
+                <div style="font-size: 12px; color: #999; margin-bottom: 8px;">菜单项（每行一个，格式：菜名 价格 emoji）</div>
+                <textarea id="add-store-menu" placeholder="如：&#10;蛋炒饭 12 🍳&#10;番茄蛋汤 8 🍅&#10;红烧肉 22 🥩&#10;可乐 5 🥤" style="width: 100%; min-height: 140px; padding: 10px 14px; border: 1px solid #e5e5e5; border-radius: 10px; font-size: 13px; outline: none; resize: vertical; box-sizing: border-box; line-height: 1.8;"></textarea>
+            </div>
+            
+            <div style="display: flex; gap: 10px; margin-top: 16px;">
+                <button onclick="closeAddStoreModal()" style="flex: 1; padding: 12px; background: #f5f5f5; border: none; border-radius: 10px; font-size: 14px; color: #666; cursor: pointer;">取消</button>
+                <button onclick="confirmAddStore()" style="flex: 1; padding: 12px; background: linear-gradient(135deg, #ff6b9d 0%, #ff8fab 100%); border: none; border-radius: 10px; font-size: 14px; color: #fff; font-weight: 600; cursor: pointer; box-shadow: 0 4px 12px rgba(255,107,157,0.3);">添加</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+}
+
+// 关闭添加店铺弹窗
+function closeAddStoreModal() {
+    const modal = document.getElementById('add-store-modal');
+    if (modal) modal.remove();
+}
+
+// 确认添加店铺
+async function confirmAddStore() {
+    const name = document.getElementById('add-store-name')?.value?.trim();
+    const desc = document.getElementById('add-store-desc')?.value?.trim() || '自定义店铺';
+    const emoji = document.getElementById('add-store-emoji')?.value?.trim() || '🍽️';
+    const color = document.getElementById('add-store-color')?.value || '#FF6B9D';
+    const menuText = document.getElementById('add-store-menu')?.value?.trim() || '';
+    
+    if (!name) {
+        showToast('❌ 请输入店铺名称');
+        return;
+    }
+    
+    // 解析菜单
+    const menuItems = [];
+    const baseId = Date.now();
+    if (menuText) {
+        const lines = menuText.split('\n').filter(l => l.trim());
+        lines.forEach((line, idx) => {
+            const parts = line.trim().split(/\s+/);
+            if (parts.length >= 2) {
+                const itemName = parts[0];
+                const price = parseFloat(parts[1]) || 10;
+                const itemEmoji = parts[2] || '🍽️';
+                menuItems.push({ id: baseId + idx, name: itemName, price: price, image: itemEmoji });
+            } else if (parts.length === 1) {
+                menuItems.push({ id: baseId + idx, name: parts[0], price: 10, image: '🍽️' });
+            }
+        });
+    }
+    
+    if (menuItems.length === 0) {
+        // 没有菜单就给一个默认项
+        menuItems.push({ id: baseId, name: '招牌菜', price: 15, image: emoji });
+    }
+    
+    // 将颜色转为hex编码用于SVG
+    const colorEncoded = encodeURIComponent(color);
+    const nameShort = name.length > 3 ? name.substring(0, 3) : name;
+    const nameEncoded = encodeURIComponent(nameShort);
+    const emojiEncoded = encodeURIComponent(emoji);
+    
+    const newStore = {
+        id: baseId,
+        name: name,
+        description: desc,
+        avatar: `data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Crect fill=%22${colorEncoded}%22 width=%22100%22 height=%22100%22 rx=%2212%22/%3E%3Ctext x=%2250%22 y=%2245%22 font-size=%2228%22 text-anchor=%22middle%22 fill=%22%23fff%22%3E${emojiEncoded}%3C/text%3E%3Ctext x=%2250%22 y=%2278%22 font-size=%2214%22 text-anchor=%22middle%22 fill=%22%23fff%22 font-weight=%22bold%22%3E${nameEncoded}%3C/text%3E%3C/svg%3E`,
+        sales: Math.floor(Math.random() * 3000) + 500,
+        menu: menuItems,
+        isCustom: true // 标记为用户自定义
+    };
+    
+    customStores.push(newStore);
+    await saveCustomStores();
+    
+    closeAddStoreModal();
+    renderStoreList();
+    showToast('✅ 店铺添加成功');
+}
+
+// 删除自定义店铺
+async function deleteCustomStore(storeId) {
+    if (!confirm('确定要删除这个店铺吗？')) return;
+    
+    customStores = customStores.filter(s => s.id !== storeId);
+    await saveCustomStores();
+    renderStoreList();
+    showToast('✅ 店铺已删除');
+}
+
+// 编辑自定义店铺菜单（添加菜品）
+function showAddMenuItemModal(storeId) {
+    const store = customStores.find(s => s.id === storeId);
+    if (!store) return;
+    
+    const itemName = prompt('菜品名称：');
+    if (!itemName) return;
+    
+    const itemPrice = parseFloat(prompt('价格（元）：') || '10');
+    const itemEmoji = prompt('图标emoji（可选）：') || '🍽️';
+    
+    store.menu.push({
+        id: Date.now(),
+        name: itemName,
+        price: itemPrice,
+        image: itemEmoji
+    });
+    
+    saveCustomStores();
+    
+    // 如果当前正在查看这个店铺，刷新菜单
+    if (emeiData.currentStore && emeiData.currentStore.id === storeId) {
+        emeiData.currentStore = store;
+        renderEmeiMenu();
+    }
+    
+    showToast('✅ 菜品已添加');
+}
+
+// 删除自定义店铺的菜品
+async function deleteCustomMenuItem(storeId, itemId) {
+    const store = customStores.find(s => s.id === storeId);
+    if (!store) return;
+    
+    store.menu = store.menu.filter(m => m.id !== itemId);
+    await saveCustomStores();
+    
+    // 如果当前正在查看这个店铺，刷新菜单
+    if (emeiData.currentStore && emeiData.currentStore.id === storeId) {
+        emeiData.currentStore = store;
+        renderEmeiMenu();
+    }
+    showToast('✅ 菜品已删除');
+}
 
 // 显示饿美了页面
 async function showEmeiPage() {
@@ -39303,6 +39657,9 @@ async function showEmeiPage() {
         page.style.display = 'flex';
         page.offsetHeight;
         page.classList.add('active');
+        
+        // 加载自定义店铺
+        await loadCustomStores();
         
         // 检查是否需要重置每日领取次数
         resetDailyCouponCount();
@@ -39427,27 +39784,39 @@ function renderStoreList() {
     const container = document.getElementById('emei-store-list');
     if (!container) return;
     
-    container.innerHTML = defaultStores.map(store => `
-        <div onclick="openEmeiStore(${store.id})" style="background: #fff; border-radius: 16px; padding: 16px; margin-bottom: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.04); cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 16px rgba(0,0,0,0.08)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 12px rgba(0,0,0,0.04)'">
+    const allStores = getAllEmeiStores();
+    
+    container.innerHTML = allStores.map(store => {
+        const rating = store.isCustom ? (4 + Math.random() * 0.9).toFixed(1) : '4.8';
+        const deleteBtn = store.isCustom ? `<div onclick="event.stopPropagation(); deleteCustomStore(${store.id})" style="position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; background: rgba(0,0,0,0.04); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; color: #ccc; cursor: pointer;" onmouseover="this.style.color='#ff6b6b'; this.style.background='rgba(255,0,0,0.06)'" onmouseout="this.style.color='#ccc'; this.style.background='rgba(0,0,0,0.04)'">✕</div>` : '';
+        const customTag = store.isCustom ? `<span style="font-size: 10px; padding: 2px 6px; background: #fff0f5; color: var(--ins-pink); border-radius: 4px; margin-left: 6px;">自定义</span>` : '';
+        
+        return `
+        <div onclick="openEmeiStore(${store.id})" style="position: relative; background: #fff; border-radius: 16px; padding: 16px; margin-bottom: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.04); cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 16px rgba(0,0,0,0.08)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 12px rgba(0,0,0,0.04)'">
+            ${deleteBtn}
             <div style="display: flex; gap: 12px;">
                 <div style="width: 80px; height: 80px; border-radius: 12px; background-image: url(${store.avatar}); background-size: cover; background-color: #f5f5f5; flex-shrink: 0;"></div>
                 <div style="flex: 1;">
-                    <div style="font-size: 16px; font-weight: 600; color: #333; margin-bottom: 4px;">${store.name}</div>
+                    <div style="font-size: 16px; font-weight: 600; color: #333; margin-bottom: 4px;">${store.name}${customTag}</div>
                     <div style="font-size: 12px; color: #999; margin-bottom: 8px;">${store.description}</div>
                     <div style="display: flex; gap: 12px; font-size: 11px; color: #666;">
-                        <span>⭐ 4.8</span>
+                        <span>⭐ ${rating}</span>
                         <span>月售 ${store.sales}+</span>
                     </div>
                 </div>
             </div>
-        </div>
-    `).join('');
+        </div>`;
+    }).join('') + `
+    <div onclick="showAddStoreModal()" style="background: #fafafa; border: 2px dashed #e0e0e0; border-radius: 16px; padding: 24px; margin-bottom: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.2s;" onmouseover="this.style.borderColor='var(--ins-pink)'; this.style.background='#fff5f7'" onmouseout="this.style.borderColor='#e0e0e0'; this.style.background='#fafafa'">
+        <svg width="20" height="20" fill="none" stroke="var(--ins-pink)" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        <span style="font-size: 14px; color: #999; font-weight: 500;">添加自定义店铺</span>
+    </div>`;
 }
 
 
 // 打开店铺详情
 async function openEmeiStore(storeId) {
-    const store = defaultStores.find(s => s.id === storeId);
+    const store = getAllEmeiStores().find(s => s.id === storeId);
     if (!store) return;
     
     emeiData.currentStore = store;
@@ -39491,12 +39860,15 @@ function renderEmeiMenu() {
     const container = document.getElementById('emei-menu-list');
     if (!container || !emeiData.currentStore) return;
     
-    container.innerHTML = emeiData.currentStore.menu.map(item => `
+    const store = emeiData.currentStore;
+    const isCustom = store.isCustom;
+    
+    container.innerHTML = store.menu.map(item => `
         <div style="display: flex; align-items: center; justify-content: space-between; padding: 16px; background: #fff; border-radius: 12px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.04);">
             <div style="display: flex; align-items: center; gap: 12px; flex: 1;">
                 <div style="width: 60px; height: 60px; background: linear-gradient(135deg, #fff5f7 0%, #ffeef2 100%); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 32px;">${item.image}</div>
                 <div style="flex: 1;">
-                    <div style="font-size: 14px; font-weight: 500; color: #333; margin-bottom: 4px;">${item.name}</div>
+                    <div style="font-size: 14px; font-weight: 500; color: #333; margin-bottom: 4px;">${item.name}${isCustom ? `<span onclick="event.stopPropagation(); deleteCustomMenuItem(${store.id}, ${item.id})" style="margin-left: 6px; font-size: 11px; color: #ccc; cursor: pointer;" title="删除菜品">✕</span>` : ''}</div>
                     <div style="font-size: 16px; font-weight: 600; color: var(--ins-pink);">¥${item.price}</div>
                 </div>
             </div>
@@ -39506,7 +39878,11 @@ function renderEmeiMenu() {
                 <div onclick="increaseEmeiItem(${item.id})" style="width: 28px; height: 28px; background: var(--ins-pink); border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 18px; color: #fff;">+</div>
             </div>
         </div>
-    `).join('');
+    `).join('') + (isCustom ? `
+    <div onclick="showAddMenuItemModal(${store.id})" style="background: #fafafa; border: 2px dashed #e0e0e0; border-radius: 12px; padding: 16px; margin-bottom: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; transition: all 0.2s;" onmouseover="this.style.borderColor='var(--ins-pink)'; this.style.background='#fff5f7'" onmouseout="this.style.borderColor='#e0e0e0'; this.style.background='#fafafa'">
+        <svg width="16" height="16" fill="none" stroke="var(--ins-pink)" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        <span style="font-size: 13px; color: #999;">添加菜品</span>
+    </div>` : '');
 }
 
 // 渲染收货人选项
