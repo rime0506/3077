@@ -1646,6 +1646,44 @@
         .btn-secondary { background: #f2f2f7; color: #666; }
         .btn-primary { background: var(--ins-pink); color: #fff; }
 
+        /* 总结页面 z-index 需高于聊天详情页(210) */
+        #chat-summaries-page.wechat-page {
+            z-index: 220;
+        }
+        #summary-detail-page.wechat-page {
+            z-index: 230;
+        }
+
+        /* 自定义CSS编辑器 */
+        .custom-css-editor {
+            width: 100%;
+            min-height: 200px;
+            max-height: 400px;
+            padding: 14px;
+            font-family: 'Courier New', 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #333;
+            background: #fafafa;
+            border: 1.5px solid #eee;
+            border-radius: 10px;
+            resize: vertical;
+            outline: none;
+            box-sizing: border-box;
+            tab-size: 4;
+            white-space: pre;
+            overflow-x: auto;
+            transition: border-color 0.2s;
+        }
+        .custom-css-editor:focus {
+            border-color: var(--ins-pink);
+            background: #fff;
+        }
+        .custom-css-editor::placeholder {
+            color: #ccc;
+            font-size: 12px;
+        }
+
         /* 聊天详情页样式 */
         .chat-detail-page {
             position: fixed;
@@ -9773,13 +9811,16 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 20px;
-    background: rgba(255,255,255,0.9);
+    padding: 10px 20px;
+    padding-top: 44px;
+    min-height: 88px;
+    background: rgba(255,255,255,0.95);
     backdrop-filter: blur(10px);
     border-bottom: 1px solid rgba(0,0,0,0.05);
     position: sticky;
     top: 0;
     z-index: 10;
+    box-sizing: border-box;
 }
 .icity-select-back {
     width: 40px;
@@ -9937,8 +9978,11 @@
 }
 
 .icity-app-page .top-bar {
-    background-color: #fff;
-    padding: 15px 10px;
+    background-color: rgba(255,255,255,0.95);
+    backdrop-filter: blur(10px);
+    padding: 10px 10px;
+    padding-top: 44px;
+    min-height: 88px;
     border-bottom: 1px solid #eee;
     display: flex;
     align-items: center;
@@ -9946,6 +9990,7 @@
     top: 0;
     z-index: 90;
     width: 100%;
+    box-sizing: border-box;
 }
 
 .icity-app-page .back-btn {

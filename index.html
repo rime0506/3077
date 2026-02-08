@@ -365,6 +365,27 @@
                 <div class="custom-item-arrow" style="color: #e57373;">↺</div>
             </div>
         </div>
+
+        <!-- 折叠项9：自定义全局CSS -->
+        <div class="custom-item" onclick="toggleExpand('expand9')">
+            <div class="custom-item-text">自定义CSS样式</div>
+            <div class="custom-item-arrow" id="arrow9">→</div>
+        </div>
+        <div class="custom-expand" id="expand9">
+            <div class="custom-edit-tip">输入自定义CSS代码，将覆盖默认样式</div>
+            <textarea class="custom-css-editor" id="custom-css-input" placeholder="/* 在此输入自定义CSS */&#10;&#10;例如:&#10;.top-widget {&#10;    background: rgba(255,200,200,0.5);&#10;}&#10;&#10;.app-icon .name {&#10;    color: #ff6b9d !important;&#10;}" spellcheck="false"></textarea>
+            <div style="display:flex; gap:8px; margin-top:8px;">
+                <div class="custom-item" onclick="applyCustomCSS()" style="flex:1; background:#FFF7FA; justify-content:center;">
+                    <div class="custom-item-text" style="text-align:center;">👁 预览效果</div>
+                </div>
+                <div class="custom-item" onclick="clearCustomCSS()" style="flex:1; background:#fff0f0; justify-content:center;">
+                    <div class="custom-item-text" style="color:#e57373; text-align:center;">↺ 清空CSS</div>
+                </div>
+            </div>
+            <div class="custom-edit-tip" style="margin-top:8px; font-size:11px; color:#bbb; line-height:1.5;">
+                💡 提示：CSS代码会在保存设置后持久生效。可用浏览器F12查看元素类名。
+            </div>
+        </div>
     </div>
 
     <!-- 系统设置页面 -->
