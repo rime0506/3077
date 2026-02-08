@@ -10342,11 +10342,14 @@
 }
 
 .icity-app-page .publish-top {
-    padding: 15px 10px;
+    padding: 10px 10px;
+    padding-top: 44px;
+    min-height: 88px;
     display: flex;
     align-items: center;
     gap: 10px;
     border-bottom: 1px solid #eee;
+    box-sizing: border-box;
 }
 
 .icity-app-page .publish-avatar {
