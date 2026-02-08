@@ -6690,11 +6690,16 @@
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    background: #ffffff;
-    border-bottom: 1px solid rgba(0,0,0,0.1);
+    padding-top: 44px; /* 往下移动，避让状态栏 */
+    min-height: 88px; /* 和微信页面高度一致 */
+    background: rgba(255,255,255,0.9);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(0,0,0,0.05);
     position: sticky;
     top: 0;
     z-index: 10;
+    box-sizing: border-box;
 }
 
 .phone-back-btn {

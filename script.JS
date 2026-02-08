@@ -2221,14 +2221,16 @@ async function migratePhoneAndSmsToIndexedDB() {
             // 方案：只 put 更新这些 UI 相关的 key，不使用 clear
             
             // 存储应用图标
-            const iconIds = ['setting','notes','remind','facetime','photo','camera'];
+            const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
             iconIds.forEach(id => {
-                saveData[`icon${id.charAt(0).toUpperCase() + id.slice(1)}`] = document.getElementById(`icon-${id}`).querySelector('.icon').style.backgroundImage.replace(/url\(|\)|"/g, '');
+                const el = document.getElementById(`icon-${id}`)?.querySelector('.icon');
+                if (el) saveData[`icon${id.charAt(0).toUpperCase() + id.slice(1)}`] = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
             });
             // 存储Dock图标
-            const dockIds = ['setting','custom','message','music'];
+            const dockIds = ['setting','custom','message','phone'];
             dockIds.forEach(id => {
-                saveData[`dock${id.charAt(0).toUpperCase() + id.slice(1)}`] = document.getElementById(`dock-${id}`).querySelector('.icon').style.backgroundImage.replace(/url\(|\)|"/g, '');
+                const el = document.getElementById(`dock-${id}`)?.querySelector('.icon');
+                if (el) saveData[`dock${id.charAt(0).toUpperCase() + id.slice(1)}`] = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
             });
 
             // 保存椭圆形颜色
@@ -22583,16 +22585,18 @@ function showLorebookPage() {
             // 恢复倒数日
             if (dataMap.daysText) document.getElementById('days-text').innerText = dataMap.daysText;
             // 恢复应用图标
-            const iconIds = ['setting','notes','remind','facetime','photo','camera'];
+            const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
             iconIds.forEach(id => {
                 const key = `icon${id.charAt(0).toUpperCase() + id.slice(1)}`;
-                if (dataMap[key]) document.getElementById(`icon-${id}`).querySelector('.icon').style.backgroundImage = `url(${dataMap[key]})`;
+                const el = document.getElementById(`icon-${id}`)?.querySelector('.icon');
+                if (dataMap[key] && el) el.style.backgroundImage = `url(${dataMap[key]})`;
             });
             // 恢复Dock图标
-            const dockIds = ['setting','custom','message','music'];
+            const dockIds = ['setting','custom','message','phone'];
             dockIds.forEach(id => {
                 const key = `dock${id.charAt(0).toUpperCase() + id.slice(1)}`;
-                if (dataMap[key]) document.getElementById(`dock-${id}`).querySelector('.icon').style.backgroundImage = `url(${dataMap[key]})`;
+                const el = document.getElementById(`dock-${id}`)?.querySelector('.icon');
+                if (dataMap[key] && el) el.style.backgroundImage = `url(${dataMap[key]})`;
             });
             
         // 恢复椭圆形颜色
