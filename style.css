@@ -343,29 +343,36 @@
         }
 
         /* 个性化设置 - 纯折叠展开式 核心样式 */
-        .custom-page {
-            width: 100vw;
-            height: 100vh;
-            background: #ffffff;
-            padding: 100px 24px 20px;
-            display: none;
-            flex-direction: column;
-            gap: 10px;
-            position: relative;
-            overflow-y: auto;
-        }
-        .custom-page-header {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-end; /* 内容靠下 */
-            padding: 50px 24px 16px; /* 加高顶栏 */
-            background: #fff;
-            z-index: 99;
-        }
+    .custom-page {
+    width: 100vw;
+    height: 100vh;
+    background: #ffffff;
+
+    /* ⭐ 核心：整体内容往下，避开 iOS 状态栏 + 顶栏 */
+    padding: 120px 24px 20px;
+
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    position: relative;
+    overflow-y: auto;
+}
+  .custom-page-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+
+    /* ⭐ 顶栏整体再往下 */
+    padding: 64px 24px 16px;
+
+    background: #fff;
+    z-index: 99;
+}
         .custom-page-title {
             font-size: 20px;
             color: #666;
