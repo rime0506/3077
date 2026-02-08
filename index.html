@@ -1691,7 +1691,7 @@
                 <svg class="svg-icon" viewBox="0 0 24 24" style="width:28px; height:28px;"><polyline points="15 18 9 12 15 6"></polyline></svg>
             </div>
             <div class="wechat-title">世界书</div>
-            <div class="wechat-add" onclick="document.getElementById('lorebook-import').click()" style="width:40px; text-align:right; font-size:16px; color:#666;">导入</div>
+            <div class="wechat-add" onclick="requestImportLorebook()" style="width:40px; text-align:right; font-size:16px; color:#666;">导入</div>
         </div>
         
         <div class="wechat-content" id="lorebook-content" style="display:block; padding:16px;">
@@ -1707,7 +1707,7 @@
         </div>
         
         <!-- 隐藏的导入 Input -->
-        <input type="file" id="lorebook-import" style="display:none;" accept=".json" onchange="importLorebookFile(this)">
+        <input type="file" id="lorebook-import" style="display:none;" accept=".json,.txt" onchange="importLorebookFile(this)">
     </div>
 
     <!-- 聊天详情页 -->
@@ -3206,8 +3206,8 @@
     <!-- 头像库页面 -->
     <div class="wechat-page" id="avatar-library-page" style="background:#fff; display:none; z-index:205; flex-direction:column;">
         <!-- 顶部导航 -->
-        <div style="position:sticky; top:0; z-index:10; background:#fff;">
-            <div style="display:flex; align-items:center; padding:14px 20px 10px;">
+        <div style="position:sticky; top:0; z-index:10; background:rgba(255,255,255,0.95); backdrop-filter:blur(10px);">
+            <div style="display:flex; align-items:center; padding:10px 20px; padding-top:44px; min-height:88px; box-sizing:border-box;">
                 <div onclick="hideAvatarLibraryPage()" style="cursor:pointer; padding:4px;">
                     <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:none; stroke:#262626; stroke-width:1.8;"><polyline points="15 18 9 12 15 6"></polyline></svg>
                 </div>

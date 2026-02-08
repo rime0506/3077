@@ -343,36 +343,29 @@
         }
 
         /* 个性化设置 - 纯折叠展开式 核心样式 */
-    .custom-page {
-    width: 100vw;
-    height: 100vh;
-    background: #ffffff;
-
-    /* ⭐ 核心：整体内容往下，避开 iOS 状态栏 + 顶栏 */
-    padding: 120px 24px 20px;
-
-    display: none;
-    flex-direction: column;
-    gap: 10px;
-    position: relative;
-    overflow-y: auto;
-}
-  .custom-page-header {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-
-    /* ⭐ 顶栏整体再往下 */
-    padding: 64px 24px 16px;
-
-    background: #fff;
-    z-index: 99;
-}
+        .custom-page {
+            width: 100vw;
+            height: 100vh;
+            background: #ffffff;
+            padding: 100px 24px 20px;
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+            position: relative;
+            overflow-y: auto;
+        }
+        .custom-page-header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end; /* 内容靠下 */
+            padding: 50px 24px 16px; /* 加高顶栏 */
+            background: #fff;
+            z-index: 99;
+        }
         .custom-page-title {
             font-size: 20px;
             color: #666;
@@ -6071,6 +6064,44 @@
     background-position: center;
     cursor: zoom-in;
     min-height: 80px;
+}
+
+/* 文字图片卡片样式 */
+.moment-image-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    margin-top: 8px;
+    background: #f8f9fa;
+    border-radius: 8px;
+    max-width: 280px;
+}
+.moment-image-card-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.moment-image-card-info {
+    flex: 1;
+    min-width: 0;
+}
+.moment-image-card-desc {
+    font-size: 13px;
+    color: #333;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.moment-image-card-count {
+    font-size: 11px;
+    color: #999;
+    margin-top: 2px;
 }
 
 /* 底部信息栏 */
