@@ -325,6 +325,22 @@
             <div class="custom-edit-tip" style="margin-top: 16px;">头像气泡背景色</div>
             <input type="color" class="custom-edit-input" id="bubble-color-input" value="#FFF7FA" style="height: 50px; cursor: pointer;">
 
+            <!-- 子项：桌面文字颜色 -->
+            <div class="custom-sub-title" style="margin-top: 16px;">桌面文字颜色</div>
+            <div class="custom-edit-tip">图标名称、小组件标题等桌面文字的颜色</div>
+            <input type="color" class="custom-edit-input" id="desktop-text-color-input" value="#999999" style="height: 50px; cursor: pointer;" oninput="applyDesktopTextColor(this.value)">
+            <div style="display:flex; gap:8px; margin-top:8px;">
+                <div class="custom-item" onclick="applyDesktopTextColor('#999999'); document.getElementById('desktop-text-color-input').value='#999999';" style="flex:1; background:#f5f5f5; justify-content:center;">
+                    <div class="custom-item-text" style="text-align:center; color:#999;">默认灰 #999</div>
+                </div>
+                <div class="custom-item" onclick="applyDesktopTextColor('#ffffff'); document.getElementById('desktop-text-color-input').value='#ffffff';" style="flex:1; background:#333; justify-content:center;">
+                    <div class="custom-item-text" style="text-align:center; color:#fff;">白色 #FFF</div>
+                </div>
+                <div class="custom-item" onclick="applyDesktopTextColor('#333333'); document.getElementById('desktop-text-color-input').value='#333333';" style="flex:1; background:#f5f5f5; justify-content:center;">
+                    <div class="custom-item-text" style="text-align:center; color:#333;">深色 #333</div>
+                </div>
+            </div>
+
         </div>
 
         <!-- 折叠项2：全局字体设置 -->
@@ -344,9 +360,13 @@
             <div class="font-preview-box" id="font-preview-box">
                 <div class="font-preview-text" id="font-preview-text">这是字体预览效果 ABC 123</div>
             </div>
-            <div class="custom-item" onclick="clearCustomFont()" style="margin-top: 8px; background: #fff0f0;">
-                <div class="custom-item-text" style="color: #e57373;">恢复默认字体</div>
-                <div class="custom-item-arrow" style="color: #e57373;">↺</div>
+            <div style="display:flex; gap:8px; margin-top: 8px;">
+                <div class="custom-item" onclick="saveAndApplyFont()" style="flex:1; background:#e8f5e9; justify-content:center;">
+                    <div class="custom-item-text" style="text-align:center; color:#43a047;">💾 保存并应用</div>
+                </div>
+                <div class="custom-item" onclick="clearCustomFont()" style="flex:1; background: #fff0f0; justify-content:center;">
+                    <div class="custom-item-text" style="color: #e57373; text-align:center;">↺ 恢复默认</div>
+                </div>
             </div>
         </div>
 
@@ -1758,6 +1778,15 @@
                         <div style="font-size:12px; color:#999;" id="detail-char-realname">原名: ???</div>
                     </div>
                 </div>
+                <div class="detail-item">
+                    <div style="display:flex; flex-direction:column; gap:2px;">
+                        <div>输入框文案</div>
+                        <div style="font-size:11px; color:#999;">自定义聊天输入框的占位文字</div>
+                    </div>
+                    <div style="flex:1; display:flex; justify-content:flex-end;">
+                        <input type="text" id="detail-input-placeholder" placeholder="发送消息..." onchange="saveChatDetail()" style="border:none; background:transparent; text-align:right; font-size:14px; color:#333; outline:none; width:auto; max-width:180px;">
+                    </div>
+                </div>
             </div>
             
             <!-- 档案关联 -->
@@ -2072,6 +2101,22 @@
                     <div style="display:flex; gap:10px;">
                         <button onclick="previewCustomStyle()" style="flex:1; padding:10px; background:var(--ins-pink); color:white; border:none; border-radius:8px; font-size:13px; cursor:pointer;">预览效果</button>
                         <button onclick="clearCustomStyle()" style="flex:1; padding:10px; background:#f0f0f0; color:#666; border:none; border-radius:8px; font-size:13px; cursor:pointer;">清除样式</button>
+                    </div>
+                    
+                    <!-- 分割线 -->
+                    <div style="height:1px; background:#e0e0e0; margin:16px 0;"></div>
+                    
+                    <!-- 样式预设 -->
+                    <div>
+                        <div style="font-size:14px; font-weight:500; margin-bottom:8px; color:#333;">💾 样式预设</div>
+                        <div style="font-size:12px; color:#999; margin-bottom:12px;">保存当前样式为预设，方便一键切换或给其他角色使用</div>
+                        <div style="display:flex; gap:10px; margin-bottom:12px;">
+                            <button onclick="saveChatStylePreset()" style="flex:1; padding:10px; background:#007aff; color:white; border:none; border-radius:8px; font-size:13px; cursor:pointer; font-weight:500;">💾 保存为预设</button>
+                            <button onclick="loadChatStylePreset()" style="flex:1; padding:10px; background:#34c759; color:white; border:none; border-radius:8px; font-size:13px; cursor:pointer; font-weight:500;">📂 加载预设</button>
+                        </div>
+                        <div id="chat-style-preset-list" style="display:none;">
+                            <!-- 动态生成预设列表 -->
+                        </div>
                     </div>
                 </div>
             </div>
@@ -3276,6 +3321,14 @@
 
         <!-- 头像内容区 -->
         <div id="avatar-library-content" style="overflow-y:auto; flex:1; background:#fff;">
+            <!-- 动态生成 -->
+        </div>
+
+        <!-- 批量删除底部操作栏 -->
+        <div id="avatar-batch-bar" style="display:none; position:sticky; bottom:0; left:0; right:0; z-index:20;
+            background:rgba(255,255,255,0.96); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+            border-top:1px solid #efefef; padding:10px 8px; padding-bottom:calc(10px + env(safe-area-inset-bottom));
+            align-items:center; justify-content:space-between;">
             <!-- 动态生成 -->
         </div>
 

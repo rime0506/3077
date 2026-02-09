@@ -1688,44 +1688,52 @@ async function migratePhoneAndSmsToIndexedDB() {
             customFontStyleElement = document.createElement('style');
             customFontStyleElement.id = 'custom-font-global';
             customFontStyleElement.textContent = `
-                body,
-                .custom-item-text,
-                .custom-edit-tip,
-                .custom-edit-input,
-                .custom-sub-title,
-                .setting-title,
-                .setting-item,
-                .app-icon .name,
-                .dock-icon .name,
-                .top-widget .text .title,
-                .top-widget .text .subtext,
-                .circle-photo .name,
-                .circle-photo .bubble,
-                .days-capsule .capsule,
-                .chat-bubble,
-                .msg-text,
-                .wechat-title,
-                .wechat-item .wechat-info .wechat-name,
-                .wechat-item .wechat-info .wechat-msg,
-                .modal-title,
-                .modal-input,
-                textarea,
-                input[type="text"],
-                button,
-                .save-btn,
-                .back-btn,
-                .detail-item,
-                .moment-content,
-                .moment-author-name,
-                .moment-comment-text {
+                /* 全局覆盖：应用自定义字体到所有文本元素 */
+                * {
                     font-family: "${fontName}", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+                }
+                /* 保持等宽字体不受影响 */
+                code, pre, .monospace,
+                #json-preview-content,
+                #summary-detail-content-edit {
+                    font-family: "${fontName}", 'Courier New', 'Consolas', 'Monaco', monospace !important;
+                }
+                /* 日历特殊字体保持 */
+                .current-date-btn,
+                .sel-year-item,
+                .time-input {
+                    font-family: "${fontName}", 'Playfair Display', serif !important;
                 }
             `;
             document.head.appendChild(customFontStyleElement);
         }
         
+        // 保存并应用自定义字体（立即生效+持久化）
+        async function saveAndApplyFont() {
+            const fontUrl = document.getElementById('custom-font-input').value.trim();
+            const fontName = document.getElementById('custom-font-name-input').value.trim();
+            
+            if (!fontUrl || !fontName) {
+                showToast('请先填写字体链接和字体名称');
+                return;
+            }
+            
+            // 应用字体
+            loadCustomFont(fontUrl, fontName, false);
+            
+            // 持久化到数据库
+            try {
+                await db.dexiData.put({ key: 'customFontUrl', value: fontUrl });
+                await db.dexiData.put({ key: 'customFontName', value: fontName });
+                showToast('✅ 字体已保存并应用');
+            } catch (e) {
+                console.error('[Font] 保存字体失败:', e);
+                showToast('⚠️ 字体已应用但保存失败');
+            }
+        }
+
         // 清除自定义字体，恢复默认
-        function clearCustomFont() {
+        async function clearCustomFont() {
             // 清除输入框
             document.getElementById('custom-font-input').value = '';
             document.getElementById('custom-font-name-input').value = '';
@@ -1748,7 +1756,43 @@ async function migratePhoneAndSmsToIndexedDB() {
             previewText.style.fontFamily = '';
             previewText.innerText = '这是字体预览效果 ABC 123';
             
+            // 清除数据库中的字体设置
+            try {
+                await db.dexiData.put({ key: 'customFontUrl', value: '' });
+                await db.dexiData.put({ key: 'customFontName', value: '' });
+            } catch (e) {
+                console.error('[Font] 清除字体设置失败:', e);
+            }
+            
             showToast('✅ 已恢复默认字体');
+        }
+        
+        // 桌面文字颜色相关
+        let desktopTextColorStyleElement = null;
+        
+        function applyDesktopTextColor(color) {
+            if (!color) return;
+            
+            // 移除旧样式
+            if (desktopTextColorStyleElement) {
+                desktopTextColorStyleElement.remove();
+            }
+            
+            // 创建新的样式覆盖
+            desktopTextColorStyleElement = document.createElement('style');
+            desktopTextColorStyleElement.id = 'desktop-text-color-style';
+            desktopTextColorStyleElement.textContent = `
+                .app-icon .name,
+                .dock-icon .name,
+                .top-widget .text .title,
+                .top-widget .text .subtext,
+                .circle-photo .name,
+                .circle-photo .bubble,
+                .days-capsule .capsule {
+                    color: ${color} !important;
+                }
+            `;
+            document.head.appendChild(desktopTextColorStyleElement);
         }
 
         // 同步预览区和输入框
@@ -1782,6 +1826,15 @@ async function migratePhoneAndSmsToIndexedDB() {
             document.getElementById('heart-color-input').value = heartColor;
             document.getElementById('capsule-color-input').value = capsuleColor;
             document.getElementById('bubble-color-input').value = bubbleColor;
+            // 桌面文字颜色同步
+            const dtcEl = document.getElementById('desktop-text-color-input');
+            if (dtcEl) {
+                // 从已有的样式中读取当前颜色，或保留输入框当前值
+                const existingStyle = document.getElementById('desktop-text-color-style');
+                if (!existingStyle && dtcEl.value === '#999999') {
+                    // 默认值，不做任何事
+                }
+            }
             // 同步应用/Dock图标预览
             document.querySelectorAll('.icon-select-item[data-icon-id]').forEach(item => {
                 const iconId = item.getAttribute('data-icon-id');
@@ -2662,6 +2715,10 @@ async function migratePhoneAndSmsToIndexedDB() {
                 saveData.capsuleColor = capsuleColor;
                 saveData.bubbleColor = bubbleColor;
 
+                // 保存桌面文字颜色
+                const desktopTextColor = document.getElementById('desktop-text-color-input')?.value || '#999999';
+                saveData.desktopTextColor = desktopTextColor;
+
                 // 保存自定义字体
                 const customFontUrl = document.getElementById('custom-font-input')?.value?.trim() || '';
                 const customFontName = document.getElementById('custom-font-name-input')?.value?.trim() || '';
@@ -2698,6 +2755,11 @@ async function migratePhoneAndSmsToIndexedDB() {
                 document.documentElement.style.setProperty('--heart-color', heartColor);
                 document.documentElement.style.setProperty('--capsule-bg', capsuleColor);
                 document.documentElement.style.setProperty('--bubble-bg', bubbleColor);
+
+                // 应用桌面文字颜色
+                if (desktopTextColor && desktopTextColor !== '#999999') {
+                    applyDesktopTextColor(desktopTextColor);
+                }
 
                 // 应用自定义字体到全局
                 if (customFontUrl && customFontName) {
@@ -2754,6 +2816,8 @@ async function migratePhoneAndSmsToIndexedDB() {
                 theme.heartColor = getComputedStyle(document.documentElement).getPropertyValue('--heart-color').trim() || '';
                 theme.capsuleColor = getComputedStyle(document.documentElement).getPropertyValue('--capsule-bg').trim() || '';
                 theme.bubbleColor = getComputedStyle(document.documentElement).getPropertyValue('--bubble-bg').trim() || '';
+                // 桌面文字颜色
+                theme.desktopTextColor = document.getElementById('desktop-text-color-input')?.value || '#999999';
                 // 字体
                 theme.customFontUrl = document.getElementById('custom-font-input')?.value?.trim() || '';
                 theme.customFontName = document.getElementById('custom-font-name-input')?.value?.trim() || '';
@@ -2900,6 +2964,12 @@ async function migratePhoneAndSmsToIndexedDB() {
                     document.documentElement.style.setProperty('--bubble-bg', theme.bubbleColor);
                     const bci = document.getElementById('bubble-color-input');
                     if (bci) bci.value = theme.bubbleColor;
+                }
+                // 桌面文字颜色
+                if (theme.desktopTextColor) {
+                    applyDesktopTextColor(theme.desktopTextColor);
+                    const dtci = document.getElementById('desktop-text-color-input');
+                    if (dtci) dtci.value = theme.desktopTextColor;
                 }
                 // 字体
                 if (theme.customFontUrl && theme.customFontName) {
@@ -13101,6 +13171,12 @@ ${chatContext || '（没有聊天记录）'}
                 });
             }
             
+            // 应用自定义输入框文案
+            const chatInputBox = document.getElementById('chat-input-box');
+            if (chatInputBox) {
+                chatInputBox.placeholder = char.input_placeholder || '发送消息...';
+            }
+            
             renderChatBody(char);
             
             // 低电量提醒检查（读取真实设备电量）
@@ -13232,6 +13308,7 @@ ${chatContext || '（没有聊天记录）'}
             
             // 1. 回显基本信息
             document.getElementById('detail-char-remark').value = char.remark || '';
+            document.getElementById('detail-input-placeholder').value = char.input_placeholder || '';
             document.getElementById('detail-char-realname').innerText = `原名: ${char.name}`;
             // 回显网名（优先用自定义网名，否则用角色名）
             document.getElementById('detail-char-nickname').innerText = char.wx_nickname || char.name || '未设置';
@@ -13421,6 +13498,9 @@ async function saveChatDetail() {
     const replyMinCount = parseInt(document.getElementById('detail-reply-min-count').value);
     const replyMaxCount = parseInt(document.getElementById('detail-reply-max-count').value);
     
+    // 输入框文案设置
+    const inputPlaceholder = document.getElementById('detail-input-placeholder').value.trim();
+    
     // 外语翻译模式设置
     const foreignLangMode = document.getElementById('detail-foreign-lang-switch').checked;
     
@@ -13453,6 +13533,7 @@ async function saveChatDetail() {
     char.context_message_count = contextCount > 0 ? contextCount : 20; // 默认20条
     char.reply_min_count = (replyMinCount > 0 && replyMinCount <= 50) ? replyMinCount : 1; // 默认1条
     char.reply_max_count = (replyMaxCount > 0 && replyMaxCount <= 50) ? replyMaxCount : 3; // 默认3条
+    char.input_placeholder = inputPlaceholder || ''; // 保存自定义输入框文案
     char.foreign_lang_mode = foreignLangMode; // 保存外语翻译模式开关
     char.allow_ai_check_account = allowCheckEnabled; // 保存查岗开关状态
     char.allow_shura_mode = allowShuraEnabled; // 保存修罗场模式开关状态
@@ -13478,6 +13559,12 @@ async function saveChatDetail() {
     
     // 实时更新聊天标题
     document.getElementById('chat-title').innerText = char.remark || char.wx_nickname || char.name;
+    
+    // 实时更新输入框文案
+    const chatInputBox = document.getElementById('chat-input-box');
+    if (chatInputBox) {
+        chatInputBox.placeholder = char.input_placeholder || '发送消息...';
+    }
     
     // 如果当前正在查看这个聊天，立即应用样式
     if (currentChatCharId === char.id) {
@@ -13867,6 +13954,171 @@ window.unmountUser = unmountUser;
             removeCustomStyles();
             
             alert('自定义样式已清除！');
+        }
+
+        // ========== 聊天样式预设功能 ==========
+        
+        // 保存当前样式为预设
+        async function saveChatStylePreset() {
+            const bubbleStyle = document.querySelector('.bubble-style-option.selected');
+            const bubbleCSS = document.getElementById('detail-bubble-css').value.trim();
+            const customHTML = document.getElementById('detail-custom-html').value.trim();
+            const customCSS = document.getElementById('detail-custom-css').value.trim();
+            
+            if (!bubbleCSS && !customHTML && !customCSS && (!bubbleStyle || bubbleStyle.dataset.style === 'default')) {
+                showToast('当前没有自定义样式可保存');
+                return;
+            }
+            
+            const presetName = prompt('请输入预设名称：');
+            if (!presetName || !presetName.trim()) return;
+            
+            try {
+                // 读取已有预设列表
+                const existing = await db.dexiData.get('chatStylePresets');
+                const presets = existing ? existing.value : [];
+                
+                // 检查是否重名
+                if (presets.find(p => p.name === presetName.trim())) {
+                    if (!confirm(`预设"${presetName.trim()}"已存在，是否覆盖？`)) return;
+                    // 覆盖：移除旧的
+                    const idx = presets.findIndex(p => p.name === presetName.trim());
+                    if (idx !== -1) presets.splice(idx, 1);
+                }
+                
+                presets.push({
+                    name: presetName.trim(),
+                    bubble_style: bubbleStyle ? bubbleStyle.dataset.style : 'default',
+                    custom_bubble_css: bubbleCSS,
+                    custom_html: customHTML,
+                    custom_css: customCSS,
+                    time: Date.now()
+                });
+                
+                await db.dexiData.put({ key: 'chatStylePresets', value: presets });
+                showToast(`样式预设"${presetName.trim()}"已保存！`);
+            } catch (e) {
+                console.error('[聊天样式] 保存预设失败:', e);
+                showToast('保存预设失败');
+            }
+        }
+        
+        // 加载预设列表
+        async function loadChatStylePreset() {
+            try {
+                const existing = await db.dexiData.get('chatStylePresets');
+                const presets = existing ? existing.value : [];
+                
+                if (presets.length === 0) {
+                    showToast('暂无保存的样式预设');
+                    return;
+                }
+                
+                const listEl = document.getElementById('chat-style-preset-list');
+                if (!listEl) return;
+                
+                // 切换显示/隐藏
+                if (listEl.style.display !== 'none' && listEl.innerHTML !== '') {
+                    listEl.style.display = 'none';
+                    return;
+                }
+                
+                let html = '';
+                for (let i = 0; i < presets.length; i++) {
+                    const p = presets[i];
+                    const timeStr = p.time ? new Date(p.time).toLocaleDateString() : '';
+                    const hasCSS = p.custom_bubble_css ? '气泡CSS' : '';
+                    const hasHTML = p.custom_html ? '自定义HTML' : '';
+                    const hasCSSContainer = p.custom_css ? '容器CSS' : '';
+                    const tags = [p.bubble_style !== 'default' ? `样式:${p.bubble_style}` : '', hasCSS, hasHTML, hasCSSContainer].filter(Boolean).join(' · ');
+                    
+                    html += `
+                        <div style="display:flex; align-items:center; padding:10px 12px; background:#fff; border:1px solid #e8e8e8; border-radius:10px; margin-bottom:8px;">
+                            <div style="flex:1; min-width:0;">
+                                <div style="font-size:13px; font-weight:500; color:#333; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${p.name}</div>
+                                <div style="font-size:10px; color:#aaa; margin-top:3px;">${tags || '默认样式'} ${timeStr ? '· ' + timeStr : ''}</div>
+                            </div>
+                            <div style="display:flex; gap:6px; flex-shrink:0; margin-left:8px;">
+                                <div onclick="applyChatStylePreset(${i})" style="padding:5px 12px; font-size:11px; background:#007aff; color:#fff; border-radius:6px; cursor:pointer; font-weight:500;">应用</div>
+                                <div onclick="deleteChatStylePreset(${i})" style="padding:5px 10px; font-size:11px; background:#f5f5f5; color:#ff3b30; border-radius:6px; cursor:pointer;">删除</div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                listEl.innerHTML = html;
+                listEl.style.display = 'block';
+            } catch (e) {
+                console.error('[聊天样式] 加载预设失败:', e);
+                showToast('加载预设失败');
+            }
+        }
+        
+        // 应用指定预设
+        async function applyChatStylePreset(index) {
+            try {
+                const existing = await db.dexiData.get('chatStylePresets');
+                const presets = existing ? existing.value : [];
+                if (index < 0 || index >= presets.length) return;
+                
+                const p = presets[index];
+                
+                // 回填到表单
+                document.getElementById('detail-bubble-css').value = p.custom_bubble_css || '';
+                document.getElementById('detail-custom-html').value = p.custom_html || '';
+                document.getElementById('detail-custom-css').value = p.custom_css || '';
+                
+                // 选中气泡样式
+                const style = p.bubble_style || 'default';
+                document.querySelectorAll('.bubble-style-option').forEach(el => {
+                    el.classList.remove('selected');
+                    if (el.dataset.style === style) {
+                        el.classList.add('selected');
+                    }
+                });
+                
+                // 保存到角色
+                await saveChatDetail();
+                
+                showToast(`已应用预设"${p.name}"`);
+                
+                // 隐藏预设列表
+                const listEl = document.getElementById('chat-style-preset-list');
+                if (listEl) listEl.style.display = 'none';
+            } catch (e) {
+                console.error('[聊天样式] 应用预设失败:', e);
+                showToast('应用预设失败');
+            }
+        }
+        
+        // 删除指定预设
+        async function deleteChatStylePreset(index) {
+            try {
+                const existing = await db.dexiData.get('chatStylePresets');
+                const presets = existing ? existing.value : [];
+                if (index < 0 || index >= presets.length) return;
+                
+                const name = presets[index].name;
+                if (!confirm(`确定要删除预设"${name}"吗？`)) return;
+                
+                presets.splice(index, 1);
+                await db.dexiData.put({ key: 'chatStylePresets', value: presets });
+                
+                showToast(`已删除预设"${name}"`);
+                
+                // 刷新列表（先隐藏再重新显示，避免toggle逻辑）
+                const listEl = document.getElementById('chat-style-preset-list');
+                if (listEl) {
+                    listEl.style.display = 'none';
+                    listEl.innerHTML = '';
+                }
+                if (presets.length > 0) {
+                    loadChatStylePreset();
+                }
+            } catch (e) {
+                console.error('[聊天样式] 删除预设失败:', e);
+                showToast('删除预设失败');
+            }
         }
 
         // 应用自定义样式到聊天界面
@@ -24386,6 +24638,13 @@ function showLorebookPage() {
             if (bcInput) bcInput.value = dataMap.bubbleColor;
         }
         
+        // 恢复桌面文字颜色
+        if (dataMap.desktopTextColor && dataMap.desktopTextColor !== '#999999') {
+            applyDesktopTextColor(dataMap.desktopTextColor);
+            const dtcInput = document.getElementById('desktop-text-color-input');
+            if (dtcInput) dtcInput.value = dataMap.desktopTextColor;
+        }
+        
         // 恢复自定义字体
         if (dataMap.customFontUrl && dataMap.customFontName) {
             // 填充输入框
@@ -26694,15 +26953,26 @@ async function buyScratchCard() {
 function generateScratchPrize() {
     const rand = Math.random();
     
-    // 概率分布：
-    // 80% - 中奖 (¥5-¥10)
-    // 20% - 未中奖 (¥0)
+    // 概率分布（每张¥10）：
+    // 5%  - 未中奖 ¥0（亏¥10）
+    // 60% - 回本区 ¥8~¥12（基本不赚不亏）
+    // 25% - 小赚区 ¥15~¥30（小赚）
+    // 7%  - 中奖区 ¥50~¥100（中等奖）
+    // 2.5% - 大奖区 ¥200~¥500（大奖）
+    // 0.5% - 头奖 ¥1000（头奖）
     
-    if (rand < 0.8) {
-        // 80%概率中奖，金额在5~10元之间
-        return Math.floor(Math.random() * 6) + 5; // ¥5-¥10
+    if (rand < 0.05) {
+        return 0; // 5% 未中奖（亏钱）
+    } else if (rand < 0.65) {
+        return Math.floor(Math.random() * 5) + 8; // 60% 回本区 ¥8~¥12
+    } else if (rand < 0.90) {
+        return Math.floor(Math.random() * 16) + 15; // 25% 小赚 ¥15~¥30
+    } else if (rand < 0.97) {
+        return Math.floor(Math.random() * 51) + 50; // 7% 中等奖 ¥50~¥100
+    } else if (rand < 0.995) {
+        return Math.floor(Math.random() * 301) + 200; // 2.5% 大奖 ¥200~¥500
     } else {
-        return 0; // 20%概率未中奖
+        return 1000; // 0.5% 头奖 ¥1000
     }
 }
 
@@ -40849,6 +41119,8 @@ let avatarLibraryCurrentTag = ''; // 当前选中的小标签名（空=全部）
 let avatarPreviewCurrentId = null; // 当前预览的头像ID
 let couplePairingMode = false; // 情头配对模式
 let couplePairingFirst = null; // 配对模式下选中的第一张头像ID
+let avatarBatchDeleteMode = false; // 批量删除模式
+let avatarBatchSelected = new Set(); // 批量选中的头像ID集合
 
 // 打开头像库页面
 async function showAvatarLibraryPage() {
@@ -40866,6 +41138,8 @@ async function showAvatarLibraryPage() {
 function hideAvatarLibraryPage() {
     const page = document.getElementById('avatar-library-page');
     if (page) page.style.display = 'none';
+    avatarBatchDeleteMode = false;
+    avatarBatchSelected.clear();
 }
 
 // 切换主分类（单人头像 / 情头）
@@ -40874,9 +41148,12 @@ async function switchAvatarTab(tab) {
     avatarLibraryCurrentTag = ''; // 切换主Tab时重置子标签
     couplePairingMode = false; // 重置配对模式
     couplePairingFirst = null;
+    avatarBatchDeleteMode = false; // 重置批量删除模式
+    avatarBatchSelected.clear();
     updateMainTabUI();
     await loadSubTags();
     renderAvatarLibrary();
+    updateBatchDeleteBar();
 }
 
 // 更新主Tab的UI高亮
@@ -41141,10 +41418,17 @@ async function renderAvatarLibrary() {
         // 配对操作栏
         html += `<div style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px;">
             <div style="font-size:12px; color:#999;">${Object.keys(paired).length} 对情头 · ${unpaired.length} 张未配对</div>
-            <div onclick="toggleCouplePairingMode()" style="padding:5px 14px; font-size:12px; border-radius:14px; cursor:pointer;
-                background:${couplePairingMode ? '#ff6b81' : '#f5f5f5'}; color:${couplePairingMode ? '#fff' : '#666'}; 
-                font-weight:500; transition:all 0.2s;">
-                ${couplePairingMode ? '完成配对' : '配对'}
+            <div style="display:flex; gap:8px;">
+                <div onclick="toggleAvatarBatchDelete()" style="padding:5px 14px; font-size:12px; border-radius:14px; cursor:pointer;
+                    background:${avatarBatchDeleteMode ? '#ff3b30' : '#f5f5f5'}; color:${avatarBatchDeleteMode ? '#fff' : '#666'}; 
+                    font-weight:500; transition:all 0.2s;">
+                    ${avatarBatchDeleteMode ? '取消' : '批量删除'}
+                </div>
+                <div onclick="toggleCouplePairingMode()" style="padding:5px 14px; font-size:12px; border-radius:14px; cursor:pointer;
+                    background:${couplePairingMode ? '#ff6b81' : '#f5f5f5'}; color:${couplePairingMode ? '#fff' : '#666'}; 
+                    font-weight:500; transition:all 0.2s;">
+                    ${couplePairingMode ? '完成配对' : '配对'}
+                </div>
             </div>
         </div>`;
         
@@ -41155,33 +41439,54 @@ async function renderAvatarLibrary() {
             </div>`;
         }
         
-        // 已配对的情头
+        // 批量删除模式提示
+        if (avatarBatchDeleteMode) {
+            html += `<div style="text-align:center; padding:6px 16px 12px; font-size:12px; color:#ff3b30;">
+                点击头像选择要删除的图片
+            </div>`;
+        }
+        
+        // 已配对的情头 - 两对一行
         const pairIds = Object.keys(paired);
         if (pairIds.length > 0) {
+            html += `<div style="display:flex; flex-wrap:wrap; padding:4px 8px;">`;
             for (const pid of pairIds) {
                 const pair = paired[pid];
                 const av1 = pair[0];
                 const av2 = pair[1];
                 if (!av1) continue;
+                const isBatch1 = avatarBatchDeleteMode && avatarBatchSelected.has(av1.id);
+                const isBatch2 = av2 && avatarBatchDeleteMode && avatarBatchSelected.has(av2.id);
+                const clickAction1 = avatarBatchDeleteMode ? `toggleBatchSelect(${av1.id})` : `showAvatarPreview(${av1.id})`;
+                const clickAction2 = av2 ? (avatarBatchDeleteMode ? `toggleBatchSelect(${av2.id})` : `showAvatarPreview(${av2.id})`) : '';
                 html += `
-                    <div style="display:flex; align-items:center; justify-content:center; gap:0; padding:18px 16px; border-bottom:0.5px solid #f0f0f0;">
-                        <div onclick="showAvatarPreview(${av1.id})" style="width:110px; height:110px; border-radius:16px; overflow:hidden; cursor:pointer; border:1px solid #f0f0f0;">
-                            <img src="${av1.url}" style="width:100%; height:100%; object-fit:cover; display:block;" onerror="this.parentElement.style.background='#fafafa';">
+                    <div style="width:50%; box-sizing:border-box; padding:6px 4px;">
+                        <div style="display:flex; align-items:center; justify-content:center; gap:0;">
+                            <div onclick="${clickAction1}" style="width:60px; height:60px; border-radius:12px; overflow:hidden; cursor:pointer; border:1px solid #f0f0f0; position:relative; flex-shrink:0;">
+                                <img src="${av1.url}" style="width:100%; height:100%; object-fit:cover; display:block; ${isBatch1 ? 'opacity:0.5;' : ''}" onerror="this.parentElement.style.background='#fafafa';">
+                                ${isBatch1 ? `<div style="position:absolute; top:2px; right:2px; width:18px; height:18px; border-radius:50%; background:#ff3b30; display:flex; align-items:center; justify-content:center;">
+                                    <svg viewBox="0 0 24 24" style="width:12px; height:12px; fill:none; stroke:#fff; stroke-width:3;"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                </div>` : ''}
+                            </div>
+                            <div style="display:flex; flex-direction:column; align-items:center; padding:0 4px; flex-shrink:0;">
+                                <svg viewBox="0 0 24 24" style="width:12px; height:12px; fill:#ff6b81; stroke:none;">
+                                    <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+                                </svg>
+                                ${!avatarBatchDeleteMode ? `<div onclick="unpairCouple('${pid}')" style="margin-top:3px; font-size:9px; color:#ccc; cursor:pointer;">拆开</div>` : ''}
+                            </div>
+                            ${av2 ? `
+                            <div onclick="${clickAction2}" style="width:60px; height:60px; border-radius:12px; overflow:hidden; cursor:pointer; border:1px solid #f0f0f0; position:relative; flex-shrink:0;">
+                                <img src="${av2.url}" style="width:100%; height:100%; object-fit:cover; display:block; ${isBatch2 ? 'opacity:0.5;' : ''}" onerror="this.parentElement.style.background='#fafafa';">
+                                ${isBatch2 ? `<div style="position:absolute; top:2px; right:2px; width:18px; height:18px; border-radius:50%; background:#ff3b30; display:flex; align-items:center; justify-content:center;">
+                                    <svg viewBox="0 0 24 24" style="width:12px; height:12px; fill:none; stroke:#fff; stroke-width:3;"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                </div>` : ''}
+                            </div>
+                            ` : '<div style="width:60px; height:60px; flex-shrink:0;"></div>'}
                         </div>
-                        <div style="display:flex; flex-direction:column; align-items:center; padding:0 10px;">
-                            <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:#ff6b81; stroke:none;">
-                                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
-                            </svg>
-                            <div onclick="unpairCouple('${pid}')" style="margin-top:6px; font-size:10px; color:#ccc; cursor:pointer;">拆开</div>
-                        </div>
-                        ${av2 ? `
-                        <div onclick="showAvatarPreview(${av2.id})" style="width:110px; height:110px; border-radius:16px; overflow:hidden; cursor:pointer; border:1px solid #f0f0f0;">
-                            <img src="${av2.url}" style="width:100%; height:100%; object-fit:cover; display:block;" onerror="this.parentElement.style.background='#fafafa';">
-                        </div>
-                        ` : ''}
                     </div>
                 `;
             }
+            html += `</div>`;
         }
         
         // 未配对的头像（网格展示）
@@ -41191,16 +41496,28 @@ async function renderAvatarLibrary() {
             }
             const gridItems = unpaired.map(av => {
                 const isSelected = couplePairingMode && couplePairingFirst === av.id;
+                const isBatchSel = avatarBatchDeleteMode && avatarBatchSelected.has(av.id);
+                let clickAction;
+                if (avatarBatchDeleteMode) {
+                    clickAction = `toggleBatchSelect(${av.id})`;
+                } else if (couplePairingMode) {
+                    clickAction = `selectCoupleAvatar(${av.id})`;
+                } else {
+                    clickAction = `showAvatarPreview(${av.id})`;
+                }
                 return `
-                    <div onclick="${couplePairingMode ? `selectCoupleAvatar(${av.id})` : `showAvatarPreview(${av.id})`}" 
+                    <div onclick="${clickAction}" 
                          style="aspect-ratio:1; overflow:hidden; cursor:pointer; position:relative; 
                          ${isSelected ? 'outline:3px solid #ff6b81; outline-offset:-3px; border-radius:4px;' : ''}">
                         <img src="${av.url}" style="width:100%; height:100%; object-fit:cover; display:block; 
-                             ${isSelected ? 'opacity:0.7;' : 'transition:opacity 0.2s;'}" 
+                             ${isSelected || isBatchSel ? 'opacity:0.5;' : 'transition:opacity 0.2s;'}" 
                              onerror="this.style.display='none'; this.parentElement.style.background='#fafafa';">
                         ${isSelected ? `<div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); 
                             width:28px; height:28px; border-radius:50%; background:#ff6b81; display:flex; align-items:center; justify-content:center;">
                             <span style="color:#fff; font-size:14px;">1</span>
+                        </div>` : ''}
+                        ${isBatchSel ? `<div style="position:absolute; top:4px; right:4px; width:20px; height:20px; border-radius:50%; background:#ff3b30; display:flex; align-items:center; justify-content:center;">
+                            <svg viewBox="0 0 24 24" style="width:12px; height:12px; fill:none; stroke:#fff; stroke-width:3;"><polyline points="20 6 9 17 4 12"></polyline></svg>
                         </div>` : ''}
                     </div>
                 `;
@@ -41208,18 +41525,47 @@ async function renderAvatarLibrary() {
             html += `<div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:1.5px;">${gridItems}</div>`;
         }
         
+        // 批量模式下留出底部空间
+        if (avatarBatchDeleteMode) {
+            html += `<div style="height:60px;"></div>`;
+        }
+        
         content.innerHTML = html;
     } else {
         // 单人头像 - INS风三列网格
-        const gridHtml = avatars.map(av => `
-            <div onclick="showAvatarPreview(${av.id})" style="aspect-ratio:1; overflow:hidden; cursor:pointer;">
-                <img src="${av.url}" style="width:100%; height:100%; object-fit:cover; display:block; transition:opacity 0.2s;" 
-                     onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'" 
-                     onerror="this.style.display='none'; this.parentElement.style.background='#fafafa';">
-            </div>
-        `).join('');
+        let topBarHtml = '';
+        if (avatars.length > 0) {
+            topBarHtml = `<div style="display:flex; align-items:center; justify-content:flex-end; padding:10px 16px;">
+                <div onclick="toggleAvatarBatchDelete()" style="padding:5px 14px; font-size:12px; border-radius:14px; cursor:pointer;
+                    background:${avatarBatchDeleteMode ? '#ff3b30' : '#f5f5f5'}; color:${avatarBatchDeleteMode ? '#fff' : '#666'}; 
+                    font-weight:500; transition:all 0.2s;">
+                    ${avatarBatchDeleteMode ? '取消' : '批量删除'}
+                </div>
+            </div>`;
+            if (avatarBatchDeleteMode) {
+                topBarHtml += `<div style="text-align:center; padding:0 16px 10px; font-size:12px; color:#ff3b30;">
+                    点击头像选择要删除的图片
+                </div>`;
+            }
+        }
         
-        content.innerHTML = `<div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:1.5px;">${gridHtml}</div>`;
+        const gridHtml = avatars.map(av => {
+            const isBatchSel = avatarBatchDeleteMode && avatarBatchSelected.has(av.id);
+            const clickAction = avatarBatchDeleteMode ? `toggleBatchSelect(${av.id})` : `showAvatarPreview(${av.id})`;
+            return `
+                <div onclick="${clickAction}" style="aspect-ratio:1; overflow:hidden; cursor:pointer; position:relative;">
+                    <img src="${av.url}" style="width:100%; height:100%; object-fit:cover; display:block; transition:opacity 0.2s; ${isBatchSel ? 'opacity:0.5;' : ''}" 
+                         onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='${isBatchSel ? '0.5' : '1'}'" 
+                         onerror="this.style.display='none'; this.parentElement.style.background='#fafafa';">
+                    ${isBatchSel ? `<div style="position:absolute; top:4px; right:4px; width:20px; height:20px; border-radius:50%; background:#ff3b30; display:flex; align-items:center; justify-content:center;">
+                        <svg viewBox="0 0 24 24" style="width:12px; height:12px; fill:none; stroke:#fff; stroke-width:3;"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                    </div>` : ''}
+                </div>
+            `;
+        }).join('');
+        
+        let bottomPad = avatarBatchDeleteMode ? '<div style="height:60px;"></div>' : '';
+        content.innerHTML = topBarHtml + `<div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:1.5px;">${gridHtml}</div>` + bottomPad;
     }
 }
 
@@ -41402,10 +41748,109 @@ async function deleteAvatarFromLibrary() {
     }
 }
 
+// ========== 批量删除功能 ==========
+
+// 切换批量删除模式
+function toggleAvatarBatchDelete() {
+    avatarBatchDeleteMode = !avatarBatchDeleteMode;
+    avatarBatchSelected.clear();
+    // 退出配对模式
+    couplePairingMode = false;
+    couplePairingFirst = null;
+    renderAvatarLibrary();
+    updateBatchDeleteBar();
+}
+
+// 批量选中/取消选中头像
+function toggleBatchSelect(id) {
+    if (avatarBatchSelected.has(id)) {
+        avatarBatchSelected.delete(id);
+    } else {
+        avatarBatchSelected.add(id);
+    }
+    renderAvatarLibrary();
+    updateBatchDeleteBar();
+}
+
+// 批量全选当前分类的头像
+async function batchSelectAll() {
+    let allInCategory = await db.avatar_library
+        .where('category').equals(avatarLibraryMainTab)
+        .toArray();
+    if (avatarLibraryCurrentTag) {
+        allInCategory = allInCategory.filter(a => a.tag === avatarLibraryCurrentTag);
+    }
+    if (avatarBatchSelected.size === allInCategory.length) {
+        // 已全选，取消全选
+        avatarBatchSelected.clear();
+    } else {
+        avatarBatchSelected.clear();
+        for (const av of allInCategory) {
+            avatarBatchSelected.add(av.id);
+        }
+    }
+    renderAvatarLibrary();
+    updateBatchDeleteBar();
+}
+
+// 更新底部批量操作栏
+function updateBatchDeleteBar() {
+    const bar = document.getElementById('avatar-batch-bar');
+    if (!bar) return;
+    if (avatarBatchDeleteMode) {
+        bar.style.display = 'flex';
+        const count = avatarBatchSelected.size;
+        bar.innerHTML = `
+            <div onclick="batchSelectAll()" style="padding:8px 16px; font-size:13px; color:#007aff; cursor:pointer; font-weight:500;">
+                全选
+            </div>
+            <div style="flex:1; text-align:center; font-size:13px; color:#666;">
+                已选 <span style="color:#ff3b30; font-weight:600;">${count}</span> 张
+            </div>
+            <div onclick="executeBatchDelete()" style="padding:8px 16px; font-size:13px; color:${count > 0 ? '#ff3b30' : '#ccc'}; cursor:${count > 0 ? 'pointer' : 'default'}; font-weight:600;">
+                删除
+            </div>
+        `;
+    } else {
+        bar.style.display = 'none';
+        bar.innerHTML = '';
+    }
+}
+
+// 执行批量删除
+async function executeBatchDelete() {
+    const count = avatarBatchSelected.size;
+    if (count === 0) {
+        showToast('请先选择要删除的头像');
+        return;
+    }
+    
+    if (!confirm(`确定要删除选中的 ${count} 张头像吗？`)) return;
+    
+    try {
+        const ids = Array.from(avatarBatchSelected);
+        for (const id of ids) {
+            await db.avatar_library.delete(id);
+        }
+        avatarBatchSelected.clear();
+        avatarBatchDeleteMode = false;
+        updateBatchDeleteBar();
+        renderAvatarLibrary();
+        showToast(`已删除 ${count} 张头像`);
+    } catch (e) {
+        console.error('[头像库] 批量删除失败:', e);
+        showToast('删除失败');
+    }
+}
+
 // 切换配对模式
 function toggleCouplePairingMode() {
     couplePairingMode = !couplePairingMode;
     couplePairingFirst = null;
+    // 退出批量删除模式
+    avatarBatchDeleteMode = false;
+    avatarBatchSelected.clear();
+    updateBatchDeleteBar();
     renderAvatarLibrary();
 }
 
@@ -41820,6 +42265,10 @@ window.deleteSubTag = deleteSubTag;
 window.toggleCouplePairingMode = toggleCouplePairingMode;
 window.selectCoupleAvatar = selectCoupleAvatar;
 window.unpairCouple = unpairCouple;
+window.toggleAvatarBatchDelete = toggleAvatarBatchDelete;
+window.toggleBatchSelect = toggleBatchSelect;
+window.batchSelectAll = batchSelectAll;
+window.executeBatchDelete = executeBatchDelete;
 window.executeChangeAvatar = executeChangeAvatar;
 window.sendCoupleAvatarCard = sendCoupleAvatarCard;
 window.acceptCoupleAvatar = acceptCoupleAvatar;
