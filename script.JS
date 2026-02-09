@@ -7767,8 +7767,10 @@ ${loreContext}
                 }
                 history = char.chat_history_by_user?.[accountId] || [];
             }
-            // 按时间戳排序，确保消息顺序正确
-            return [...history].sort((a, b) => (a.time || 0) - (b.time || 0));
+            // 按时间戳排序，确保消息顺序正确（使用稳定排序：时间相同时保持原始顺序）
+            return [...history].map((m, i) => ({ _i: i, m }))
+                .sort((a, b) => (a.m.time || 0) - (b.m.time || 0) || a._i - b._i)
+                .map(x => x.m);
         }
 
         // 设置角色的聊天记录（按账号隔离）
@@ -10235,7 +10237,12 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             menu.style.left = menuX + 'px';
             menu.style.top = menuY + 'px';
             
+            // 先禁用overlay点击，防止touchend合成的click事件立刻关闭菜单
             overlay.style.display = 'block';
+            overlay.style.pointerEvents = 'none';
+            setTimeout(() => {
+                overlay.style.pointerEvents = 'auto';
+            }, 350);
         }
         
         // 群聊消息索引
@@ -17060,7 +17067,12 @@ ${groupContextStr}
             menu.style.left = menuX + 'px';
             menu.style.top = menuY + 'px';
             
+            // 先禁用overlay点击，防止touchend合成的click事件立刻关闭菜单
             overlay.style.display = 'block';
+            overlay.style.pointerEvents = 'none';
+            setTimeout(() => {
+                overlay.style.pointerEvents = 'auto';
+            }, 350);
         }
 
         function hideContextMenu() {
@@ -18622,10 +18634,14 @@ ${groupContextStr}
                 const accountId = getCurrentAccountId();
                 
                 // 🔧 添加时间戳消息到聊天记录，标记时间快进
+                // 重新从DB获取最新的char（防止checkBlockedCharactersContact期间有新消息写入）
+                char = await db.characters.get(currentChatCharId);
+                if (!char) return;
                 const history = getChatHistory(char, accountId);
-                // 🔧 修复：使用 Date.now() 而非虚拟时间，因为 getChatHistory 会按 time 排序
-                // 如果用虚拟时间（未来），排序后这条系统消息会永远排到最后面
-                const newTime = Date.now();
+                // 🔧 修复：使用最后一条消息的时间+1ms，确保系统消息紧跟在已有消息之后
+                // 不能用 Date.now()，否则和后续AI回复的 Date.now() 时间太接近，排序后位置不稳定
+                const lastMsgTime = history.length > 0 ? (history[history.length - 1].time || 0) : 0;
+                const newTime = lastMsgTime + 1; // 紧跟最后一条消息，一定排在AI回复之前
                 const timeSkipMsg = `时间过去了 ${unitText}`;
                 history.push({
                     role: 'system',
@@ -21675,15 +21691,8 @@ ${loreContext}
                     const newId = await db.characters.add(newNpc);
                     newCount++;
                     
-                    // 🎯 自动将NPC设为当前账号的好友
-                    const currentAccountId = getCurrentAccountId();
-                    if (currentAccountId) {
-                        const savedNpc = await db.characters.get(newId);
-                        if (savedNpc) {
-                            await setFriendStatus(savedNpc, currentAccountId, 'friend');
-                            console.log(`[NPC生成] ✅ ${savedNpc.name} 已自动添加为好友`);
-                        }
-                    }
+                    // NPC生成后默认为陌生人，需要用户自己添加好友
+                    console.log(`[NPC生成] ✅ ${newNpc.name} 已创建（默认陌生人，需手动添加好友）`);
 
                     // 5. 更新主角的关系列表
                     if (!sourceChar.relationships) sourceChar.relationships = [];
