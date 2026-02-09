@@ -99,7 +99,7 @@
                     <!-- 倒数日胶囊 -->
                     <div class="days-capsule" id="widget-days">
                         <div class="capsule" onclick="document.getElementById('days-input').click()">
-                            <svg class="svg-icon" style="width:14px;height:14px;vertical-align:-2px;margin-right:2px;fill:var(--ins-pink);stroke:none;" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                            <svg class="svg-icon" id="days-heart-icon" style="width:14px;height:14px;vertical-align:-2px;margin-right:2px;fill:var(--heart-color, var(--ins-pink));stroke:none;" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
                             <span id="days-text">446 days</span>
                         </div>
                     </div>
@@ -186,89 +186,82 @@
             <div class="save-btn" onclick="saveAllSetting()">保存设置</div>
         </div>
 
-        <!-- 折叠项1：更换桌面壁纸 -->
+        <!-- 折叠项1：桌面设置（合并壁纸/图标/小组件/拍立得/头像/倒数日/颜色） -->
         <div class="custom-item" onclick="toggleExpand('expand1')">
-            <div class="custom-item-text">更换桌面壁纸</div>
+            <div class="custom-item-text">桌面设置</div>
             <div class="custom-item-arrow" id="arrow1">→</div>
         </div>
         <div class="custom-expand" id="expand1">
-            <div class="custom-item" onclick="document.getElementById('wallpaper-input').click()">
+
+            <!-- 子项：壁纸 -->
+            <div class="custom-sub-title">壁纸</div>
+            <div class="custom-item" onclick="showImagePicker({onApply: applyWallpaper})">
                 <div class="custom-item-text">选择壁纸图片</div>
                 <div class="custom-item-arrow">→</div>
             </div>
             <div class="wallpaper-preview" id="wallpaper-preview">壁纸预览</div>
-        </div>
 
-        <!-- 折叠项2：自定义应用/Dock图标 -->
-        <div class="custom-item" onclick="toggleExpand('expand2')">
-            <div class="custom-item-text">自定义应用/Dock图标</div>
-            <div class="custom-item-arrow" id="arrow2">→</div>
-        </div>
-        <div class="custom-expand" id="expand2">
+            <!-- 子项：应用/Dock图标 -->
+            <div class="custom-sub-title">应用 / Dock 图标</div>
             <div class="custom-edit-tip">点击图标选择图片替换</div>
             <div class="custom-edit-tip" style="font-size:11px; color:#bbb; margin-top:-4px;">桌面应用图标</div>
             <div class="icon-select-list">
-                <div class="icon-select-item" onclick="selectIcon('appstore')">
+                <div class="icon-select-item" data-icon-id="appstore" onclick="selectIconPicker(this,'appstore')">
                     <div class="icon"></div>
                     <div class="name">App Store</div>
                 </div>
-                <div class="icon-select-item" onclick="selectIcon('notes')">
+                <div class="icon-select-item" data-icon-id="notes" onclick="selectIconPicker(this,'notes')">
                     <div class="icon"></div>
                     <div class="name">wechat</div>
                 </div>
-                <div class="icon-select-item" onclick="selectIcon('remind')">
+                <div class="icon-select-item" data-icon-id="remind" onclick="selectIconPicker(this,'remind')">
                     <div class="icon"></div>
                     <div class="name">角色档案</div>
                 </div>
-                <div class="icon-select-item" onclick="selectIcon('facetime')">
+                <div class="icon-select-item" data-icon-id="facetime" onclick="selectIconPicker(this,'facetime')">
                     <div class="icon"></div>
                     <div class="name">世界书</div>
                 </div>
-                <div class="icon-select-item" onclick="selectIcon('photo')">
+                <div class="icon-select-item" data-icon-id="photo" onclick="selectIconPicker(this,'photo')">
                     <div class="icon"></div>
                     <div class="name">网易云</div>
                 </div>
-                <div class="icon-select-item" onclick="selectIcon('xianyu')">
+                <div class="icon-select-item" data-icon-id="xianyu" onclick="selectIconPicker(this,'xianyu')">
                     <div class="icon"></div>
                     <div class="name">闲鱼</div>
                 </div>
-                <div class="icon-select-item" onclick="selectIcon('cabin')">
+                <div class="icon-select-item" data-icon-id="cabin" onclick="selectIconPicker(this,'cabin')">
                     <div class="icon"></div>
                     <div class="name">小屋</div>
                 </div>
-                <div class="icon-select-item" onclick="selectIcon('icity')">
+                <div class="icon-select-item" data-icon-id="icity" onclick="selectIconPicker(this,'icity')">
                     <div class="icon"></div>
                     <div class="name">icity</div>
                 </div>
             </div>
             <div class="custom-edit-tip" style="font-size:11px; color:#bbb; margin-top:8px;">底部Dock栏图标</div>
             <div class="icon-select-list">
-                <div class="icon-select-item" onclick="selectIcon('setting')">
+                <div class="icon-select-item" data-icon-id="setting" onclick="selectIconPicker(this,'setting')">
                     <div class="icon"></div>
                     <div class="name">设置</div>
                 </div>
-                <div class="icon-select-item" onclick="selectIcon('custom')">
+                <div class="icon-select-item" data-icon-id="custom" onclick="selectIconPicker(this,'custom')">
                     <div class="icon"></div>
                     <div class="name">个性化</div>
                 </div>
-                <div class="icon-select-item" onclick="selectIcon('message')">
+                <div class="icon-select-item" data-icon-id="message" onclick="selectIconPicker(this,'message')">
                     <div class="icon"></div>
                     <div class="name">信息</div>
                 </div>
-                <div class="icon-select-item" onclick="selectIcon('phone')">
+                <div class="icon-select-item" data-icon-id="phone" onclick="selectIconPicker(this,'phone')">
                     <div class="icon"></div>
                     <div class="name">电话</div>
                 </div>
             </div>
-        </div>
 
-        <!-- 折叠项3：修改顶部小组件 -->
-        <div class="custom-item" onclick="toggleExpand('expand3')">
-            <div class="custom-item-text">修改顶部小组件</div>
-            <div class="custom-item-arrow" id="arrow3">→</div>
-        </div>
-        <div class="custom-expand" id="expand3">
-            <div class="custom-item" onclick="document.getElementById('widget-icon-input').click()">
+            <!-- 子项：顶部小组件 -->
+            <div class="custom-sub-title">顶部小组件</div>
+            <div class="custom-item" onclick="showImagePicker({onApply: applyWidgetIcon})">
                 <div class="custom-item-text">更换小组件图标</div>
                 <div class="custom-item-arrow">→</div>
             </div>
@@ -279,19 +272,14 @@
             <div class="custom-edit-tip">修改小组件文字</div>
             <input type="text" class="custom-edit-input" id="widget-title-input" placeholder="输入主标题（如：Lovely Day）">
             <input type="text" class="custom-edit-input" id="widget-subtext-input" placeholder="输入副标题（如：平安喜乐）">
-        </div>
 
-        <!-- 折叠项4：修改拍立得图片 -->
-        <div class="custom-item" onclick="toggleExpand('expand4')">
-            <div class="custom-item-text">修改拍立得图片</div>
-            <div class="custom-item-arrow" id="arrow4">→</div>
-        </div>
-        <div class="custom-expand" id="expand4">
-            <div class="custom-item" onclick="document.getElementById('photo-left-input').click()">
+            <!-- 子项：拍立得图片 -->
+            <div class="custom-sub-title">拍立得图片</div>
+            <div class="custom-item" onclick="showImagePicker({onApply: url => applyPhoto('left', url)})">
                 <div class="custom-item-text">更换左侧拍立得</div>
                 <div class="custom-item-arrow">→</div>
             </div>
-            <div class="custom-item" onclick="document.getElementById('photo-right-input').click()">
+            <div class="custom-item" onclick="showImagePicker({onApply: url => applyPhoto('right', url)})">
                 <div class="custom-item-text">更换右侧拍立得</div>
                 <div class="custom-item-arrow">→</div>
             </div>
@@ -300,19 +288,14 @@
                 <div class="custom-preview-photo" id="photo-right-preview"></div>
                 <div>拍立得预览</div>
             </div>
-        </div>
 
-        <!-- 折叠项5：修改头像/昵称/气泡 -->
-        <div class="custom-item" onclick="toggleExpand('expand5')">
-            <div class="custom-item-text">修改头像/昵称/气泡</div>
-            <div class="custom-item-arrow" id="arrow5">→</div>
-        </div>
-        <div class="custom-expand" id="expand5">
-            <div class="custom-item" onclick="document.getElementById('avatar1-input').click()">
+            <!-- 子项：头像/昵称/气泡 -->
+            <div class="custom-sub-title">头像 / 昵称 / 气泡</div>
+            <div class="custom-item" onclick="showImagePicker({onApply: url => applyAvatar(1, url)})">
                 <div class="custom-item-text">更换头像1</div>
                 <div class="custom-item-arrow">→</div>
             </div>
-            <div class="custom-item" onclick="document.getElementById('avatar2-input').click()">
+            <div class="custom-item" onclick="showImagePicker({onApply: url => applyAvatar(2, url)})">
                 <div class="custom-item-text">更换头像2</div>
                 <div class="custom-item-arrow">→</div>
             </div>
@@ -327,36 +310,29 @@
             <div class="custom-edit-tip">头像2 气泡/昵称</div>
             <input type="text" class="custom-edit-input" id="avatar2-bubble-input" placeholder="气泡文字（如：gw..♡）">
             <input type="text" class="custom-edit-input" id="avatar2-name-input" placeholder="昵称文字">
-        </div>
 
-        <!-- 折叠项6：修改倒数日文字 -->
-        <div class="custom-item" onclick="toggleExpand('expand6')">
-            <div class="custom-item-text">修改倒数日文字</div>
-            <div class="custom-item-arrow" id="arrow6">→</div>
-        </div>
-        <div class="custom-expand" id="expand6">
+            <!-- 子项：倒数日 -->
+            <div class="custom-sub-title">倒数日文字</div>
             <div class="custom-edit-tip">输入想要显示的倒数日内容</div>
             <input type="text" class="custom-edit-input" id="days-input" placeholder="如：在一起 520 天、倒计时 100 天">
-        </div>
 
-        <!-- 折叠项7：修改椭圆形颜色 -->
-        <div class="custom-item" onclick="toggleExpand('expand7')">
-            <div class="custom-item-text">修改椭圆形颜色</div>
-            <div class="custom-item-arrow" id="arrow7">→</div>
-        </div>
-        <div class="custom-expand" id="expand7">
-            <div class="custom-edit-tip">倒数日胶囊背景色</div>
+            <!-- 子项：颜色 -->
+            <div class="custom-sub-title">椭圆形颜色</div>
+            <div class="custom-edit-tip">倒数日爱心颜色</div>
+            <input type="color" class="custom-edit-input" id="heart-color-input" value="#ffb6c1" style="height: 50px; cursor: pointer;" oninput="document.documentElement.style.setProperty('--heart-color', this.value)">
+            <div class="custom-edit-tip" style="margin-top: 16px;">倒数日胶囊背景色</div>
             <input type="color" class="custom-edit-input" id="capsule-color-input" value="#FFF7FA" style="height: 50px; cursor: pointer;">
             <div class="custom-edit-tip" style="margin-top: 16px;">头像气泡背景色</div>
             <input type="color" class="custom-edit-input" id="bubble-color-input" value="#FFF7FA" style="height: 50px; cursor: pointer;">
+
         </div>
 
-        <!-- 折叠项8：全局字体设置 -->
-        <div class="custom-item" onclick="toggleExpand('expand8')">
+        <!-- 折叠项2：全局字体设置 -->
+        <div class="custom-item" onclick="toggleExpand('expand2')">
             <div class="custom-item-text">全局字体设置</div>
-            <div class="custom-item-arrow" id="arrow8">→</div>
+            <div class="custom-item-arrow" id="arrow2">→</div>
         </div>
-        <div class="custom-expand" id="expand8">
+        <div class="custom-expand" id="expand2">
             <div class="custom-edit-tip">粘贴字体链接（支持 Google Fonts CSS 或 TTF/WOFF/WOFF2/OTF 图床直链）</div>
             <input type="text" class="custom-edit-input" id="custom-font-input" placeholder="如：https://example.com/font.ttf 或 Google Fonts 链接">
             <div class="custom-edit-tip" style="margin-top: 12px;">输入字体名称（自定义命名即可）</div>
@@ -374,12 +350,12 @@
             </div>
         </div>
 
-        <!-- 折叠项9：自定义全局CSS -->
-        <div class="custom-item" onclick="toggleExpand('expand9')">
+        <!-- 折叠项3：自定义全局CSS -->
+        <div class="custom-item" onclick="toggleExpand('expand3')">
             <div class="custom-item-text">自定义CSS样式</div>
-            <div class="custom-item-arrow" id="arrow9">→</div>
+            <div class="custom-item-arrow" id="arrow3">→</div>
         </div>
-        <div class="custom-expand" id="expand9">
+        <div class="custom-expand" id="expand3">
             <div class="custom-edit-tip">输入自定义CSS代码，将覆盖默认样式</div>
             <textarea class="custom-css-editor" id="custom-css-input" placeholder="/* 在此输入自定义CSS */&#10;&#10;例如:&#10;.top-widget {&#10;    background: rgba(255,200,200,0.5);&#10;}&#10;&#10;.app-icon .name {&#10;    color: #ff6b9d !important;&#10;}" spellcheck="false"></textarea>
             <div style="display:flex; gap:8px; margin-top:8px;">
@@ -392,6 +368,27 @@
             </div>
             <div class="custom-edit-tip" style="margin-top:8px; font-size:11px; color:#bbb; line-height:1.5;">
                 💡 提示：CSS代码会在保存设置后持久生效。可用浏览器F12查看元素类名。
+            </div>
+        </div>
+
+        <!-- 导出/导入装修包 -->
+        <div class="custom-item" onclick="toggleExpand('expand4')">
+            <div class="custom-item-text">导出 / 导入装修包</div>
+            <div class="custom-item-arrow" id="arrow4">→</div>
+        </div>
+        <div class="custom-expand" id="expand4">
+            <div class="custom-edit-tip">将当前桌面装修（壁纸、图标、颜色、字体等）导出为文件，或从文件导入恢复。</div>
+            <div style="display:flex; gap:8px;">
+                <div class="custom-item" onclick="exportDesktopTheme()" style="flex:1; background:#FFF7FA; justify-content:center;">
+                    <div class="custom-item-text" style="text-align:center;">📤 导出装修包</div>
+                </div>
+                <div class="custom-item" onclick="document.getElementById('theme-import-input').click()" style="flex:1; background:#f0f8ff; justify-content:center;">
+                    <div class="custom-item-text" style="text-align:center;">📥 导入装修包</div>
+                </div>
+            </div>
+            <input type="file" id="theme-import-input" accept=".json" style="display:none;" onchange="importDesktopTheme(this)">
+            <div class="custom-edit-tip" style="margin-top:8px; font-size:11px; color:#bbb; line-height:1.5;">
+                💡 导出文件为 JSON 格式。含图片链接的装修包体积较小，含本地上传图片（base64）的装修包体积会较大。
             </div>
         </div>
     </div>
@@ -2615,9 +2612,9 @@
             <!-- 添加角色账号区域 -->
             <div id="add-role-account-section" style="border-top:1px solid #f0f0f0; padding-top:15px; margin-top:10px;">
                 <div style="font-size:14px; color:#666; margin-bottom:10px; text-align:center;">登录角色账号查岗</div>
-                <div style="display:flex; gap:8px; margin-bottom:10px;">
-                    <input type="text" id="role-login-account" placeholder="角色账号" style="flex:1; padding:10px 12px; border:1px solid #e0e0e0; border-radius:8px; font-size:14px;">
-                    <input type="password" id="role-login-password" placeholder="密码" style="flex:1; padding:10px 12px; border:1px solid #e0e0e0; border-radius:8px; font-size:14px;">
+                <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px;">
+                    <input type="text" id="role-login-account" placeholder="角色账号" style="width:100%; padding:10px 12px; border:1px solid #e0e0e0; border-radius:8px; font-size:14px; box-sizing:border-box;">
+                    <input type="password" id="role-login-password" placeholder="密码" style="width:100%; padding:10px 12px; border:1px solid #e0e0e0; border-radius:8px; font-size:14px; box-sizing:border-box;">
                 </div>
                 <div id="role-login-error" style="display:none; color:#ff3b30; font-size:12px; text-align:center; margin-bottom:10px;"></div>
                 <button class="modal-btn" style="background:var(--ins-pink); color:#fff; margin-bottom:10px;" onclick="loginRoleAccount()">登录并生成数据</button>

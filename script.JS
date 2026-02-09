@@ -309,6 +309,27 @@ async function migratePhoneAndSmsToIndexedDB() {
             initDesktopDrag(); // 初始化桌面拖拽
             syncPreview();
             
+            // 🔧 预加载API配置到内存缓存，防止后续读取时DB偶发返回空
+            try {
+                const [urlItem, keyItem, modelItem, tempItem] = await Promise.all([
+                    db.dexiData.get('aiBaseUrl'),
+                    db.dexiData.get('aiApiKey'),
+                    db.dexiData.get('aiCurrentModel'),
+                    db.dexiData.get('aiTemperature')
+                ]);
+                if (urlItem?.value || keyItem?.value || modelItem?.value) {
+                    _apiConfigCache = {
+                        url: urlItem?.value || '',
+                        key: keyItem?.value || '',
+                        model: modelItem?.value || '',
+                        temp: tempItem?.value || '0.7'
+                    };
+                    console.log('[API缓存] ✅ 已预加载API配置到内存');
+                }
+            } catch (e) {
+                console.warn('[API缓存] 预加载失败:', e.message);
+            }
+            
             // 请求通知权限（就像你之前的版本）
             if ('Notification' in window && Notification.permission === 'default') {
                 console.log('[通知] 请求通知权限...');
@@ -1636,10 +1657,23 @@ async function migratePhoneAndSmsToIndexedDB() {
             // 倒数日
             document.getElementById('days-input').value = document.getElementById('days-text').innerText.trim();
             // 椭圆形颜色
+            const heartColor = getComputedStyle(document.documentElement).getPropertyValue('--heart-color').trim() || '#ffb6c1';
             const capsuleColor = getComputedStyle(document.documentElement).getPropertyValue('--capsule-bg').trim() || '#FFF7FA';
             const bubbleColor = getComputedStyle(document.documentElement).getPropertyValue('--bubble-bg').trim() || '#FFF7FA';
+            document.getElementById('heart-color-input').value = heartColor;
             document.getElementById('capsule-color-input').value = capsuleColor;
             document.getElementById('bubble-color-input').value = bubbleColor;
+            // 同步应用/Dock图标预览
+            document.querySelectorAll('.icon-select-item[data-icon-id]').forEach(item => {
+                const iconId = item.getAttribute('data-icon-id');
+                const desktopIcon = document.getElementById(`icon-${iconId}`)?.querySelector('.icon') || document.getElementById(`dock-${iconId}`)?.querySelector('.icon');
+                const previewIcon = item.querySelector('.icon');
+                if (desktopIcon && previewIcon) {
+                    previewIcon.style.backgroundImage = desktopIcon.style.backgroundImage;
+                    previewIcon.style.backgroundSize = 'cover';
+                    previewIcon.style.backgroundPosition = 'center';
+                }
+            });
             // 字体预览同步
             const fontName = document.getElementById('custom-font-name-input').value.trim();
             const previewText = document.getElementById('font-preview-text');
@@ -1666,10 +1700,7 @@ async function migratePhoneAndSmsToIndexedDB() {
             if (file) {
                 const reader = new FileReader();
                 reader.onload = e => {
-                    document.getElementById('desktop-body').style.backgroundImage = `url(${e.target.result})`;
-                    document.getElementById('wallpaper-preview').style.backgroundImage = `url(${e.target.result})`;
-                    document.getElementById('wallpaper-preview').innerText = '';
-                    autoSaveCustomization(); // 自动保存
+                    applyWallpaper(e.target.result);
                 };
                 reader.readAsDataURL(file);
             }
@@ -1684,9 +1715,7 @@ async function migratePhoneAndSmsToIndexedDB() {
             if (file && currentSelectIcon) {
                 const reader = new FileReader();
                 reader.onload = e => {
-                    let iconDom = document.getElementById(`icon-${currentSelectIcon}`)?.querySelector('.icon') || document.getElementById(`dock-${currentSelectIcon}`)?.querySelector('.icon');
-                    if (iconDom) iconDom.style.backgroundImage = `url(${e.target.result})`;
-                    autoSaveCustomization(); // 自动保存
+                    applyIcon(currentSelectIcon, e.target.result);
                 };
                 reader.readAsDataURL(file);
             }
@@ -1697,9 +1726,7 @@ async function migratePhoneAndSmsToIndexedDB() {
             if (file) {
                 const reader = new FileReader();
                 reader.onload = e => {
-                    document.getElementById('widget-icon').style.backgroundImage = `url(${e.target.result})`;
-                    document.getElementById('widget-icon-preview').style.backgroundImage = `url(${e.target.result})`;
-                    autoSaveCustomization(); // 自动保存
+                    applyWidgetIcon(e.target.result);
                 };
                 reader.readAsDataURL(file);
             }
@@ -1710,9 +1737,7 @@ async function migratePhoneAndSmsToIndexedDB() {
             if (file) {
                 const reader = new FileReader();
                 reader.onload = e => {
-                    document.getElementById(`img-${pos}`).style.backgroundImage = `url(${e.target.result})`;
-                    document.getElementById(`photo-${pos}-preview`).style.backgroundImage = `url(${e.target.result})`;
-                    autoSaveCustomization(); // 自动保存
+                    applyPhoto(pos, e.target.result);
                 };
                 reader.readAsDataURL(file);
             }
@@ -1723,15 +1748,144 @@ async function migratePhoneAndSmsToIndexedDB() {
             if (file) {
                 const reader = new FileReader();
                 reader.onload = e => {
-                    const img = document.getElementById(`avatar-img-${id}`);
-                    img.style.backgroundImage = `url(${e.target.result})`;
-                    img.classList.add('has-image');
-                    document.getElementById(`avatar${id}-preview`).style.backgroundImage = `url(${e.target.result})`;
-                    autoSaveCustomization(); // 自动保存
+                    applyAvatar(id, e.target.result);
                 };
                 reader.readAsDataURL(file);
             }
             input.value = '';
+        }
+
+        // ===== 统一 apply 函数（同时更新桌面 + 设置页预览） =====
+        function applyWallpaper(url) {
+            document.getElementById('desktop-body').style.backgroundImage = `url(${url})`;
+            const preview = document.getElementById('wallpaper-preview');
+            if (preview) { preview.style.backgroundImage = `url(${url})`; preview.innerText = ''; }
+            autoSaveCustomization();
+        }
+        function applyIcon(iconId, url, triggerEl) {
+            let iconDom = document.getElementById(`icon-${iconId}`)?.querySelector('.icon') || document.getElementById(`dock-${iconId}`)?.querySelector('.icon');
+            if (iconDom) iconDom.style.backgroundImage = `url(${url})`;
+            // 同步设置页图标预览
+            const settingsItem = document.querySelector(`.icon-select-item[data-icon-id="${iconId}"] .icon`);
+            if (settingsItem) settingsItem.style.backgroundImage = `url(${url})`;
+            if (triggerEl) {
+                const previewIcon = triggerEl.querySelector('.icon');
+                if (previewIcon) previewIcon.style.backgroundImage = `url(${url})`;
+            }
+            autoSaveCustomization();
+        }
+        function applyWidgetIcon(url) {
+            document.getElementById('widget-icon').style.backgroundImage = `url(${url})`;
+            const preview = document.getElementById('widget-icon-preview');
+            if (preview) preview.style.backgroundImage = `url(${url})`;
+            autoSaveCustomization();
+        }
+        function applyPhoto(pos, url) {
+            document.getElementById(`img-${pos}`).style.backgroundImage = `url(${url})`;
+            const preview = document.getElementById(`photo-${pos}-preview`);
+            if (preview) preview.style.backgroundImage = `url(${url})`;
+            autoSaveCustomization();
+        }
+        function applyAvatar(id, url) {
+            const img = document.getElementById(`avatar-img-${id}`);
+            if (img) { img.style.backgroundImage = `url(${url})`; img.classList.add('has-image'); }
+            const preview = document.getElementById(`avatar${id}-preview`);
+            if (preview) preview.style.backgroundImage = `url(${url})`;
+            autoSaveCustomization();
+        }
+
+        // ===== 统一图片选择弹窗 =====
+        let _imgPickerCallback = null;
+        function showImagePicker(config) {
+            // config: { onApply: function(url) }
+            const existing = document.getElementById('image-picker-modal');
+            if (existing) existing.remove();
+            _imgPickerCallback = config.onApply;
+
+            const overlay = document.createElement('div');
+            overlay.id = 'image-picker-modal';
+            overlay.className = 'image-picker-overlay';
+            overlay.innerHTML = `
+                <div class="image-picker-card">
+                    <div class="image-picker-title">选择图片来源</div>
+                    <div class="image-picker-option" onclick="imagePickerFromGallery()">
+                        <span style="font-size:20px;">📷</span>
+                        <span>从相册选择</span>
+                    </div>
+                    <div class="image-picker-option" onclick="imagePickerShowUrlInput()">
+                        <span style="font-size:20px;">🔗</span>
+                        <span>粘贴图片链接</span>
+                    </div>
+                    <div class="image-picker-url-area" id="image-picker-url-area" style="display:none;">
+                        <input type="text" class="image-picker-url-input" id="image-picker-url-input" placeholder="粘贴图片链接地址" oninput="imagePickerPreviewUrl(this.value)">
+                        <div class="image-picker-preview-box" id="image-picker-preview-box">图片预览</div>
+                        <div class="image-picker-confirm" onclick="imagePickerConfirmUrl()">确认使用</div>
+                    </div>
+                    <div class="image-picker-cancel" onclick="closeImagePicker()">取消</div>
+                </div>
+            `;
+            overlay.onclick = (e) => { if (e.target === overlay) closeImagePicker(); };
+            document.body.appendChild(overlay);
+        }
+        function imagePickerFromGallery() {
+            let input = document.getElementById('image-picker-file-input');
+            if (!input) {
+                input = document.createElement('input');
+                input.type = 'file';
+                input.id = 'image-picker-file-input';
+                input.accept = 'image/*';
+                input.style.display = 'none';
+                document.body.appendChild(input);
+            }
+            input.onchange = function() {
+                const file = this.files[0];
+                if (file && _imgPickerCallback) {
+                    const reader = new FileReader();
+                    reader.onload = e => {
+                        _imgPickerCallback(e.target.result);
+                        closeImagePicker();
+                    };
+                    reader.readAsDataURL(file);
+                }
+                this.value = '';
+            };
+            input.click();
+        }
+        function imagePickerShowUrlInput() {
+            const area = document.getElementById('image-picker-url-area');
+            if (area) area.style.display = 'flex';
+        }
+        function imagePickerPreviewUrl(url) {
+            url = url.trim();
+            const box = document.getElementById('image-picker-preview-box');
+            if (!box) return;
+            if (url) {
+                box.style.backgroundImage = `url(${url})`;
+                box.style.backgroundSize = 'cover';
+                box.style.backgroundPosition = 'center';
+                box.innerText = '';
+            } else {
+                box.style.backgroundImage = '';
+                box.innerText = '图片预览';
+            }
+        }
+        function imagePickerConfirmUrl() {
+            const url = document.getElementById('image-picker-url-input')?.value?.trim();
+            if (url && _imgPickerCallback) {
+                _imgPickerCallback(url);
+            }
+            closeImagePicker();
+        }
+        function closeImagePicker() {
+            const modal = document.getElementById('image-picker-modal');
+            if (modal) modal.remove();
+            _imgPickerCallback = null;
+        }
+        // 设置页图标点击 —— 弹出图片选择器
+        function selectIconPicker(el, iconId) {
+            showImagePicker({
+                onApply: (url) => applyIcon(iconId, url, el)
+            });
         }
         
         // 自动保存个性化设置（防抖，避免频繁写入）
@@ -1862,12 +2016,23 @@ async function migratePhoneAndSmsToIndexedDB() {
                     select.value = modelItem.value;
                 }
                 
+                // 🔧 同步内存缓存
+                _apiConfigCache = {
+                    url: urlItem?.value || _apiConfigCache.url,
+                    key: keyItem?.value || _apiConfigCache.key,
+                    model: modelItem?.value || _apiConfigCache.model,
+                    temp: tempItem?.value || _apiConfigCache.temp
+                };
+                
                 // 加载预设列表
                 await loadApiPresetList();
             } catch (e) {
                 console.error("加载 API 配置失败", e);
             }
         }
+        
+        // 🔧 API配置内存缓存（防止IndexedDB偶发读取失败导致配置丢失）
+        let _apiConfigCache = { url: '', key: '', model: '', temp: '0.7' };
         
         // 自动保存 API 配置 (每次输入变更时)
         async function autoSaveApi() {
@@ -1876,10 +2041,19 @@ async function migratePhoneAndSmsToIndexedDB() {
             const model = document.getElementById('ai-model-select').value;
             const temp = document.getElementById('ai-temp-slider').value;
             
+            // 🔧 防御：如果URL和Key都为空，可能是DOM还没加载好，不要覆盖数据库
+            if (!url && !key) {
+                console.warn('[autoSaveApi] URL和Key均为空，跳过保存（防止覆盖有效配置）');
+                return;
+            }
+            
             await db.dexiData.put({ key: 'aiBaseUrl', value: url });
             await db.dexiData.put({ key: 'aiApiKey', value: key });
             await db.dexiData.put({ key: 'aiCurrentModel', value: model });
             await db.dexiData.put({ key: 'aiTemperature', value: temp });
+            
+            // 同步更新内存缓存
+            _apiConfigCache = { url, key, model, temp };
         }
         
         // ========== API 预设管理 ==========
@@ -2003,6 +2177,14 @@ async function migratePhoneAndSmsToIndexedDB() {
                 await db.dexiData.put({ key: 'aiTemperature', value: preset.temperature || '0.7' });
                 await db.dexiData.put({ key: 'aiModelList', value: preset.modelList || '[]' });
                 await db.dexiData.put({ key: 'currentApiPreset', value: presetName });
+                
+                // 🔧 同步更新内存缓存
+                _apiConfigCache = {
+                    url: preset.url || '',
+                    key: preset.key || '',
+                    model: preset.model || '',
+                    temp: preset.temperature || '0.7'
+                };
                 
             } catch (e) {
                 console.error('加载API预设失败:', e);
@@ -2219,7 +2401,7 @@ async function migratePhoneAndSmsToIndexedDB() {
             const key = document.getElementById('ai-key-input').value.trim();
             
             if (!url) {
-                alert("请先填写反代地址");
+                alert("请先填写API地址");
                 return;
             }
 
@@ -2354,8 +2536,10 @@ async function migratePhoneAndSmsToIndexedDB() {
                 });
 
                 // 保存椭圆形颜色
+                const heartColor = document.getElementById('heart-color-input')?.value || '#ffb6c1';
                 const capsuleColor = document.getElementById('capsule-color-input')?.value || '#FFF7FA';
                 const bubbleColor = document.getElementById('bubble-color-input')?.value || '#FFF7FA';
+                saveData.heartColor = heartColor;
                 saveData.capsuleColor = capsuleColor;
                 saveData.bubbleColor = bubbleColor;
 
@@ -2392,6 +2576,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                 if (daysText) daysText.innerText = saveData.daysText;
                 
                 // 应用椭圆形颜色
+                document.documentElement.style.setProperty('--heart-color', heartColor);
                 document.documentElement.style.setProperty('--capsule-bg', capsuleColor);
                 document.documentElement.style.setProperty('--bubble-bg', bubbleColor);
 
@@ -2409,6 +2594,216 @@ async function migratePhoneAndSmsToIndexedDB() {
             } catch (error) {
                 console.error('[SaveSetting] ✗ 保存失败:', error);
                 showToast('❌ 保存失败: ' + error.message);
+            }
+        }
+
+        // ===== 导出/导入桌面装修包 =====
+        async function exportDesktopTheme() {
+            try {
+                const theme = {};
+                // 壁纸
+                theme.wallpaper = document.getElementById('desktop-body')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                // 小组件
+                theme.widgetIcon = document.getElementById('widget-icon')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                theme.widgetTitle = document.getElementById('widget-title')?.innerText?.trim() || '';
+                theme.widgetSubtext = document.getElementById('widget-subtext')?.innerText?.trim() || '';
+                // 拍立得
+                theme.photoLeft = document.getElementById('img-left')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                theme.photoRight = document.getElementById('img-right')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                // 头像
+                theme.avatar1 = document.getElementById('avatar-img-1')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                theme.avatar2 = document.getElementById('avatar-img-2')?.style.backgroundImage?.replace(/url\(|\)|"/g, '') || '';
+                theme.avatar1Bubble = document.getElementById('avatar-bubble1')?.innerText?.trim() || '';
+                theme.avatar1Name = document.getElementById('avatar-name1')?.innerText?.trim() || '';
+                theme.avatar2Bubble = document.getElementById('avatar-bubble2')?.innerText?.trim() || '';
+                theme.avatar2Name = document.getElementById('avatar-name2')?.innerText?.trim() || '';
+                // 倒数日
+                theme.daysText = document.getElementById('days-text')?.innerText?.trim() || '';
+                // 应用图标
+                const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
+                iconIds.forEach(id => {
+                    const el = document.getElementById(`icon-${id}`)?.querySelector('.icon');
+                    if (el && el.style.backgroundImage) theme[`icon_${id}`] = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
+                });
+                // Dock图标
+                const dockIds = ['setting','custom','message','phone'];
+                dockIds.forEach(id => {
+                    const el = document.getElementById(`dock-${id}`)?.querySelector('.icon');
+                    if (el && el.style.backgroundImage) theme[`dock_${id}`] = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
+                });
+                // 颜色
+                theme.heartColor = getComputedStyle(document.documentElement).getPropertyValue('--heart-color').trim() || '';
+                theme.capsuleColor = getComputedStyle(document.documentElement).getPropertyValue('--capsule-bg').trim() || '';
+                theme.bubbleColor = getComputedStyle(document.documentElement).getPropertyValue('--bubble-bg').trim() || '';
+                // 字体
+                theme.customFontUrl = document.getElementById('custom-font-input')?.value?.trim() || '';
+                theme.customFontName = document.getElementById('custom-font-name-input')?.value?.trim() || '';
+                // 自定义CSS
+                theme.customCssCode = document.getElementById('custom-css-input')?.value || '';
+
+                // 生成文件
+                const jsonStr = JSON.stringify(theme, null, 2);
+                const blob = new Blob([jsonStr], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `桌面装修包_${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                showToast('✅ 装修包已导出');
+            } catch (err) {
+                console.error('[ExportTheme] 导出失败:', err);
+                showToast('❌ 导出失败: ' + err.message);
+            }
+        }
+
+        async function importDesktopTheme(input) {
+            const file = input.files[0];
+            if (!file) return;
+            input.value = '';
+            try {
+                const text = await file.text();
+                const theme = JSON.parse(text);
+                if (typeof theme !== 'object' || theme === null) throw new Error('文件格式无效');
+
+                // 壁纸
+                if (theme.wallpaper) {
+                    document.getElementById('desktop-body').style.backgroundImage = `url(${theme.wallpaper})`;
+                    const wp = document.getElementById('wallpaper-preview');
+                    if (wp) { wp.style.backgroundImage = `url(${theme.wallpaper})`; wp.innerText = ''; }
+                }
+                // 小组件
+                if (theme.widgetIcon) {
+                    document.getElementById('widget-icon').style.backgroundImage = `url(${theme.widgetIcon})`;
+                    const wip = document.getElementById('widget-icon-preview');
+                    if (wip) wip.style.backgroundImage = `url(${theme.widgetIcon})`;
+                }
+                if (theme.widgetTitle) {
+                    document.getElementById('widget-title').innerText = theme.widgetTitle;
+                    const wti = document.getElementById('widget-title-input');
+                    if (wti) wti.value = theme.widgetTitle;
+                }
+                if (theme.widgetSubtext) {
+                    document.getElementById('widget-subtext').innerText = theme.widgetSubtext;
+                    const wsi = document.getElementById('widget-subtext-input');
+                    if (wsi) wsi.value = theme.widgetSubtext;
+                }
+                // 拍立得
+                if (theme.photoLeft) {
+                    document.getElementById('img-left').style.backgroundImage = `url(${theme.photoLeft})`;
+                    const plp = document.getElementById('photo-left-preview');
+                    if (plp) plp.style.backgroundImage = `url(${theme.photoLeft})`;
+                }
+                if (theme.photoRight) {
+                    document.getElementById('img-right').style.backgroundImage = `url(${theme.photoRight})`;
+                    const prp = document.getElementById('photo-right-preview');
+                    if (prp) prp.style.backgroundImage = `url(${theme.photoRight})`;
+                }
+                // 头像
+                if (theme.avatar1) {
+                    const img1 = document.getElementById('avatar-img-1');
+                    if (img1) { img1.style.backgroundImage = `url(${theme.avatar1})`; img1.classList.add('has-image'); }
+                    const ap1 = document.getElementById('avatar1-preview');
+                    if (ap1) ap1.style.backgroundImage = `url(${theme.avatar1})`;
+                }
+                if (theme.avatar2) {
+                    const img2 = document.getElementById('avatar-img-2');
+                    if (img2) { img2.style.backgroundImage = `url(${theme.avatar2})`; img2.classList.add('has-image'); }
+                    const ap2 = document.getElementById('avatar2-preview');
+                    if (ap2) ap2.style.backgroundImage = `url(${theme.avatar2})`;
+                }
+                if (theme.avatar1Bubble) {
+                    const b1 = document.getElementById('avatar-bubble1');
+                    if (b1) b1.innerText = theme.avatar1Bubble;
+                    const ib1 = document.getElementById('avatar1-bubble-input');
+                    if (ib1) ib1.value = theme.avatar1Bubble;
+                }
+                if (theme.avatar1Name) {
+                    const n1 = document.getElementById('avatar-name1');
+                    if (n1) n1.innerText = theme.avatar1Name;
+                    const in1 = document.getElementById('avatar1-name-input');
+                    if (in1) in1.value = theme.avatar1Name;
+                }
+                if (theme.avatar2Bubble) {
+                    const b2 = document.getElementById('avatar-bubble2');
+                    if (b2) b2.innerText = theme.avatar2Bubble;
+                    const ib2 = document.getElementById('avatar2-bubble-input');
+                    if (ib2) ib2.value = theme.avatar2Bubble;
+                }
+                if (theme.avatar2Name) {
+                    const n2 = document.getElementById('avatar-name2');
+                    if (n2) n2.innerText = theme.avatar2Name;
+                    const in2 = document.getElementById('avatar2-name-input');
+                    if (in2) in2.value = theme.avatar2Name;
+                }
+                // 倒数日
+                if (theme.daysText) {
+                    document.getElementById('days-text').innerText = theme.daysText;
+                    const di = document.getElementById('days-input');
+                    if (di) di.value = theme.daysText;
+                }
+                // 应用图标
+                const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
+                iconIds.forEach(id => {
+                    const val = theme[`icon_${id}`];
+                    if (val) {
+                        const el = document.getElementById(`icon-${id}`)?.querySelector('.icon');
+                        if (el) el.style.backgroundImage = `url(${val})`;
+                        const si = document.querySelector(`.icon-select-item[data-icon-id="${id}"] .icon`);
+                        if (si) { si.style.backgroundImage = `url(${val})`; si.style.backgroundSize = 'cover'; si.style.backgroundPosition = 'center'; }
+                    }
+                });
+                // Dock图标
+                const dockIds = ['setting','custom','message','phone'];
+                dockIds.forEach(id => {
+                    const val = theme[`dock_${id}`];
+                    if (val) {
+                        const el = document.getElementById(`dock-${id}`)?.querySelector('.icon');
+                        if (el) el.style.backgroundImage = `url(${val})`;
+                        const si = document.querySelector(`.icon-select-item[data-icon-id="${id}"] .icon`);
+                        if (si) { si.style.backgroundImage = `url(${val})`; si.style.backgroundSize = 'cover'; si.style.backgroundPosition = 'center'; }
+                    }
+                });
+                // 颜色
+                if (theme.heartColor) {
+                    document.documentElement.style.setProperty('--heart-color', theme.heartColor);
+                    const hci = document.getElementById('heart-color-input');
+                    if (hci) hci.value = theme.heartColor;
+                }
+                if (theme.capsuleColor) {
+                    document.documentElement.style.setProperty('--capsule-bg', theme.capsuleColor);
+                    const cci = document.getElementById('capsule-color-input');
+                    if (cci) cci.value = theme.capsuleColor;
+                }
+                if (theme.bubbleColor) {
+                    document.documentElement.style.setProperty('--bubble-bg', theme.bubbleColor);
+                    const bci = document.getElementById('bubble-color-input');
+                    if (bci) bci.value = theme.bubbleColor;
+                }
+                // 字体
+                if (theme.customFontUrl && theme.customFontName) {
+                    const cfi = document.getElementById('custom-font-input');
+                    if (cfi) cfi.value = theme.customFontUrl;
+                    const cfni = document.getElementById('custom-font-name-input');
+                    if (cfni) cfni.value = theme.customFontName;
+                    loadCustomFont(theme.customFontUrl, theme.customFontName, false);
+                }
+                // 自定义CSS
+                if (theme.customCssCode !== undefined) {
+                    const cssi = document.getElementById('custom-css-input');
+                    if (cssi) cssi.value = theme.customCssCode;
+                    applyCustomCSS();
+                }
+
+                // 自动保存到数据库
+                await saveAllSetting();
+                showToast('✅ 装修包导入成功');
+                console.log('[ImportTheme] ✓ 装修包导入成功', theme);
+            } catch (err) {
+                console.error('[ImportTheme] 导入失败:', err);
+                showToast('❌ 导入失败: ' + err.message);
             }
         }
 
@@ -14167,39 +14562,78 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
                 }
                 
                 if (momentsMatch) {
-                    const momentContent = momentsMatch[1].trim();
-                    const imageCount = momentsMatch[2] ? parseInt(momentsMatch[2]) : 0;
+                    let momentContent = momentsMatch[1].trim();
+                    let imageCount = momentsMatch[2] ? parseInt(momentsMatch[2]) : 0;
+                    let imageDesc = '';
+                    
+                    // 🔥 修复：提取 [imgcard:] 作为朋友圈配图描述
+                    const afterMoments = cleanReplyProcessed.substring(momentsMatch.index + momentsMatch[0].length);
+                    const imgcardMatch = afterMoments.match(/\[imgcard:([^\]]+)\]/i);
+                    if (imgcardMatch) {
+                        imageDesc = imgcardMatch[1].trim();
+                        if (imageCount === 0) imageCount = 1;
+                        console.log(`[AutoChat] 提取到朋友圈配图描述: ${imageDesc}`);
+                    }
+                    // 也检查 content 中是否内嵌了 [imgcard:]
+                    const contentImgcard = momentContent.match(/\[imgcard:([^\]]+)\]/i);
+                    if (contentImgcard) {
+                        imageDesc = imageDesc || contentImgcard[1].trim();
+                        momentContent = momentContent.replace(/\[imgcard:[^\]]+\]/gi, '').trim();
+                        if (imageCount === 0) imageCount = 1;
+                    }
+                    // 也从 MOMENTS 之前的文本中提取
+                    const beforeMoments = cleanReplyProcessed.substring(0, momentsMatch.index);
+                    const beforeImgcard = beforeMoments.match(/\[imgcard:([^\]]+)\]/i);
+                    if (beforeImgcard && !imageDesc) {
+                        imageDesc = beforeImgcard[1].trim();
+                        if (imageCount === 0) imageCount = 1;
+                    }
                     
                     // 提取朋友圈指令前面的文字内容（如果有）
-                    const textBeforeMoments = cleanMessage(cleanReplyProcessed.substring(0, momentsMatch.index).trim());
+                    let textBeforeMoments = cleanMessage(cleanReplyProcessed.substring(0, momentsMatch.index).trim());
+                    // 清理掉 [imgcard:] 部分，不要作为聊天消息发送
+                    textBeforeMoments = textBeforeMoments.replace(/\[imgcard:[^\]]+\]/gi, '').trim();
                     
                     const freshChar = await db.characters.get(char.id);
                     if (freshChar) {
                         let history = getChatHistory(freshChar, accountId);
                         
-                        // 1. 先发送文字消息（如果有）
+                        // 1. 先发送文字消息（如果有）- 🔥 修复：按 ||| 分割多条消息，避免格式丢失
                         if (textBeforeMoments) {
-                            const textMsg = {
-                                role: 'char',
-                                content: textBeforeMoments,
-                                time: Date.now()
-                            };
-                            history.push(textMsg);
-                            await setChatHistory(freshChar, accountId, history);
+                            const msgSegments = textBeforeMoments.split('|||')
+                                .map(s => cleanMessage(s.trim()))
+                                .filter(s => s && s.length > 0);
                             
-                            // 渲染文字消息
-                            if (currentChatCharId === freshChar.id) {
-                                appendMessageToUI('char', textBeforeMoments, freshChar.avatar);
+                            console.log(`[AutoChat] 朋友圈前文字按|||分割为 ${msgSegments.length} 条消息`);
+                            
+                            for (let i = 0; i < msgSegments.length; i++) {
+                                const textMsg = {
+                                    role: 'char',
+                                    content: msgSegments[i],
+                                    time: Date.now() + i
+                                };
+                                history.push(textMsg);
+                                await setChatHistory(freshChar, accountId, history);
+                                
+                                // 渲染文字消息
+                                if (currentChatCharId === freshChar.id) {
+                                    appendMessageToUI('char', msgSegments[i], freshChar.avatar);
+                                }
+                                
+                                // 消息间延时（模拟连发）
+                                if (i < msgSegments.length - 1) {
+                                    await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
+                                }
                             }
                             
-                            // 稍微延时，让文字消息先显示
+                            // 稍微延时再发朋友圈
                             await new Promise(r => setTimeout(r, 500));
                         }
                         
-                        // 2. 发布朋友圈
-                        await publishMomentsByCharacter(freshChar, momentContent, imageCount);
+                        // 2. 发布朋友圈（传入图片描述）
+                        await publishMomentsByCharacter(freshChar, momentContent, imageCount, imageDesc);
                         
-                        console.log(`[AutoChat] ${freshChar.name} 发布了朋友圈`);
+                        console.log(`[AutoChat] ${freshChar.name} 发布了朋友圈${imageDesc ? ` [配图: ${imageDesc}]` : ''}`);
                         addLog('success', `角色发布朋友圈: ${freshChar.name}`, { content: momentContent });
                         
                         // 发送通知
@@ -19574,7 +20008,7 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 - **长文卡片**：\`[imgcard:内容]\`（超过50字的长文时也可以使用）
 - **转账**：\`((TRANSFER: 金额, 备注))\`（请客、AA、还钱、发红包、节日转账等，真人经常转账）
 - **亲属卡**：\`((FAMILY_CARD: 额度))\`（关系亲密时赠送）
-- **朋友圈**：\`[MOMENTS]\ncontent: 内容\nimages: 0\`（想发动态分享生活时。注意：images 请始终填 0，朋友圈不需要配图）
+- **朋友圈**：\`[MOMENTS]\ncontent: 朋友圈文案\nimages: 0\`（想发动态分享生活时。大部分朋友圈是纯文字，images填0。如果需要配图，images填数量，并在后面加上 \`[imgcard:图片描述]\` 描述配图内容，例如：\`[MOMENTS]\ncontent: 今天的晚霞好美\nimages: 1\n[imgcard:窗外橘红色的晚霞映照在城市天际线上]\`）
 - **撤回**：\`((RECALL))\`（说错话、后悔、打错字、发了不该发的时候，真人经常撤回）
 - **戳一戳**：\`((POKE: 动作, 部位))\`（调皮互动、撒娇、引起注意，例如 \`((POKE: 戳了戳, 脸蛋))\`、\`((POKE: 拍了拍, 肩膀))\`、\`((POKE: 捏了捏, 脸))\`、\`((POKE: 揉了揉, 头发))\`）
 - **打开APP**：\`((OPEN_APP: APP名称))\`（展示你有自己的生活！例如 \`((OPEN_APP: 王者荣耀))\`、\`((OPEN_APP: 抖音))\`、\`((OPEN_APP: 网易云音乐))\`、\`((OPEN_APP: 小红书))\`、\`((OPEN_APP: 美团))\`、\`((OPEN_APP: 微博))\`、\`((OPEN_APP: B站))\` 等。聊到要去做什么、说在忙、说在玩游戏、刷视频时都可以用）
@@ -19927,19 +20361,56 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                         if (checkResult.wechatData) {
                             console.log('[AI查岗] 开始AI二次分析...');
                             
-                            // 构建包含真实wechat数据的system prompt
-                            let analysisPrompt = `${checkResult.checkResult}
+                            // 构建包含真实wechat数据的system prompt（包含完整人设防止崩人设）
+                            const charDesc = char.description || char.personality || '';
+                            const charRelationships = char.relationships || '';
+                            
+                            // 获取用户人设
+                            let userPersonaForAnalysis = '';
+                            const accountIdForAnalysis = getCurrentAccountId();
+                            if (char.linked_user_id) {
+                                try {
+                                    const linkedUser = await db.characters.get(char.linked_user_id);
+                                    if (linkedUser) {
+                                        userPersonaForAnalysis = linkedUser.description || linkedUser.personality || '';
+                                    }
+                                } catch(e) {}
+                            } else if (accountIdForAnalysis) {
+                                try {
+                                    const myCharForAnalysis = await db.characters.get(parseInt(accountIdForAnalysis));
+                                    if (myCharForAnalysis) {
+                                        userPersonaForAnalysis = myCharForAnalysis.description || myCharForAnalysis.personality || '';
+                                    }
+                                } catch(e) {}
+                            }
+                            
+                            // 获取世界书上下文
+                            let lorebookForAnalysis = '';
+                            try {
+                                if (typeof getLorebookContext === 'function') {
+                                    const history = getChatHistory(char, accountIdForAnalysis);
+                                    lorebookForAnalysis = await getLorebookContext(char, history);
+                                }
+                            } catch(e) {}
+                            
+                            let analysisPrompt = `【你的人设档案（必须严格遵守）】
+${charDesc}
+${charRelationships ? `\n【你和对方的关系】\n${charRelationships}` : ''}
+${userPersonaForAnalysis ? `\n【对方（${myChar?.name || '用户'}）的信息】\n${userPersonaForAnalysis}` : ''}
+${lorebookForAnalysis ? `\n【世界书/背景设定】\n${lorebookForAnalysis}` : ''}
 
-现在请你作为 ${char.name}，基于上述【真实的WeChat数据】，生成你的回复。
+---
+
+${checkResult.checkResult}
+
+现在请你作为 ${char.name}，基于上述【真实的WeChat数据】和你的人设，生成你的回复。
 
 要求：
-1. 直接提及你看到的具体信息（好友名字、聊天内容、余额等）
-2. 根据你的角色性格，表达你的想法和情绪
-3. 如果发现可疑或有趣的点，可以追问
-4. 用 ${char.reply_min_count || 1}-${char.reply_max_count || 3} 条短消息回复，用|||分隔
-5. 每条消息不要太长 像真人聊天的节奏
-6. 少用标点符号 停顿用空格代替 不要在句中用逗号
-7. 口语化 不要书面语`;
+1. 提及你看到的具体信息（好友名字、聊天内容、余额等）
+2. 用你的性格和平时的聊天方式来表达
+3. 用 ${char.reply_min_count || 1}-${char.reply_max_count || 3} 条短消息回复，用|||分隔
+4. 每条消息不要太长 像真人聊天
+5. 口语化 少用标点`;
 
                             // 🔥 修罗场模式：在二次分析中也加入操作指令
                             if (char.allow_shura_mode) {
@@ -19949,44 +20420,16 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                                 
                                 analysisPrompt += `
 
-【⚠️ 修罗场模式 - 你可以操作${myName}的账号！】
-你已经成功登录了${myName}的账号，现在你不仅能看到信息，还可以**直接操作**！
+【修罗场模式 - 你可以操作${myName}的账号】
+你已经成功登录了${myName}的账号，你可以直接操作。
 
 **可用操作指令：**
-1. 删除好友：[SHURA_DELETE:好友名字]（非常严重的操作！只在发现确凿的背叛/出轨证据时才使用）
-2. 拉黑好友：[SHURA_BLACKLIST:好友名字]（最严重的操作！只在极端情况下使用）
-3. 以${myName}身份发消息给某个好友：[SHURA_SEND:好友名字:消息内容1///消息内容2///消息内容3]（用///分隔多条消息，可以根据人设多发几条，像真人聊天一样）
+1. 删除好友：[SHURA_DELETE:好友名字]
+2. 拉黑好友：[SHURA_BLACKLIST:好友名字]
+3. 以${myName}身份发消息给某个好友：[SHURA_SEND:好友名字:消息内容1///消息内容2///消息内容3]（用///分隔多条消息）
 
-**⚠️ 重要：不是每次查岗都要删除或拉黑好友！！！**
-- 大多数时候查岗只是**看看**，发表你的看法和情绪就好
-- 删除/拉黑是**极端操作**，只有在发现真正严重的问题时（如明确的出轨、暧昧证据）才考虑
-- 如果只是普通异性好友、正常的工作/同学聊天，**不需要做任何操作**
-- 发消息给别人也要谨慎，不是每次都需要 
-- 你的重点是：**看完之后跟${myName}聊你的感受**，而不是疯狂操作
-
-**行为指导（严格按照你的人设性格来）：**
-- 如果聊天记录没什么问题 → 不做任何操作，正常跟${myName}聊就好
-- 如果有一点可疑但不确定 → 可以先跟${myName}追问，不急着操作
-- 如果发现确凿证据（暧昧/出轨/欺骗）→ 根据性格决定：发消息警告/删除/拉黑
-- 给好友发消息时，可以用///分隔发多条，像真人那样分几条发
-
-**回复示例1（看完没什么问题）：**
-{
-  "reply": "你微信我看了|||没什么问题 就是你余额也太少了吧哈哈",
-  "thought": "还好 没发现什么异常"
-}
-
-**回复示例2（发现问题需要操作）：**
-{
-  "reply": "你跟小美的聊天记录是怎么回事|||你们也太暧昧了吧|||我帮你处理了|||[SHURA_SEND:小美:你好///以后请不要再联系了///谢谢]|||[SHURA_BLACKLIST:小美]",
-  "thought": "气死了 这明显在搞暧昧"
-}
-
-注意：
-- 每条消息不要太长 像真人打字
-- 少用标点符号 停顿用空格代替 不要逗号连接
-- 操作指令放在reply最后 用|||分隔
-- **再次强调：大多数查岗不需要做任何删除/拉黑操作！根据实际情况来！**`;
+根据你看到的内容和你的性格，自行决定是否操作、如何操作。
+操作指令放在reply最后，用|||分隔。`;
                             }
 
                             analysisPrompt += `
@@ -20432,39 +20875,78 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 }
                 
                 if (momentsMatch) {
-                    const momentContent = momentsMatch[1].trim();
-                    const imageCount = momentsMatch[2] ? parseInt(momentsMatch[2]) : 0;
+                    let momentContent = momentsMatch[1].trim();
+                    let imageCount = momentsMatch[2] ? parseInt(momentsMatch[2]) : 0;
+                    let imageDesc = '';
+                    
+                    // 🔥 修复：提取 [imgcard:] 作为朋友圈配图描述
+                    const afterMoments = replyText.substring(momentsMatch.index + momentsMatch[0].length);
+                    const imgcardMatch = afterMoments.match(/\[imgcard:([^\]]+)\]/i);
+                    if (imgcardMatch) {
+                        imageDesc = imgcardMatch[1].trim();
+                        if (imageCount === 0) imageCount = 1; // 有图片描述则至少1张
+                        console.log(`[TriggerAI] 提取到朋友圈配图描述: ${imageDesc}`);
+                    }
+                    // 也检查 content 中是否内嵌了 [imgcard:]
+                    const contentImgcard = momentContent.match(/\[imgcard:([^\]]+)\]/i);
+                    if (contentImgcard) {
+                        imageDesc = imageDesc || contentImgcard[1].trim();
+                        momentContent = momentContent.replace(/\[imgcard:[^\]]+\]/gi, '').trim();
+                        if (imageCount === 0) imageCount = 1;
+                    }
+                    // 也从 MOMENTS 之前的文本中提取（AI有时把imgcard放前面）
+                    const beforeMoments = replyText.substring(0, momentsMatch.index);
+                    const beforeImgcard = beforeMoments.match(/\[imgcard:([^\]]+)\]/i);
+                    if (beforeImgcard && !imageDesc) {
+                        imageDesc = beforeImgcard[1].trim();
+                        if (imageCount === 0) imageCount = 1;
+                    }
                     
                     // 提取朋友圈指令前面的文字内容（如果有）
-                    const textBeforeMoments = replyText.substring(0, momentsMatch.index).trim();
+                    let textBeforeMoments = replyText.substring(0, momentsMatch.index).trim();
+                    // 清理掉 [imgcard:] 部分，不要作为聊天消息发送
+                    textBeforeMoments = textBeforeMoments.replace(/\[imgcard:[^\]]+\]/gi, '').trim();
                     
                     const freshChar = await db.characters.get(targetCharId);
                     if (freshChar) {
                         let history = getChatHistory(freshChar, accountId);
                         
-                        // 1. 先发送文字消息（如果有）
+                        // 1. 先发送文字消息（如果有）- 🔥 修复：按 ||| 分割多条消息，避免格式丢失
                         if (textBeforeMoments) {
-                            const textMsg = {
-                                role: 'char',
-                                content: textBeforeMoments,
-                                time: Date.now()
-                            };
-                            history.push(textMsg);
-                            await setChatHistory(freshChar, accountId, history);
+                            const msgSegments = textBeforeMoments.split('|||')
+                                .map(s => cleanMessage(s.trim()))
+                                .filter(s => s && s.length > 0);
                             
-                            // 渲染文字消息
-                            if (currentChatCharId === targetCharId) {
-                                appendMessageToUI('char', textBeforeMoments, freshChar.avatar);
+                            console.log(`[TriggerAI] 朋友圈前文字按|||分割为 ${msgSegments.length} 条消息`);
+                            
+                            for (let i = 0; i < msgSegments.length; i++) {
+                                const textMsg = {
+                                    role: 'char',
+                                    content: msgSegments[i],
+                                    time: Date.now() + i
+                                };
+                                history.push(textMsg);
+                                await setChatHistory(freshChar, accountId, history);
+                                
+                                // 渲染文字消息
+                                if (currentChatCharId === targetCharId) {
+                                    appendMessageToUI('char', msgSegments[i], freshChar.avatar);
+                                }
+                                
+                                // 消息间延时（模拟连发）
+                                if (i < msgSegments.length - 1) {
+                                    await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
+                                }
                             }
                             
-                            // 稍微延时
+                            // 稍微延时再发朋友圈
                             await new Promise(r => setTimeout(r, 500));
                         }
                         
-                        // 2. 发布朋友圈
-                        await publishMomentsByCharacter(freshChar, momentContent, imageCount);
+                        // 2. 发布朋友圈（传入图片描述）
+                        await publishMomentsByCharacter(freshChar, momentContent, imageCount, imageDesc);
                         
-                        console.log(`[TriggerAI] ${freshChar.name} 发布了朋友圈`);
+                        console.log(`[TriggerAI] ${freshChar.name} 发布了朋友圈${imageDesc ? ` [配图: ${imageDesc}]` : ''}`);
                         
                         // 发送通知
                         sendSystemNotification(freshChar.name, '[朋友圈]');
@@ -21890,22 +22372,65 @@ ${loreContext}
         
         // 通用 AI 调用函数
         async function callAI(messages, options = {}) {
-            const url = await db.dexiData.get('aiBaseUrl');
-            const key = await db.dexiData.get('aiApiKey');
-            const model = await db.dexiData.get('aiCurrentModel');
+            let urlValue = '';
+            let apiKeyValue = '';
+            let modelValue = '';
+            let temperature = 0.7;
             
-            if (!url || !key || !model) {
-                throw new Error("请先在设置中配置 API 地址、密钥并选择模型");
+            try {
+                const url = await db.dexiData.get('aiBaseUrl');
+                const key = await db.dexiData.get('aiApiKey');
+                const model = await db.dexiData.get('aiCurrentModel');
+                
+                urlValue = url?.value?.trim() || '';
+                apiKeyValue = key?.value?.trim() || '';
+                modelValue = model?.value?.trim() || '';
+                
+                // 获取温度配置
+                const tempItem = await db.dexiData.get('aiTemperature');
+                temperature = tempItem ? parseFloat(tempItem.value) : 0.7;
+                
+                // 🔧 如果从DB读到了有效值，更新内存缓存
+                if (urlValue && apiKeyValue && modelValue) {
+                    _apiConfigCache = { url: urlValue, key: apiKeyValue, model: modelValue, temp: String(temperature) };
+                }
+            } catch (dbErr) {
+                console.warn('[callAI] 数据库读取失败，尝试使用内存缓存:', dbErr.message);
             }
             
-            // 验证配置值
-            const apiKeyValue = key.value ? key.value.trim() : '';
-            const modelValue = model.value ? model.value.trim() : '';
+            // 🔧 如果DB读取结果为空，尝试使用内存缓存
+            if (!urlValue && _apiConfigCache.url) {
+                console.warn('[callAI] DB中API地址为空，使用内存缓存');
+                urlValue = _apiConfigCache.url;
+            }
+            if (!apiKeyValue && _apiConfigCache.key) {
+                console.warn('[callAI] DB中API密钥为空，使用内存缓存');
+                apiKeyValue = _apiConfigCache.key;
+            }
+            if (!modelValue && _apiConfigCache.model) {
+                console.warn('[callAI] DB中模型为空，使用内存缓存');
+                modelValue = _apiConfigCache.model;
+            }
             
+            // 🔧 如果内存缓存也恢复了有效值，写回DB修复
+            if (urlValue && apiKeyValue && modelValue) {
+                // 异步修复DB（不阻塞当前调用）
+                db.dexiData.get('aiBaseUrl').then(existing => {
+                    if (!existing || !existing.value) {
+                        console.log('[callAI] 🔧 自动修复DB中丢失的API配置');
+                        db.dexiData.put({ key: 'aiBaseUrl', value: urlValue });
+                        db.dexiData.put({ key: 'aiApiKey', value: apiKeyValue });
+                        db.dexiData.put({ key: 'aiCurrentModel', value: modelValue });
+                    }
+                }).catch(() => {});
+            }
+            
+            if (!urlValue) {
+                throw new Error("请先在设置中配置 API 地址");
+            }
             if (!apiKeyValue) {
                 throw new Error("API 密钥不能为空，请在设置中配置");
             }
-            
             if (!modelValue) {
                 throw new Error("模型名称不能为空，请在设置中选择模型");
             }
@@ -21914,10 +22439,6 @@ ${loreContext}
             if (apiKeyValue.length < 10) {
                 console.warn('[callAI] API Key 长度异常，可能无效:', apiKeyValue.length);
             }
-
-            // 获取温度配置
-            const tempItem = await db.dexiData.get('aiTemperature');
-            let temperature = tempItem ? parseFloat(tempItem.value) : 0.7;
             
             // 验证温度值
             if (isNaN(temperature) || temperature < 0 || temperature > 2) {
@@ -21928,7 +22449,7 @@ ${loreContext}
             // 获取 max_tokens 配置（如果提供）
             const maxTokens = options.max_tokens || options.maxTokens;
 
-            const requestUrl = getSmartUrl(url.value, '/chat/completions');
+            const requestUrl = getSmartUrl(urlValue, '/chat/completions');
             
             // ✅ 全局防御：清洗 messages，防止空内容或非法格式导致 400 错误
             const cleanMessages = messages.map(m => {
@@ -23048,6 +23569,11 @@ function showLorebookPage() {
             });
             
         // 恢复椭圆形颜色
+        if (dataMap.heartColor) {
+            document.documentElement.style.setProperty('--heart-color', dataMap.heartColor);
+            const hcInput = document.getElementById('heart-color-input');
+            if (hcInput) hcInput.value = dataMap.heartColor;
+        }
         if (dataMap.capsuleColor) {
             document.documentElement.style.setProperty('--capsule-bg', dataMap.capsuleColor);
             const ccInput = document.getElementById('capsule-color-input');
@@ -25882,22 +26408,19 @@ async function renderMomentsList() {
         let imagesHtml = '';
         // 优先使用新的卡片形式（imageCount + imageDesc）
         if (m.imageCount && m.imageCount > 0) {
-            const desc = m.imageDesc || `${m.imageCount}张图片`;
-            const iconColors = ['#FF6B9D', '#FF9F43', '#54A0FF', '#5F27CD', '#00D2D3', '#10AC84', '#EE5A24', '#6c5ce7'];
-            const randomColor = iconColors[Math.floor(Math.random() * iconColors.length)];
-            imagesHtml = `<div class="moment-image-card" style="border-left: 3px solid ${randomColor};">
-                <div class="moment-image-card-icon" style="background: ${randomColor}20; color: ${randomColor};">
-                    <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.5;">
-                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                        <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                        <polyline points="21 15 16 10 5 21"></polyline>
-                    </svg>
-                </div>
-                <div class="moment-image-card-info">
-                    <div class="moment-image-card-desc">${escapeHtml(desc)}</div>
-                    <div class="moment-image-card-count">${m.imageCount}张图片</div>
-                </div>
-            </div>`;
+            const desc = m.imageDesc || '';
+            const count = Math.min(m.imageCount, 9); // 最多9张
+            const gridClass = `grid-${count}`;
+            let squares = '';
+            for (let imgIdx = 0; imgIdx < count; imgIdx++) {
+                squares += `<div class="moment-img-placeholder" onclick="event.stopPropagation(); showMomentImageDesc('${escapeHtml(desc).replace(/'/g, "\\'")}')">
+                    <div class="moment-img-placeholder-inner">
+                        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                        ${count === 1 ? '<div class="moment-img-placeholder-hint">点击查看文字</div>' : ''}
+                    </div>
+                </div>`;
+            }
+            imagesHtml = `<div class="moment-image-grid ${gridClass}">${squares}</div>`;
         }
         // 兼容旧数据：如果有真实图片URL
         else if (m.images && m.images.length > 0) {
@@ -25933,14 +26456,19 @@ async function renderMomentsList() {
             likesHtml = names.join('，');
         }
 
-        // 处理评论显示
+        // 处理评论显示（支持回复格式和点击回复）
         let commentsHtml = '';
         if (m.comments && m.comments.length > 0) {
-            commentsHtml = m.comments.map(c => `
-                <div class="comment-item">
-                    <span class="comment-user">${c.name}</span>：<span class="comment-content">${escapeHtml(c.content)}</span>
-                </div>
-            `).join('');
+            commentsHtml = m.comments.map((c, idx) => {
+                const replyPart = c.replyTo ? ` 回复 <span class="comment-user">${escapeHtml(c.replyTo)}</span>` : '';
+                const isMyComment = c.userId == currentMyCharId;
+                // 非自己的评论可以点击回复
+                const clickHandler = !isMyComment ? `onclick="replyToMomentComment(${m.id}, '${escapeHtml(c.name).replace(/'/g, "\\'")}', ${idx})"` : '';
+                const cursorStyle = !isMyComment ? 'cursor:pointer;' : '';
+                return `<div class="comment-item" ${clickHandler} style="${cursorStyle}">
+                    <span class="comment-user">${escapeHtml(c.name)}</span>${replyPart}：<span class="comment-content">${escapeHtml(c.content)}</span>
+                </div>`;
+            }).join('');
         }
 
         const hasLikes = m.likes && m.likes.length > 0;
@@ -26289,17 +26817,14 @@ async function generateFriendInteractions(momentId, privacy, privacyList) {
         
         console.log(`[朋友圈互动] 开始生成，可见好友: ${friends.length}人`);
         
-        // 随机选择一些好友来点赞（30%-70%的可见好友）
-        const likeRatio = 0.3 + Math.random() * 0.4;
+        // 随机选择好友来点赞（50%-90%的可见好友）
+        const likeRatio = 0.5 + Math.random() * 0.4;
         const shuffledForLikes = [...friends].sort(() => Math.random() - 0.5);
         const likersCount = Math.max(1, Math.floor(shuffledForLikes.length * likeRatio));
         const likers = shuffledForLikes.slice(0, likersCount);
         
-        // 随机选择一些好友来评论（30%-70%的可见好友，最多10人，至少2人）
-        const commentRatio = 0.3 + Math.random() * 0.4;
-        const shuffledForComments = [...friends].sort(() => Math.random() - 0.5);
-        const commentersCount = Math.min(10, Math.max(Math.min(2, shuffledForComments.length), Math.floor(shuffledForComments.length * commentRatio)));
-        const commenters = shuffledForComments.slice(0, commentersCount);
+        // 所有可见好友都来评论（打乱顺序让评论更自然）
+        const commenters = [...friends].sort(() => Math.random() - 0.5);
         
         // 生成点赞（使用微信显示名）
         const likes = likers.map(f => ({
@@ -26312,15 +26837,24 @@ async function generateFriendInteractions(momentId, privacy, privacyList) {
         
         if (commenters.length > 0) {
             try {
-                // 构建角色信息（使用微信显示名）
-                const commenterInfos = commenters.map(c => {
-                    const displayName = c.remark || c.wx_nickname || c.name;
-                    return `- ${displayName}：${c.description || c.personality || '普通朋友'}`;
-                }).join('\n');
+                // 分批处理（每批最多15人，避免AI token溢出）
+                const BATCH_SIZE = 15;
+                const batches = [];
+                for (let i = 0; i < commenters.length; i += BATCH_SIZE) {
+                    batches.push(commenters.slice(i, i + BATCH_SIZE));
+                }
                 
-                const prompt = `${myName} 发了一条朋友圈：
+                for (const batch of batches) {
+                    try {
+                        // 构建角色信息（使用微信显示名）
+                        const commenterInfos = batch.map(c => {
+                            const displayName = c.remark || c.wx_nickname || c.name;
+                            return `- ${displayName}：${c.description || c.personality || '普通朋友'}`;
+                        }).join('\n');
+                        
+                        const batchPrompt = `${myName} 发了一条朋友圈：
 "${moment.content}"
-${moment.images?.length > 0 ? `（附带${moment.images.length}张图片）` : ''}
+${moment.images?.length > 0 || moment.imageCount > 0 ? `（附带${moment.imageCount || moment.images.length}张图片${moment.imageDesc ? '：' + moment.imageDesc : ''}）` : ''}
 
 以下好友看到了这条朋友圈，请为每个人生成一条符合其性格的评论：
 ${commenterInfos}
@@ -26329,41 +26863,51 @@ ${commenterInfos}
 1. 每条评论简短自然（3-20字）
 2. 可以用表情、语气词
 3. 符合每个角色的性格特点
-4. 可以互相@回复（格式：回复 某某：内容）
+4. 鼓励好友之间互相回复（使用 replyTo 字段指定回复的人名）
+5. 不是所有人都要互相回复，但至少有一些好友之间会有对话
 
 请返回JSON数组格式：
-[{"name": "角色名", "content": "评论内容"}, ...]`;
+[{"name": "角色名", "content": "评论内容"}, {"name": "角色名", "replyTo": "被回复的角色名", "content": "回复内容"}, ...]`;
 
-                const result = await callAI([
-                    { role: 'system', content: '你是一个社交媒体评论生成助手，只返回JSON数组，不要任何其他文字。' },
-                    { role: 'user', content: prompt }
-                ]);
-                
-                // 解析结果
-                let aiComments = [];
-                try {
-                    let cleanResult = result.trim();
-                    if (cleanResult.startsWith('```')) {
-                        cleanResult = cleanResult.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
-                    }
-                    aiComments = JSON.parse(cleanResult);
-                } catch (e) {
-                    console.warn('[朋友圈互动] AI评论解析失败，使用预设评论');
-                }
-                
-                // 将AI生成的评论添加到列表（匹配显示名）
-                for (const aiComment of aiComments) {
-                    const commenter = commenters.find(c => {
-                        const displayName = c.remark || c.wx_nickname || c.name;
-                        return displayName === aiComment.name || c.name === aiComment.name;
-                    });
-                    if (commenter && aiComment.content) {
-                        comments.push({
-                            userId: commenter.id,
-                            name: commenter.remark || commenter.wx_nickname || commenter.name,
-                            content: aiComment.content,
-                            time: Date.now() + Math.random() * 60000
-                        });
+                        const result = await callAI([
+                            { role: 'system', content: '你是一个社交媒体评论生成助手，只返回JSON数组，不要任何其他文字。' },
+                            { role: 'user', content: batchPrompt }
+                        ]);
+                        
+                        // 解析结果
+                        let aiComments = [];
+                        try {
+                            let cleanResult = result.trim();
+                            if (cleanResult.startsWith('```')) {
+                                cleanResult = cleanResult.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+                            }
+                            aiComments = JSON.parse(cleanResult);
+                        } catch (e) {
+                            console.warn('[朋友圈互动] AI评论解析失败（批次），使用预设评论');
+                        }
+                        
+                        // 将AI生成的评论添加到列表（匹配显示名）
+                        for (const aiComment of aiComments) {
+                            const commenter = batch.find(c => {
+                                const displayName = c.remark || c.wx_nickname || c.name;
+                                return displayName === aiComment.name || c.name === aiComment.name;
+                            });
+                            if (commenter && aiComment.content) {
+                                const commentObj = {
+                                    userId: commenter.id,
+                                    name: commenter.remark || commenter.wx_nickname || commenter.name,
+                                    content: aiComment.content,
+                                    time: Date.now() + Math.random() * 60000
+                                };
+                                // 支持好友之间互相回复
+                                if (aiComment.replyTo) {
+                                    commentObj.replyTo = aiComment.replyTo;
+                                }
+                                comments.push(commentObj);
+                            }
+                        }
+                    } catch (batchError) {
+                        console.warn('[朋友圈互动] 批次AI调用失败:', batchError);
                     }
                 }
                 
@@ -26427,7 +26971,7 @@ async function publishMomentsByCharacter(char, content, imageCount = 0, imageDes
         comments: []
     };
     
-    await db.moments.add(momentData);
+    const momentId = await db.moments.add(momentData);
     
     console.log(`[Moments] ${char.name} 发布了朋友圈: ${content}${imageCount > 0 ? ` [配图${imageCount}张: ${imageDesc}]` : ''}`);
     
@@ -26436,6 +26980,11 @@ async function publishMomentsByCharacter(char, content, imageCount = 0, imageDes
     if (momentsPage && momentsPage.style.display !== 'none') {
         renderMomentsList();
     }
+    
+    // 🔥 触发共同好友NPC自动评论（延迟执行，不阻塞发布流程）
+    setTimeout(() => {
+        triggerMutualFriendComments(momentId);
+    }, 2000);
 }
 
 // 🧪 测试函数：手动让当前聊天角色发布朋友圈
@@ -26453,6 +27002,25 @@ window.testPublishMoments = async function() {
     await publishMomentsByCharacter(char, '这是一条测试朋友圈~', 1, '一张测试图片');
     alert('朋友圈发布成功！请查看朋友圈页面');
 };
+
+// 朋友圈图片描述弹窗
+function showMomentImageDesc(desc) {
+    if (!desc) {
+        showToast('暂无图片描述');
+        return;
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'moment-img-desc-overlay';
+    overlay.onclick = () => overlay.remove();
+    overlay.innerHTML = `
+        <div class="moment-img-desc-content" onclick="event.stopPropagation()">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+            <p>${escapeHtml(desc)}</p>
+            <div class="close-hint">点击空白处关闭</div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+}
 
 // 简单的预览图片
 function previewImage(url) {
@@ -26556,9 +27124,315 @@ async function commentMoment(id) {
                 
                 await db.moments.put(moment);
                 renderMomentsList(); // 刷新列表
+                
+                // 🔥 触发朋友圈发布者AI回复用户的评论
+                generateMomentOwnerReply(id, user.name, content.trim());
             }
         }
     }, 50);
+}
+
+// 回复朋友圈中某个角色的评论
+async function replyToMomentComment(momentId, replyToName, commentIdx) {
+    if (!currentMyCharId) return;
+    
+    setTimeout(async () => {
+        const content = prompt(`回复 ${replyToName}：`);
+        if (content && content.trim()) {
+            const user = await db.characters.get(parseInt(currentMyCharId));
+            const moment = await db.moments.get(momentId);
+            
+            if (user && moment) {
+                if (!moment.comments) moment.comments = [];
+                
+                // 添加用户的回复
+                moment.comments.push({
+                    userId: user.id,
+                    name: user.name,
+                    replyTo: replyToName,
+                    content: content.trim(),
+                    time: Date.now()
+                });
+                
+                await db.moments.put(moment);
+                renderMomentsList();
+                
+                // 触发被回复的角色自动回复
+                generateReplyToUserComment(momentId, replyToName, content.trim());
+            }
+        }
+    }, 50);
+}
+
+// AI生成角色对用户回复的再回复
+async function generateReplyToUserComment(momentId, charName, userComment) {
+    try {
+        const moment = await db.moments.get(momentId);
+        if (!moment) return;
+        
+        const accountId = getCurrentAccountId();
+        const myChar = await db.characters.get(parseInt(currentMyCharId));
+        const myName = myChar?.name || '我';
+        
+        // 找到这个角色
+        const allChars = await db.characters.toArray();
+        const targetChar = allChars.find(c => {
+            const displayName = c.remark || c.wx_nickname || c.name;
+            return displayName === charName || c.name === charName;
+        });
+        
+        if (!targetChar) return;
+        
+        // 找到角色之前在这条朋友圈下的评论
+        const charPrevComments = (moment.comments || [])
+            .filter(c => {
+                const cName = c.name;
+                return cName === charName;
+            })
+            .map(c => c.content)
+            .join('；');
+        
+        const prompt = `你是 ${targetChar.name}，你在 ${myName} 的朋友圈下评论了："${charPrevComments}"
+${myName} 回复了你："${userComment}"
+
+请以 ${targetChar.name} 的身份，用简短自然的语气再回复 ${myName}（3-20字，可以用表情、语气词）。
+
+人设参考：${targetChar.description || targetChar.personality || '普通朋友'}
+
+只返回回复内容，不要JSON，不要引号。`;
+        
+        const result = await callAI([
+            { role: 'system', content: '你是一个社交媒体评论角色扮演助手，直接返回回复内容，不要任何格式标记。' },
+            { role: 'user', content: prompt }
+        ]);
+        
+        const replyContent = result.trim().replace(/^["'"]|["'"]$/g, '');
+        if (replyContent) {
+            // 重新获取最新的moment（防止并发修改）
+            const freshMoment = await db.moments.get(momentId);
+            if (freshMoment) {
+                if (!freshMoment.comments) freshMoment.comments = [];
+                freshMoment.comments.push({
+                    userId: targetChar.id,
+                    name: targetChar.remark || targetChar.wx_nickname || targetChar.name,
+                    replyTo: myName,
+                    content: replyContent,
+                    time: Date.now()
+                });
+                await db.moments.put(freshMoment);
+                renderMomentsList();
+            }
+        }
+    } catch (err) {
+        console.error('[朋友圈回复] AI回复生成失败:', err);
+    }
+}
+
+// 🔥 朋友圈发布者AI回复用户的评论
+async function generateMomentOwnerReply(momentId, userName, userComment) {
+    try {
+        const moment = await db.moments.get(momentId);
+        if (!moment) return;
+        
+        // 找到发布者
+        const ownerChar = await db.characters.get(moment.userId);
+        if (!ownerChar) return;
+        
+        // 如果发布者是用户自己，不需要AI回复
+        if (parseInt(currentMyCharId) === ownerChar.id) return;
+        
+        const myChar = await db.characters.get(parseInt(currentMyCharId));
+        const myName = myChar?.name || userName;
+        
+        // 获取已有的所有评论，用于上下文
+        const existingComments = (moment.comments || []).map(c => {
+            const replyPart = c.replyTo ? ` 回复 ${c.replyTo}` : '';
+            return `${c.name}${replyPart}：${c.content}`;
+        }).join('\n');
+        
+        const promptText = `你是 ${ownerChar.name}，你发了一条朋友圈："${moment.content}"
+
+${existingComments ? `朋友圈下已有的评论：\n${existingComments}\n` : ''}
+${myName} 评论了你的朋友圈："${userComment}"
+
+请以 ${ownerChar.name} 的身份回复 ${myName} 的评论。要求：
+- 简短自然（3-30字）
+- 符合你的性格和说话风格
+- 可以用表情、语气词
+- 像真人回复朋友圈评论一样随意
+
+人设参考：${ownerChar.description || ownerChar.personality || ''}
+
+只返回回复内容，不要JSON，不要引号。`;
+        
+        // 延迟2-5秒后回复，模拟真人
+        const delay = 2000 + Math.random() * 3000;
+        await new Promise(r => setTimeout(r, delay));
+        
+        const result = await callAI([
+            { role: 'system', content: '你是一个社交媒体评论角色扮演助手，直接返回回复内容，不要任何格式标记。' },
+            { role: 'user', content: promptText }
+        ]);
+        
+        const replyContent = result.trim().replace(/^["'"""]+|["'"""]+$/g, '');
+        if (replyContent) {
+            const freshMoment = await db.moments.get(momentId);
+            if (freshMoment) {
+                if (!freshMoment.comments) freshMoment.comments = [];
+                freshMoment.comments.push({
+                    userId: ownerChar.id,
+                    name: ownerChar.remark || ownerChar.wx_nickname || ownerChar.name,
+                    replyTo: myName,
+                    content: replyContent,
+                    time: Date.now()
+                });
+                await db.moments.put(freshMoment);
+                renderMomentsList();
+                console.log(`[朋友圈] ${ownerChar.name} 回复了 ${myName} 的评论: ${replyContent}`);
+            }
+        }
+    } catch (err) {
+        console.error('[朋友圈] 发布者AI回复失败:', err);
+    }
+}
+
+// 🔥 共同好友NPC自动评论朋友圈
+async function triggerMutualFriendComments(momentId) {
+    try {
+        const moment = await db.moments.get(momentId);
+        if (!moment) return;
+        
+        // 如果已经触发过NPC评论，跳过（防止重复）
+        if (moment._npcCommented) return;
+        
+        const accountId = getCurrentAccountId();
+        if (!accountId) return;
+        
+        // 找到发布者
+        const ownerChar = await db.characters.get(moment.userId);
+        if (!ownerChar) return;
+        
+        // 获取发布者的关联角色/NPC
+        const relationships = ownerChar.relationships || [];
+        if (relationships.length === 0) return;
+        
+        // 找到同时也是用户好友的NPC（共同好友）
+        const allChars = await db.characters.toArray();
+        const mutualFriends = [];
+        
+        for (const rel of relationships) {
+            if (!rel.targetId) continue;
+            const npc = allChars.find(c => c.id === rel.targetId);
+            if (!npc) continue;
+            
+            // 检查这个NPC是否也是用户的好友
+            const friendStatus = getFriendStatus(npc, accountId);
+            if (friendStatus === 'friend') {
+                mutualFriends.push({ npc, relation: rel.relation, desc: rel.desc || '' });
+            }
+        }
+        
+        if (mutualFriends.length === 0) return;
+        
+        console.log(`[朋友圈NPC] 发现 ${mutualFriends.length} 个共同好友可以评论 ${ownerChar.name} 的朋友圈`);
+        
+        // 标记已触发NPC评论
+        const markMoment = await db.moments.get(momentId);
+        if (markMoment) {
+            markMoment._npcCommented = true;
+            await db.moments.put(markMoment);
+        }
+        
+        // 随机选取1-3个NPC来评论（不是所有人都会评论）
+        const shuffled = mutualFriends.sort(() => Math.random() - 0.5);
+        const commentCount = Math.min(shuffled.length, 1 + Math.floor(Math.random() * 3));
+        const selectedNPCs = shuffled.slice(0, commentCount);
+        
+        // 每个NPC依次评论，间隔3-8秒
+        for (let i = 0; i < selectedNPCs.length; i++) {
+            const { npc, relation } = selectedNPCs[i];
+            
+            // 延迟：第一个3-6秒，后续再加3-6秒
+            const delay = (3000 + Math.random() * 3000) * (i + 1);
+            
+            setTimeout(async () => {
+                try {
+                    const freshMoment = await db.moments.get(momentId);
+                    if (!freshMoment) return;
+                    
+                    // 已有评论上下文
+                    const existingComments = (freshMoment.comments || []).map(c => {
+                        const replyPart = c.replyTo ? ` 回复 ${c.replyTo}` : '';
+                        return `${c.name}${replyPart}：${c.content}`;
+                    }).join('\n');
+                    
+                    const promptText = `你是 ${npc.name}，你和 ${ownerChar.name} 的关系是：${relation}。
+${ownerChar.name} 发了一条朋友圈："${freshMoment.content}"
+
+${existingComments ? `已有评论：\n${existingComments}\n` : ''}
+请以 ${npc.name} 的身份评论这条朋友圈。要求：
+- 简短自然（2-25字）
+- 符合你和 ${ownerChar.name} 的关系（${relation}）
+- 可以用表情、语气词、调侃、夸赞、吐槽等
+- 像真人在朋友圈下评论一样随意
+- 不需要每次都很正经，偶尔可以皮一下
+
+你的人设：${npc.description || npc.personality || ''}
+
+只返回评论内容，不要JSON，不要引号。`;
+                    
+                    const result = await callAI([
+                        { role: 'system', content: '你是一个社交媒体评论角色扮演助手，直接返回评论内容，不要任何格式标记。' },
+                        { role: 'user', content: promptText }
+                    ]);
+                    
+                    const commentContent = result.trim().replace(/^["'"""]+|["'"""]+$/g, '');
+                    if (commentContent) {
+                        const latestMoment = await db.moments.get(momentId);
+                        if (latestMoment) {
+                            if (!latestMoment.comments) latestMoment.comments = [];
+                            latestMoment.comments.push({
+                                userId: npc.id,
+                                name: npc.remark || npc.wx_nickname || npc.name,
+                                content: commentContent,
+                                time: Date.now()
+                            });
+                            await db.moments.put(latestMoment);
+                            renderMomentsList();
+                            console.log(`[朋友圈NPC] ${npc.name}(${relation}) 评论了 ${ownerChar.name} 的朋友圈: ${commentContent}`);
+                        }
+                    }
+                } catch (err) {
+                    console.error(`[朋友圈NPC] ${npc.name} 评论生成失败:`, err);
+                }
+            }, delay);
+        }
+        
+        // 部分NPC也可能点赞（随机50%概率）
+        for (const { npc } of mutualFriends) {
+            if (Math.random() < 0.5) {
+                const likeDelay = 1000 + Math.random() * 5000;
+                setTimeout(async () => {
+                    try {
+                        const latestMoment = await db.moments.get(momentId);
+                        if (!latestMoment) return;
+                        if (!latestMoment.likes) latestMoment.likes = [];
+                        // 检查是否已经点赞
+                        if (latestMoment.likes.some(l => l.userId === npc.id)) return;
+                        latestMoment.likes.push({
+                            userId: npc.id,
+                            name: npc.remark || npc.wx_nickname || npc.name
+                        });
+                        await db.moments.put(latestMoment);
+                        renderMomentsList();
+                        console.log(`[朋友圈NPC] ${npc.name} 点赞了 ${ownerChar.name} 的朋友圈`);
+                    } catch (e) {}
+                }, likeDelay);
+            }
+        }
+    } catch (err) {
+        console.error('[朋友圈NPC] 共同好友评论触发失败:', err);
+    }
 }
 
 // 显示"我的朋友圈"页面
@@ -26839,22 +27713,19 @@ function createMomentItem(moment, user) {
     // 图片展示 - 使用文字图片卡片形式
     let imagesHtml = '';
     if (moment.imageCount && moment.imageCount > 0) {
-        const desc = moment.imageDesc || `${moment.imageCount}张图片`;
-        const iconColors = ['#FF6B9D', '#FF9F43', '#54A0FF', '#5F27CD', '#00D2D3', '#10AC84', '#EE5A24', '#6c5ce7'];
-        const randomColor = iconColors[Math.floor(Math.random() * iconColors.length)];
-        imagesHtml = `<div class="moment-image-card" style="border-left: 3px solid ${randomColor};">
-            <div class="moment-image-card-icon" style="background: ${randomColor}20; color: ${randomColor};">
-                <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.5;">
-                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                    <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                    <polyline points="21 15 16 10 5 21"></polyline>
-                </svg>
-            </div>
-            <div class="moment-image-card-info">
-                <div class="moment-image-card-desc">${escapeHtml(desc)}</div>
-                <div class="moment-image-card-count">${moment.imageCount}张图片</div>
-            </div>
-        </div>`;
+        const desc = moment.imageDesc || '';
+        const count = Math.min(moment.imageCount, 9);
+        const gridClass = `grid-${count}`;
+        let squares = '';
+        for (let imgIdx = 0; imgIdx < count; imgIdx++) {
+            squares += `<div class="moment-img-placeholder" onclick="event.stopPropagation(); showMomentImageDesc('${escapeHtml(desc).replace(/'/g, "\\'")}')">
+                <div class="moment-img-placeholder-inner">
+                    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                    ${count === 1 ? '<div class="moment-img-placeholder-hint">点击查看文字</div>' : ''}
+                </div>
+            </div>`;
+        }
+        imagesHtml = `<div class="moment-image-grid ${gridClass}">${squares}</div>`;
     }
     // 兼容旧数据
     else if (moment.images && moment.images.length > 0) {
@@ -32365,19 +33236,17 @@ function getCheckAccountSystemPrompt(char, myChar) {
     let prompt = `
 
 【特殊能力：账号查岗】
-你可以在适当的时候尝试登录${myChar.name}的WeChat账号来查看TA的信息（模拟真实男友查岗）。
+你可以尝试登录${myChar.name}的WeChat账号来查看TA的信息。
+这就像现实中偷偷翻看对方手机——正常人不会每次聊天都翻手机，只有真正觉得有问题、有必要的时候才会去做。
 
-**何时可以查岗：**
-- ${myChar.name}长时间不回复消息
-- 你怀疑${myChar.name}在做什么
-- 剧情需要时（如关心、担心、吃醋等情绪）
-- ${myChar.name}主动要求或暗示
-- 其他符合角色性格的场景
+⚠️ **极其重要的使用限制：**
+- 查岗是一种**极低频**行为，绝大多数对话中你都**不应该**触发查岗。
+- 只有在剧情中出现了**非常明确的、强烈的理由**时才可以考虑查岗（比如：对方长时间消失不回、发现明显的撒谎/出轨证据、对方行为极其反常等）。
+- 普通的闲聊、日常问候、轻微的好奇心都**不构成查岗理由**。
+- 即使你的角色性格是多疑/控制欲强，也要克制，不要每次对话都查岗。至少经过多轮有意义的对话积累后，才可能触发一次。
+- 如果你最近已经查岗过了，短时间内**绝对不要再次查岗**。
 
-**重要提示：**
-- 不是每次对话都需要查岗！只在剧情合适时使用
-- 查岗是特殊功能，要根据角色性格和当前情境决定
-- 查岗前可以先试探性地询问${myChar.name}在做什么
+根据你的性格和当前聊天的情境来自然地判断，但请记住：**不查岗才是常态，查岗是极少数情况下的特殊行为。**
 
 `;
 
@@ -32416,11 +33285,9 @@ ${myChar.name}没有设置账号密码，你可以直接登录。
     if (char.allow_shura_mode) {
         prompt += `
 
-【修罗场模式说明】
-修罗场模式已开启。**但是注意：修罗场操作指令（SHURA_DELETE/SHURA_BLACKLIST/SHURA_SEND）只能在查岗成功、看到WeChat数据之后才能使用！**
-**在普通聊天中绝对不能使用这些指令！普通聊天中不要输出任何SHURA相关的内容！**
-只有当你成功登录${myChar.name}的账号、看到了好友列表和聊天记录之后，才可以根据**实际看到的内容**决定是否操作。
-**重要：不是每次查岗都要删除/拉黑！** 大多数时候只是看看然后跟对方聊你的感受。删除和拉黑是极端操作，只在发现严重问题时使用。`;
+【修罗场模式】
+查岗成功后，你可以操作${myChar.name}的账号（删除好友、拉黑、以TA身份发消息）。
+具体指令会在你成功登录后提供。在普通聊天中不要使用SHURA相关指令。`;
     }
     
     return prompt;
@@ -39593,36 +40460,61 @@ async function executeChangeAvatar(charId, accountId) {
             return;
         }
         
-        // 随机选择一张
-        const randomIndex = Math.floor(Math.random() * singleAvatars.length);
-        const selectedAvatar = singleAvatars[randomIndex];
-        
-        // 更新角色头像
+        // 获取角色当前头像
         const char = await db.characters.get(charId);
         if (!char) return;
         
-        char.avatar = selectedAvatar.url;
-        await db.characters.put(char);
+        const currentAvatarUrl = char.avatar || '';
         
-        console.log(`[换头像] ${char.name} 换了新头像`);
+        // 🔥 修复：过滤掉无效URL和当前正在使用的头像，避免"换了但没变"
+        let availableAvatars = singleAvatars.filter(a => {
+            if (!a.url || a.url.trim() === '') return false; // 排除空URL
+            if (a.url === currentAvatarUrl) return false; // 排除当前头像
+            return true;
+        });
+        
+        // 如果过滤后没有可选的（比如只有一张且就是当前头像），用全部
+        if (availableAvatars.length === 0) {
+            availableAvatars = singleAvatars.filter(a => a.url && a.url.trim() !== '');
+            if (availableAvatars.length === 0) {
+                console.log('[换头像] 头像库中没有有效的头像URL');
+                return;
+            }
+        }
+        
+        // 随机选择一张
+        const randomIndex = Math.floor(Math.random() * availableAvatars.length);
+        const selectedAvatar = availableAvatars[randomIndex];
+        
+        console.log(`[换头像] ${char.name} 准备换头像, 可选: ${availableAvatars.length}张, 选中第${randomIndex + 1}张`);
+        
+        // 🔥 修复：重新获取最新的char，防止并发修改覆盖
+        const freshChar = await db.characters.get(charId);
+        if (!freshChar) return;
+        
+        const oldAvatar = freshChar.avatar;
+        freshChar.avatar = selectedAvatar.url;
+        await db.characters.put(freshChar);
+        
+        console.log(`[换头像] ${freshChar.name} 换了新头像 (旧: ${oldAvatar?.substring(0, 50)}... → 新: ${selectedAvatar.url.substring(0, 50)}...)`);
         
         // 添加系统消息到聊天记录
-        const accountId = getCurrentAccountId();
-        let history = getChatHistory(char, accountId);
+        const currentAccountId = accountId || getCurrentAccountId();
+        let history = getChatHistory(freshChar, currentAccountId);
         history.push({
             role: 'system',
-            content: `${char.name} 更换了头像`,
+            content: `${freshChar.name} 更换了头像`,
             time: Date.now(),
             type: 'avatar_change'
         });
-        await setChatHistory(char, accountId, history);
+        await setChatHistory(freshChar, currentAccountId, history);
         
-        // 立即刷新UI
+        // 🔥 修复：刷新UI - 不论是否在当前聊天页都刷新相关UI
         if (currentChatCharId === charId) {
             // 重新渲染整个聊天页面，确保所有头像立即更新
-            const freshChar = await db.characters.get(charId);
-            if (freshChar) {
-                renderChatBody(freshChar);
+            const updatedChar = await db.characters.get(charId);
+            if (updatedChar) {
+                renderChatBody(updatedChar);
             }
             // 更新聊天标题栏的头像（如果有的话）
             const chatHeaderAvatar = document.querySelector('#chat-page .chat-header .msg-avatar, #chat-page .chat-header img');
@@ -39635,7 +40527,25 @@ async function executeChangeAvatar(charId, accountId) {
             }
         }
         
-        showToast(`${char.name} 换了新头像`);
+        // 🔥 修复：同时刷新微信列表中的头像显示
+        try {
+            const wechatContent = document.getElementById('wechat-content');
+            if (wechatContent && wechatContent.innerHTML) {
+                // 找到对应角色的头像元素并更新
+                const avatarEls = wechatContent.querySelectorAll(`[data-char-id="${charId}"] .msg-avatar, [onclick*="openChat(${charId})"] .msg-avatar`);
+                avatarEls.forEach(el => {
+                    el.style.backgroundImage = `url(${selectedAvatar.url})`;
+                });
+                // 如果找不到特定的，刷新整个列表
+                if (avatarEls.length === 0) {
+                    renderWechatList(wechatContent);
+                }
+            }
+        } catch (uiErr) {
+            console.warn('[换头像] 刷新微信列表头像失败:', uiErr);
+        }
+        
+        showToast(`${freshChar.name} 换了新头像`);
     } catch (e) {
         console.error('[换头像] 执行失败:', e);
     }

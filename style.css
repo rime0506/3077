@@ -424,6 +424,123 @@
             margin-top: -8px;
             border-top: 1px solid #f5f5f5;
         }
+        /* 桌面设置合并栏 - 子分区标题 */
+        .custom-sub-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #666;
+            padding: 10px 0 4px;
+            margin-top: 8px;
+            border-top: 1px solid #eee;
+        }
+        .custom-sub-title:first-child {
+            margin-top: 0;
+            border-top: none;
+            padding-top: 0;
+        }
+
+        /* ===== 图片选择弹窗 ===== */
+        .image-picker-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.45);
+            z-index: 10000;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+        }
+        .image-picker-card {
+            background: #fff;
+            border-radius: 16px 16px 0 0;
+            width: 100%;
+            max-width: 420px;
+            padding: 20px 16px calc(env(safe-area-inset-bottom, 12px) + 12px);
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            animation: pickerSlideUp 0.25s ease;
+        }
+        @keyframes pickerSlideUp {
+            from { transform: translateY(100%); }
+            to { transform: translateY(0); }
+        }
+        .image-picker-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #333;
+            text-align: center;
+            padding-bottom: 14px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .image-picker-option {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 15px 8px;
+            cursor: pointer;
+            border-bottom: 1px solid #f5f5f5;
+            transition: background 0.15s;
+        }
+        .image-picker-option:hover {
+            background: #f9f9f9;
+        }
+        .image-picker-option span:last-child {
+            font-size: 15px;
+            color: #333;
+        }
+        .image-picker-url-area {
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+            padding: 12px 4px;
+        }
+        .image-picker-url-input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1.5px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+            box-sizing: border-box;
+            transition: border-color 0.2s;
+        }
+        .image-picker-url-input:focus {
+            border-color: var(--ins-pink);
+        }
+        .image-picker-preview-box {
+            width: 100%;
+            height: 160px;
+            border-radius: 10px;
+            background: #f5f5f5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            color: #bbb;
+            background-size: cover;
+            background-position: center;
+            overflow: hidden;
+        }
+        .image-picker-confirm {
+            padding: 10px;
+            background: var(--ins-pink);
+            color: #fff;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+        }
+        .image-picker-cancel {
+            margin-top: 8px;
+            padding: 12px;
+            text-align: center;
+            font-size: 15px;
+            color: #999;
+            cursor: pointer;
+            border-top: 1px solid #f0f0f0;
+        }
+
         /* 预览&编辑通用样式 */
         .wallpaper-preview {
             width: 100%;
@@ -6089,42 +6206,122 @@
     min-height: 80px;
 }
 
-/* 文字图片卡片样式 */
-.moment-image-card {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
+/* 朋友圈图片九宫格样式 */
+.moment-image-grid {
+    display: grid;
+    gap: 4px;
     margin-top: 8px;
-    background: #f8f9fa;
-    border-radius: 8px;
     max-width: 280px;
 }
-.moment-image-card-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 8px;
+.moment-image-grid.grid-1 {
+    grid-template-columns: 1fr;
+    max-width: 180px;
+}
+.moment-image-grid.grid-2 {
+    grid-template-columns: 1fr 1fr;
+    max-width: 200px;
+}
+.moment-image-grid.grid-3,
+.moment-image-grid.grid-6,
+.moment-image-grid.grid-9 {
+    grid-template-columns: 1fr 1fr 1fr;
+    max-width: 280px;
+}
+.moment-image-grid.grid-4 {
+    grid-template-columns: 1fr 1fr;
+    max-width: 200px;
+}
+.moment-image-grid.grid-5 {
+    grid-template-columns: 1fr 1fr 1fr;
+    max-width: 280px;
+}
+.moment-image-grid.grid-7,
+.moment-image-grid.grid-8 {
+    grid-template-columns: 1fr 1fr 1fr;
+    max-width: 280px;
+}
+
+/* 单个图片占位方块 */
+.moment-img-placeholder {
+    position: relative;
+    width: 100%;
+    padding-bottom: 100%; /* 正方形 */
+    background: #ffffff;
+    border: 1px solid #e8e8e8;
+    border-radius: 6px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 0.15s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.moment-img-placeholder:active {
+    transform: scale(0.96);
+}
+.moment-img-placeholder-inner {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+}
+.moment-img-placeholder-inner svg {
+    width: 28px;
+    height: 28px;
+    stroke: #bbb;
+    stroke-width: 1.5;
+    fill: none;
+}
+.moment-img-placeholder-hint {
+    font-size: 10px;
+    color: #bbb;
+}
+
+/* 点击展开后的图片描述浮层 */
+.moment-img-desc-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.75);
+    z-index: 9999;
     display: flex;
     align-items: center;
     justify-content: center;
-    flex-shrink: 0;
+    padding: 30px;
 }
-.moment-image-card-info {
-    flex: 1;
-    min-width: 0;
+.moment-img-desc-content {
+    background: #fff;
+    border-radius: 12px;
+    padding: 24px 20px;
+    max-width: 320px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2);
 }
-.moment-image-card-desc {
-    font-size: 13px;
+.moment-img-desc-content svg {
+    width: 36px;
+    height: 36px;
+    stroke: #bbb;
+    stroke-width: 1.5;
+    fill: none;
+    margin-bottom: 12px;
+}
+.moment-img-desc-content p {
+    font-size: 14px;
     color: #333;
-    line-height: 1.4;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1.6;
+    margin: 0;
 }
-.moment-image-card-count {
-    font-size: 11px;
-    color: #999;
-    margin-top: 2px;
+.moment-img-desc-content .close-hint {
+    font-size: 12px;
+    color: #aaa;
+    margin-top: 16px;
 }
 
 /* 底部信息栏 */
@@ -6204,6 +6401,15 @@
 }
 .comment-item {
     margin-bottom: 2px;
+    padding: 3px 0;
+    border-radius: 3px;
+    transition: background 0.15s;
+}
+.comment-item[onclick]:hover {
+    background: rgba(0,0,0,0.05);
+}
+.comment-item[onclick]:active {
+    background: rgba(0,0,0,0.1);
 }
 .comment-user {
     color: #576b95;
