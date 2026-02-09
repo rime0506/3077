@@ -2146,9 +2146,21 @@
         /* 禁止手机端长按消息时弹出浏览器默认选择菜单 */
         .message-row,
         .group-message-row {
-            -webkit-user-select: none;
-            user-select: none;
-            -webkit-touch-callout: none;
+            -webkit-user-select: none !important;
+            user-select: none !important;
+            -webkit-touch-callout: none !important;
+            -ms-user-select: none !important;
+            -moz-user-select: none !important;
+            touch-action: manipulation;
+        }
+        /* 确保所有子元素也禁用选择 - 修复iOS/Android长按弹出浏览器菜单 */
+        .message-row *,
+        .group-message-row * {
+            -webkit-user-select: none !important;
+            user-select: none !important;
+            -webkit-touch-callout: none !important;
+            -ms-user-select: none !important;
+            -moz-user-select: none !important;
         }
         .message-row {
             display: flex;
@@ -2183,6 +2195,10 @@
             overflow-wrap: break-word;
             word-break: break-word;
             white-space: pre-wrap;
+            /* 防止手机端长按触发浏览器默认选择 */
+            -webkit-user-select: none !important;
+            user-select: none !important;
+            -webkit-touch-callout: none !important;
         }
         /* ✅ 图片专用样式 - 防止URL被拆分 */
         .message-content .chat-image {

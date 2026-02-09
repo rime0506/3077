@@ -10147,11 +10147,20 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         
         // 群聊消息长按事件绑定
         function bindGroupMessageEvents(element, index) {
+            let touchStartEvent = null;
+            
             const startHandler = (e) => {
                 if (isSelectionMode) return;
                 isLongPress = false;
+                touchStartEvent = e;
                 longPressTimer = setTimeout(() => {
                     isLongPress = true;
+                    // 长按触发时阻止浏览器后续默认行为
+                    try {
+                        if (touchStartEvent && touchStartEvent.cancelable) {
+                            touchStartEvent.preventDefault();
+                        }
+                    } catch(ex) {}
                     showGroupContextMenu(e, index, element);
                 }, 500);
             };
@@ -10165,14 +10174,15 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             
             const endHandler = (e) => {
                 cancelHandler();
+                touchStartEvent = null;
                 if (isLongPress) {
                     e.preventDefault();
                     e.stopPropagation();
                 }
             };
 
-            // 触摸设备（CSS已通过user-select:none和touch-callout:none禁止了浏览器默认选择）
-            element.addEventListener('touchstart', startHandler, {passive: true});
+            // 触摸设备 - passive:false 允许在长按时调用preventDefault阻止浏览器默认菜单
+            element.addEventListener('touchstart', startHandler, {passive: false});
             element.addEventListener('touchmove', cancelHandler, {passive: true});
             element.addEventListener('touchend', endHandler);
             element.addEventListener('mousedown', startHandler);
@@ -13598,6 +13608,13 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
   "thought": "角色的心声/心理活动/想法"
 }
 
+【语言规则 - 重要！】
+如果你的人设是外国人、或你的角色使用非中文语言（如日语、韩语、英语、法语、俄语等），你必须：
+1. 永远用角色的母语/设定语言发消息，绝对不要直接用中文回复
+2. 每条消息后面用括号附上中文翻译，格式：外语消息（中文翻译）
+3. 分条消息时，每条都要单独带翻译：外语1（翻译1）|||外语2（翻译2）
+如果你是中文角色，请忽略此规则。
+
 请严格返回JSON格式，不要包含Markdown代码块标记。`;
 
                 // 添加表情包系统提示（如果角色挂载了表情包）- 主动聊天
@@ -14357,7 +14374,7 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
                                 }
                             }
                             const freshChar = await db.characters.get(char.id);
-                            const myChar = await db.characters.get(parseInt(accountId));
+                            const myChar = accountId ? await db.characters.get(parseInt(accountId)) : null;
                             const userName = myChar ? (myChar.nick || myChar.name) : '用户';
                             const pokeText = pokePart ? `${freshChar.name}${pokeAction}${userName}的${pokePart}` : `${freshChar.name}${pokeAction}${userName}`;
                             
@@ -16901,13 +16918,21 @@ ${groupContextStr}
         // --- 核心交互：长按与菜单 ---
         function bindMessageEvents(element, index) {
             let touchMoved = false;
+            let touchStartEvent = null;
             
             const startHandler = (e) => {
                 if (isSelectionMode) return; // 多选模式下禁用长按
                 isLongPress = false;
                 touchMoved = false;
+                touchStartEvent = e;
                 longPressTimer = setTimeout(() => {
                     isLongPress = true;
+                    // 长按触发时阻止浏览器后续默认行为（如文字选择菜单）
+                    try { 
+                        if (touchStartEvent && touchStartEvent.cancelable) {
+                            touchStartEvent.preventDefault();
+                        }
+                    } catch(ex) {}
                     showContextMenu(e, index, element);
                 }, 500); // 500ms 长按触发
             };
@@ -16922,6 +16947,7 @@ ${groupContextStr}
             
             const endHandler = (e) => {
                 cancelHandler();
+                touchStartEvent = null;
                 if (isLongPress) {
                     e.preventDefault(); // 阻止默认点击
                     e.stopPropagation();
@@ -16937,8 +16963,8 @@ ${groupContextStr}
                 }
             };
 
-            // 触摸设备（CSS已通过user-select:none和touch-callout:none禁止了浏览器默认选择）
-            element.addEventListener('touchstart', startHandler, {passive: true});
+            // 触摸设备 - passive:false 允许在长按时调用preventDefault阻止浏览器默认菜单
+            element.addEventListener('touchstart', startHandler, {passive: false});
             element.addEventListener('touchmove', cancelHandler, {passive: true});
             element.addEventListener('touchend', endHandler);
             
@@ -18597,7 +18623,9 @@ ${groupContextStr}
                 
                 // 🔧 添加时间戳消息到聊天记录，标记时间快进
                 const history = getChatHistory(char, accountId);
-                const newTime = Date.now() + (char.timeOffset || 0);
+                // 🔧 修复：使用 Date.now() 而非虚拟时间，因为 getChatHistory 会按 time 排序
+                // 如果用虚拟时间（未来），排序后这条系统消息会永远排到最后面
+                const newTime = Date.now();
                 const timeSkipMsg = `时间过去了 ${unitText}`;
                 history.push({
                     role: 'system',
@@ -19590,6 +19618,24 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 
 ---
 
+## 语言规则（重要！）
+
+如果你的人设是外国人、或你的角色使用非中文语言（如日语、韩语、英语、法语、俄语等），你**必须**遵守以下规则：
+
+1. **永远用角色的母语/设定语言发消息**，绝对不要直接用中文回复
+2. **每条消息后面用括号附上中文翻译**，格式：\`外语消息（中文翻译）\`
+3. 分条消息时，每条都要单独带翻译：\`外语1（翻译1）|||外语2（翻译2）\`
+
+示例（日语角色）：
+- おはよう～（早上好～）|||今日は何してたの？（你今天做了什么？）
+
+示例（英语角色）：
+- Good morning!（早上好！）|||What are you doing?（你在做什么？）
+
+⚠️ 如果你的人设是中文角色，请忽略此规则，正常用中文回复即可。
+
+---
+
 现在，作为 **${char.name}**，根据你的人设和对话历史，像真人一样回复吧。`;
 
                 // 添加一起听状态（如果正在和当前角色一起听）
@@ -19604,7 +19650,7 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 }
 
                 // 添加查岗系统提示（如果开启了查岗功能）
-                const myChar = await db.characters.get(parseInt(accountId));
+                const myChar = accountId ? await db.characters.get(parseInt(accountId)) : null;
                 if (myChar) {
                     const checkAccountPrompt = getCheckAccountSystemPrompt(char, myChar);
                     systemPrompt += checkAccountPrompt;
@@ -19882,7 +19928,7 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                             // 🔥 修罗场模式：在二次分析中也加入操作指令
                             if (char.allow_shura_mode) {
                                 const accountId = getCurrentAccountId();
-                                const myChar = await db.characters.get(parseInt(accountId));
+                                const myChar = accountId ? await db.characters.get(parseInt(accountId)) : null;
                                 const myName = myChar ? myChar.name : '用户';
                                 
                                 analysisPrompt += `
@@ -20593,7 +20639,7 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                                 }
                             }
                             const freshChar = await db.characters.get(targetCharId);
-                            const myChar = await db.characters.get(parseInt(accountId));
+                            const myChar = accountId ? await db.characters.get(parseInt(accountId)) : null;
                             const userName = myChar ? (myChar.nick || myChar.name) : '用户';
                             const pokeText = pokePart ? `${freshChar.name}${pokeAction}${userName}的${pokePart}` : `${freshChar.name}${pokeAction}${userName}`;
                             
@@ -32777,8 +32823,8 @@ async function initiateVideoCall() {
         }
 
         if (response.accepted) {
-            // 接听了，显示视频通话页面（角色会在页面中说第一句话）
-            showVideoCallPage(char);
+            // 接听了，显示视频通话页面，直接传入第一句话（不再单独调用API）
+            showVideoCallPage(char, response.acceptMessage);
         } else {
             // 不接听，返回聊天页面并显示消息（保存到聊天记录）
             await addVideoCallMessage(char, accountId, response.rejectMessage || '抱歉，现在不方便接听视频通话...');
@@ -32791,35 +32837,97 @@ async function initiateVideoCall() {
     }
 }
 
-// 调用API判断是否接听视频通话
+// 调用API判断是否接听视频通话（合并接听判断+第一句话为一次调用）
 async function callVideoCallAPI(char, accountId) {
     // 构建消息历史
     let history = getChatHistory(char, accountId);
     
-    // 构建系统提示
-    const systemPrompt = `你是${char.name}。用户刚刚向你发起了视频通话请求。
+    // 获取对话对象（用户）人设
+    let userDesc = "";
+    let userName = "用户";
+    if (char.linked_user_id) {
+        const user = await db.characters.get(char.linked_user_id);
+        if (user) {
+            userName = user.name;
+            userDesc = `\n\n【对话对象(User)信息】\n名字：${user.name}\n设定：${user.description || '无'}`;
+        }
+    }
+    
+    // 获取世界书上下文
+    let loreContext = "";
+    const lorebookIds = char.lorebookIds || (char.lorebookId ? [char.lorebookId] : []);
+    if (lorebookIds.length > 0 || true) { // 始终调用，会自动加载全局世界书
+        const recentText = history.slice(-10).map(m => m.content).join(' ');
+        loreContext = await getLorebookContext(lorebookIds, `${char.name} ${userName} ${recentText}`);
+    }
+    
+    // 计算虚拟时间
+    const virtualTimeStr = getFormattedVirtualTime(char.timeOffset);
+    
+    // 构建完整系统提示（包含双方人设、世界书、上下文）
+    const systemPrompt = `# 视频通话请求
 
-请根据以下因素决定是否接听视频通话：
-1. 你与用户的关系和熟悉程度
-2. 当前的聊天氛围和情绪
-3. 你的性格特点：${char.personality || '友好、活泼'}
-4. 最近的对话内容
+【当前时间】
+${virtualTimeStr}
 
-请以JSON格式回复，包含以下字段：
+---
+
+## 你是谁
+
+**你的名字**：${char.name}
+${char.nick ? `**昵称**：${char.nick}` : ''}
+${char.wx_nickname ? `**微信网名**：${char.wx_nickname}` : ''}
+
+你不是AI助手，你不是${userName}。你是一个独立的人，有自己的生活、情绪和想法。
+
+**你的人设**：
+${char.description || ''}
+${userDesc}
+${loreContext}
+${char.relationships && char.relationships.length > 0 ? `
+**你的关联角色/NPC**：
+${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}` : ''}
+
+---
+
+## 场景
+
+用户刚刚向你发起了**视频通话请求**。
+
+请根据你的人设、与用户的关系、当前聊天氛围和情绪，决定是否接听。
+
+- 如果你决定**接听**：写出你接通视频后的第一段话（100-500字），包含动作描写。
+  - 格式：动作描写:"说的话"
+  - 例如：微笑的挥挥手:"嗨～终于接通啦！刚刚在干嘛呢？"
+  - 动作必须是通过手机屏幕能看到的（挥手、微笑、调整镜头、比心、做鬼脸等）
+  
+- 如果你决定**不接听**：写出拒绝消息，说明原因，符合你的人设和语气。
+
+---
+
+## 回复格式
+
+用JSON格式返回（不要有markdown标记）：
+
 {
-    "accepted": true/false,  // 是否接听
-    "message": "你的回复消息"  // 接听或拒绝时发送的消息
+    "accepted": true或false,
+    "message": "你的回复内容（接听则写视频通话第一段话含动作描写，不接听则写拒绝消息）"
 }
-
-如果接听，消息可以是欢迎、开心的内容，比如"接通啦～好高兴看到你！"
-如果不接听，消息应该礼貌地说明原因，比如"抱歉呀，现在不太方便接视频通话，我们聊天吧～"
 
 只返回JSON，不要有其他内容。`;
 
-    // 构建消息数组
+    // 构建消息数组（带上下文）
+    const contextCount = char.context_message_count || 20;
+    const recentHistory = history.slice(-contextCount)
+        .filter(m => m.role !== 'system')
+        .map(m => ({
+            role: m.role === 'user' ? 'user' : 'assistant',
+            content: m.content
+        }));
+    
     const messages = [
         { role: 'system', content: systemPrompt },
-        ...history.map(h => ({ role: h.role === 'user' ? 'user' : 'assistant', content: h.content })),
+        ...recentHistory,
         { role: 'user', content: '[用户向你发起了视频通话请求]' }
     ];
 
@@ -32852,17 +32960,32 @@ async function callVideoCallAPI(char, accountId) {
         const randomAccept = Math.random() < 0.7;
         return {
             accepted: randomAccept,
-            acceptMessage: randomAccept ? '接通啦～' : null,
+            acceptMessage: randomAccept ? '微笑的挥挥手:"嗨～接通啦！"' : null,
             rejectMessage: !randomAccept ? '抱歉，现在不太方便接视频通话...' : null
         };
     }
 }
 
-// 添加视频通话消息到聊天记录
+// 添加视频通话消息到聊天记录（拒绝接听时调用）
 async function addVideoCallMessage(char, accountId, message) {
     let history = getChatHistory(char, accountId);
-    const aiMsg = { role: 'ai', content: message, time: Date.now() };
-    history.push(aiMsg);
+    
+    // 添加系统消息：用户发起了视频通话
+    history.push({
+        role: 'system',
+        content: '📹 你发起了视频通话',
+        time: Date.now() - 1,
+        isVideoCall: true
+    });
+    
+    // 添加角色的拒绝消息
+    history.push({
+        role: 'ai',
+        content: `[未接听视频通话] ${message}`,
+        time: Date.now(),
+        isVideoCall: true
+    });
+    
     await setChatHistory(char, accountId, history);
     
     // 刷新聊天界面
@@ -32920,7 +33043,7 @@ function cancelVideoCall() {
 }
 
 // 显示视频通话页面
-async function showVideoCallPage(char) {
+async function showVideoCallPage(char, firstMessage) {
     hideVideoWaitingPage();
 
     const videoPage = document.getElementById('video-call-page');
@@ -32964,8 +33087,23 @@ async function showVideoCallPage(char) {
         status.textContent = `视频通话中 ${minutes}:${seconds < 10 ? '0' + seconds : seconds}`;
     }, 1000);
 
-    // 角色接通后先说第一句话（调用AI）
-    await generateVideoCallFirstMessage(char);
+    // 直接显示第一句话（已在 callVideoCallAPI 中一次性获取，不再单独调用AI）
+    if (firstMessage) {
+        const aiMsgDiv = document.createElement('div');
+        aiMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #333333; border-bottom-left-radius: 4px;';
+        aiMsgDiv.textContent = firstMessage;
+        messageArea.appendChild(aiMsgDiv);
+        messageArea.scrollTop = messageArea.scrollHeight;
+        
+        currentVideoCallMessages.push({
+            role: 'assistant',
+            content: firstMessage,
+            time: Date.now()
+        });
+    } else {
+        // 兜底：如果没有第一句话，再单独调用
+        await generateVideoCallFirstMessage(char);
+    }
 }
 
 // 隐藏视频通话页面
@@ -33003,16 +33141,68 @@ function toggleCamera() {
 // 挂断视频通话
 async function hangupVideoCall() {
     if (confirm('确定要挂断视频通话吗？')) {
-        // 保存视频通话记录
+        // 保存视频通话记录到 localStorage
         if (currentVideoCallId && videoCallCharId && currentVideoCallMessages.length > 0) {
             await saveVideoCallRecord(videoCallCharId, currentVideoCallId, currentVideoCallMessages, videoCallSeconds);
         }
         
+        // 🔧 将视频通话内容写入聊天历史（让角色有记忆）
+        const savedCharId = videoCallCharId;
+        const savedMessages = [...currentVideoCallMessages];
+        const savedSeconds = videoCallSeconds;
+        
+        if (savedCharId && savedMessages.length > 0) {
+            try {
+                const char = await db.characters.get(savedCharId);
+                if (char) {
+                    const accountId = getCurrentAccountId();
+                    let history = getChatHistory(char, accountId);
+                    
+                    // 1. 添加系统消息：视频通话开始
+                    history.push({
+                        role: 'system',
+                        content: '📹 视频通话已接通',
+                        time: savedMessages[0] ? savedMessages[0].time - 1 : Date.now(),
+                        isVideoCall: true
+                    });
+                    
+                    // 2. 将视频通话中的每条消息写入聊天历史
+                    for (const msg of savedMessages) {
+                        history.push({
+                            role: msg.role === 'user' ? 'user' : 'ai',
+                            content: `[视频通话] ${msg.content}`,
+                            time: msg.time || Date.now(),
+                            isVideoCall: true
+                        });
+                    }
+                    
+                    // 3. 添加系统消息：视频通话结束 + 时长
+                    const minutes = Math.floor(savedSeconds / 60);
+                    const seconds = savedSeconds % 60;
+                    const durationStr = minutes > 0 
+                        ? `${minutes}分${seconds}秒` 
+                        : `${seconds}秒`;
+                    
+                    history.push({
+                        role: 'system',
+                        content: `📹 视频通话已结束，通话时长 ${durationStr}`,
+                        time: Date.now(),
+                        isVideoCall: true
+                    });
+                    
+                    await setChatHistory(char, accountId, history);
+                    console.log('[视频通话] ✅ 通话记录已写入聊天历史，共', savedMessages.length, '条消息');
+                }
+            } catch (e) {
+                console.error('[视频通话] 写入聊天历史失败:', e);
+            }
+        }
+        
         hideVideoCallPage();
         
-        // 确保返回聊天界面后，角色信息正确显示
-        if (videoCallCharId && currentChatCharId === videoCallCharId) {
-            const char = await db.characters.get(videoCallCharId);
+        // 确保返回聊天界面后，角色信息正确显示（重新渲染以显示视频通话记录）
+        if (savedCharId && currentChatCharId === savedCharId) {
+            const char = await db.characters.get(savedCharId);
             if (char) {
                 renderChatBody(char);
             }
@@ -33055,7 +33245,7 @@ async function saveVideoCallRecord(charId, callId, messages, duration) {
     console.log('视频通话记录已保存:', newRecord);
 }
 
-// 生成角色接通视频后的第一句话
+// 生成角色接通视频后的第一句话（仅作为兜底，正常流程已在 callVideoCallAPI 中一次性获取）
 async function generateVideoCallFirstMessage(char) {
     const accountId = getCurrentAccountId();
     const messageArea = document.getElementById('video-message-area');
@@ -33064,23 +33254,68 @@ async function generateVideoCallFirstMessage(char) {
         // 获取聊天历史作为上下文
         let history = getChatHistory(char, accountId);
         
-        // 构建系统提示
-        const systemPrompt = `你是${char.name}。
-性格：${char.personality || '友好、活泼'}
+        // 获取对话对象（用户）人设
+        let userDesc = "";
+        let userName = "用户";
+        if (char.linked_user_id) {
+            const user = await db.characters.get(char.linked_user_id);
+            if (user) {
+                userName = user.name;
+                userDesc = `\n\n【对话对象(User)信息】\n名字：${user.name}\n设定：${user.description || '无'}`;
+            }
+        }
+        
+        // 获取世界书上下文
+        let loreContext = "";
+        const lorebookIds = char.lorebookIds || (char.lorebookId ? [char.lorebookId] : []);
+        const recentText = history.slice(-10).map(m => m.content).join(' ');
+        loreContext = await getLorebookContext(lorebookIds, `${char.name} ${userName} ${recentText}`);
+        
+        // 计算虚拟时间
+        const virtualTimeStr = getFormattedVirtualTime(char.timeOffset);
+        
+        // 构建系统提示（包含完整人设）
+        const systemPrompt = `# 视频通话 - 接通
 
-重要场景设定：
-- 你刚刚接通了用户的视频通话请求
-- 现在是视频通话模式，你和用户隔着手机屏幕进行视频对话
-- 你可以看到用户（隔着屏幕），用户也能看到你
-- 回复格式：动作描写:"说的话"，例如：微笑的挥挥手:"嗨～终于接通啦!"
-- 动作必须是通过手机屏幕能看到的（比如：挥手、微笑、调整镜头角度、比心、做鬼脸等）
-- 回复字数要求：100-500字之间
+【当前时间】
+${virtualTimeStr}
 
-现在请说第一句话，欢迎用户的视频通话。要自然、符合你的性格，包含动作描写。字数控制在100-500字。`;
+---
+
+## 你是谁
+
+**你的名字**：${char.name}
+${char.nick ? `**昵称**：${char.nick}` : ''}
+
+你不是AI助手，你不是${userName}。你是一个独立的人，有自己的生活、情绪和想法。
+
+**你的人设**：
+${char.description || ''}
+${userDesc}
+${loreContext}
+
+---
+
+## 场景
+
+你刚刚接通了${userName}的视频通话请求。现在是视频通话模式，你和对方隔着手机屏幕进行视频对话。
+
+**回复要求**：
+- 格式：动作描写:"说的话"，例如：微笑的挥挥手:"嗨～终于接通啦！"
+- 动作必须是通过手机屏幕能看到的（挥手、微笑、调整镜头、比心、做鬼脸等）
+- 回复字数：100-500字
+- 完全贴合你的人设和性格，像真人一样自然
+
+现在请说第一句话。`;
+
+        const contextCount = char.context_message_count || 20;
+        const recentHistory = history.slice(-contextCount)
+            .filter(m => m.role !== 'system')
+            .map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content }));
 
         const messages = [
             { role: 'system', content: systemPrompt },
-            ...history.slice(-6).map(h => ({ role: h.role === 'user' ? 'user' : 'assistant', content: h.content })),
+            ...recentHistory,
             { role: 'user', content: '[视频通话已接通]' }
         ];
 
@@ -33161,20 +33396,66 @@ async function sendVideoMessage() {
             });
         });
 
-        // 构建系统提示
-        const systemPrompt = `你是${char.name}。
-性格：${char.personality || '友好、活泼'}
+        // 获取对话对象（用户）人设
+        let userDesc = "";
+        let userName = "用户";
+        if (char.linked_user_id) {
+            const user = await db.characters.get(char.linked_user_id);
+            if (user) {
+                userName = user.name;
+                userDesc = `\n\n【对话对象(User)信息】\n名字：${user.name}\n设定：${user.description || '无'}`;
+            }
+        }
+        
+        // 获取世界书上下文
+        let loreContext = "";
+        const lorebookIds = char.lorebookIds || (char.lorebookId ? [char.lorebookId] : []);
+        const chatHistory = getChatHistory(char, accountId);
+        const recentText = chatHistory.slice(-10).map(m => m.content).join(' ') + ' ' + videoMessages.map(m => m.content).join(' ');
+        loreContext = await getLorebookContext(lorebookIds, `${char.name} ${userName} ${recentText}`);
+        
+        // 计算虚拟时间
+        const virtualTimeStr = getFormattedVirtualTime(char.timeOffset);
 
-重要场景设定：
-- 你正在和用户进行视频通话
-- 现在是视频通话模式，你和用户隔着手机屏幕进行视频对话
-- 你可以看到用户（隔着屏幕），用户也能看到你
-- 回复格式：动作描写:"说的话"，例如：歪着头笑:"真的吗？太有趣了！"
-- 动作必须是通过手机屏幕能看到的（比如：挥手、微笑、调整镜头角度、比心、做鬼脸等）
-- 你的回复要自然、生动，可以结合视频场景（比如评论用户的背景、表情等）
-- 回复字数要求：100-500字之间
+        // 构建系统提示（包含完整人设、世界书、上下文）
+        const systemPrompt = `# 视频通话中
 
-请根据用户的消息自然回复，保持视频通话的互动感。字数控制在100-500字。`;
+【当前时间】
+${virtualTimeStr}
+
+---
+
+## 你是谁
+
+**你的名字**：${char.name}
+${char.nick ? `**昵称**：${char.nick}` : ''}
+${char.wx_nickname ? `**微信网名**：${char.wx_nickname}` : ''}
+
+你不是AI助手，你不是${userName}。你是一个独立的人，有自己的生活、情绪和想法。
+
+**你的人设**：
+${char.description || ''}
+${userDesc}
+${loreContext}
+${char.relationships && char.relationships.length > 0 ? `
+**你的关联角色/NPC**：
+${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}` : ''}
+
+---
+
+## 场景
+
+你正在和${userName}进行**视频通话**。你和对方隔着手机屏幕进行视频对话，你可以看到对方，对方也能看到你。
+
+**回复要求**：
+- 格式：动作描写:"说的话"，例如：歪着头笑:"真的吗？太有趣了！"
+- 动作必须是通过手机屏幕能看到的（挥手、微笑、调整镜头、比心、做鬼脸、靠近屏幕等）
+- 回复要自然、生动，可以结合视频场景（比如评论对方的背景、表情等）
+- 回复字数：100-500字
+- **严格贴合你的人设**，展现独特的说话方式、价值观和小习惯
+- 根据人设调整你的语气、用词和态度
+
+请根据对方的消息自然回复，保持视频通话的互动感。`;
 
         const messages = [
             { role: 'system', content: systemPrompt },
@@ -33497,13 +33778,34 @@ async function generateOfflineReply(char, accountId, storageKey) {
     let normalChatHistory = getChatHistory(char, accountId);
     
     // 获取用户信息
-    const myChar = await db.characters.get(parseInt(accountId));
+    const myChar = accountId ? await db.characters.get(parseInt(accountId)) : null;
     const myName = myChar?.name || '用户';
-    const myPersonaDesc = myChar?.personality || '普通用户';
+    const myPersonaDesc = myChar?.description || myChar?.personality || '普通用户';
     const friendName = char.name;
-    const friendPersona = char.personality || '友好、活泼';
+    const friendPersona = char.description || char.personality || '';
     
-    // 构建系统提示词（参考喵呜34.html的格式）
+    // 获取对话对象（用户）人设（通过 linked_user_id）
+    let userDesc = "";
+    if (char.linked_user_id) {
+        const user = await db.characters.get(char.linked_user_id);
+        if (user && user.description) {
+            userDesc = `\n   - **详细设定**：${user.description}`;
+        }
+    }
+    
+    // 获取世界书上下文
+    let loreContext = "";
+    const lorebookIds = char.lorebookIds || (char.lorebookId ? [char.lorebookId] : []);
+    const recentText = offlineModeHistory.slice(-10).map(m => m.content).join(' ') + ' ' + normalChatHistory.slice(-10).map(m => m.content).join(' ');
+    loreContext = await getLorebookContext(lorebookIds, `${char.name} ${myName} ${recentText}`);
+    
+    // 读取线下模式设置
+    const settings = getOfflineSettings();
+    const minWords = settings.minWords || 100;
+    const maxWords = settings.maxWords || 500;
+    const customPreset = settings.customPreset || '';
+    
+    // 构建系统提示词
     const systemPrompt = `# 角色指令 (System Instruction) - 线下模式
 你现在的身份是【${friendName}】，正在与【${myName}】进行**线下真实见面**。
 ⚠️ 重要：你的名字是${friendName}，你不是${myName}！你是独立的角色，有自己的性格和想法。
@@ -33511,15 +33813,20 @@ async function generateOfflineReply(char, accountId, storageKey) {
 
 ## 👥 人物档案
 1. **你的身份**：${friendName}
-   - **人设细节**：${friendPersona.replace(/。$/, '')}
+   - **人设细节**：${friendPersona}
+${char.nick ? `   - **昵称**：${char.nick}` : ''}
 2. **互动对象**：${myName}
-   - **对象人设**：${myPersonaDesc.replace(/。$/, '')}
+   - **对象人设**：${myPersonaDesc}${userDesc}
    - **你们的关系**：请根据双方人设自动推演
+${char.relationships && char.relationships.length > 0 ? `
+3. **关联角色/NPC**：
+${char.relationships.map(r => `   - ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}` : ''}
+${loreContext ? `\n## 📖 世界书设定\n${loreContext}` : ''}
 
 ## 🎭 行为准则 (Action Rules)
 1. **【第三人称视角】**：必须使用第三人称（如"${friendName}看着他"、"她笑了笑"）来描述自己的动作和心理，**严禁**使用第一人称（"我"）。
 2. **【描写要求】**：回复必须包含丰富的动作描写、神态描写和心理活动，展现人物的鲜活感。
-3. **【字数控制】**：回复长度请严格控制在 **100 - 500** 字之间。
+3. **【字数控制】**：回复长度请严格控制在 **${minWords} - ${maxWords}** 字之间。
 4. **【沉浸式互动】**：不要只说话，要结合环境和肢体语言。
 5. **【禁止网络元素】**：严禁在对话中提及或发送表情包、图片、语音等网络元素。这是线下面对面聊天，不是网络聊天。
 6. **【肢体互动】**：可以有真实的肢体互动和接触（比如：握手、拥抱、轻拍肩膀、递东西、眼神交流等）。
@@ -33548,7 +33855,8 @@ ${normalChatHistory.length > 0 ? `## 📱 聊天背景
 你们之前在微信上有过这些对话：
 ${normalChatHistory.slice(-10).map(h => `${h.role === 'user' ? myName : friendName}: ${h.content}`).join('\n')}
 
-现在你们约出来见面了，进行线下聊天。请基于之前的聊天记录和当前的线下场景自然回复。` : ''}`;
+现在你们约出来见面了，进行线下聊天。请基于之前的聊天记录和当前的线下场景自然回复。` : ''}
+${customPreset ? `\n## 📌 额外设定\n${customPreset}` : ''}`;
 
     // 构建消息数组（包含线下模式的对话历史）
     const messages = [
@@ -33610,6 +33918,78 @@ async function rerollOfflineMessage() {
         console.error('重新生成失败:', error);
         alert('重新生成失败: ' + error.message);
     }
+}
+
+// 线下模式设置相关函数
+function getOfflineSettingsKey() {
+    const accountId = getCurrentAccountId();
+    return `offline_settings_${accountId}_${offlineModeCharId}`;
+}
+
+function getOfflineSettings() {
+    if (!offlineModeCharId) return { minWords: 100, maxWords: 500, customPreset: '' };
+    const key = getOfflineSettingsKey();
+    const saved = localStorage.getItem(key);
+    if (saved) {
+        try {
+            return JSON.parse(saved);
+        } catch (e) {}
+    }
+    return { minWords: 100, maxWords: 500, customPreset: '' };
+}
+
+function showOfflineSettings() {
+    const settings = getOfflineSettings();
+    document.getElementById('offline-min-words').value = settings.minWords || 100;
+    document.getElementById('offline-max-words').value = settings.maxWords || 500;
+    document.getElementById('offline-custom-preset').value = settings.customPreset || '';
+    document.getElementById('offline-settings-page').style.display = 'flex';
+}
+
+function hideOfflineSettings() {
+    document.getElementById('offline-settings-page').style.display = 'none';
+}
+
+function saveOfflineSettings() {
+    if (!offlineModeCharId) return;
+    
+    let minWords = parseInt(document.getElementById('offline-min-words').value) || 100;
+    let maxWords = parseInt(document.getElementById('offline-max-words').value) || 500;
+    const customPreset = document.getElementById('offline-custom-preset').value.trim();
+    
+    // 校验
+    if (minWords < 10) minWords = 10;
+    if (maxWords < minWords) maxWords = minWords;
+    if (maxWords > 5000) maxWords = 5000;
+    
+    const settings = { minWords, maxWords, customPreset };
+    const key = getOfflineSettingsKey();
+    localStorage.setItem(key, JSON.stringify(settings));
+    
+    // 更新输入框显示
+    document.getElementById('offline-min-words').value = minWords;
+    document.getElementById('offline-max-words').value = maxWords;
+    
+    alert('设置已保存');
+    hideOfflineSettings();
+}
+
+function clearOfflineChatHistory() {
+    if (!offlineModeCharId) return;
+    if (!confirm('确定要清空线下聊天记录吗？此操作不可恢复。')) return;
+    
+    const accountId = getCurrentAccountId();
+    const key = `offline_chat_${accountId}_${offlineModeCharId}`;
+    localStorage.removeItem(key);
+    offlineModeHistory = [];
+    
+    // 刷新显示
+    (async () => {
+        const char = await db.characters.get(offlineModeCharId);
+        if (char) renderOfflineChatBody(char);
+    })();
+    
+    hideOfflineSettings();
 }
 
 // ===== 角色账号登录和查岗功能 =====
