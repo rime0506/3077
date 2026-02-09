@@ -12768,8 +12768,8 @@ async function saveChatDetail() {
     char.auto_reply_enabled = autoEnabled;
     char.auto_reply_interval = autoInterval > 0 ? autoInterval : null;
     char.context_message_count = contextCount > 0 ? contextCount : 20; // 默认20条
-    char.reply_min_count = (replyMinCount > 0 && replyMinCount <= 10) ? replyMinCount : 1; // 默认1条
-    char.reply_max_count = (replyMaxCount > 0 && replyMaxCount <= 10) ? replyMaxCount : 3; // 默认3条
+    char.reply_min_count = (replyMinCount > 0 && replyMinCount <= 50) ? replyMinCount : 1; // 默认1条
+    char.reply_max_count = (replyMaxCount > 0 && replyMaxCount <= 50) ? replyMaxCount : 3; // 默认3条
     char.allow_ai_check_account = allowCheckEnabled; // 保存查岗开关状态
     char.allow_shura_mode = allowShuraEnabled; // 保存修罗场模式开关状态
     char.allow_auto_avatar = allowAutoAvatar; // 保存自主换头像开关状态
