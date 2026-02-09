@@ -14156,14 +14156,14 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
                     }
                     
                     if (_mountedStickersListAuto.length > 0) {
-                        let stickerPromptAuto = `\n\n【表情包功能】\n你有 ${_mountedStickersListAuto.length} 个可用的表情包。想发表情包时，必须使用格式：[sticker:表情包描述]\n\n可用的表情包列表：\n`;
-                        stickerPromptAuto += _mountedStickersListAuto.map(s => `- ${s.description}`).join('\n');
+                        let stickerPromptAuto = `\n\n【表情包功能】\n你有 ${_mountedStickersListAuto.length} 个可用的表情包。想发表情包时，使用 [sticker:编号] 或 [sticker:完整描述] 格式。\n\n可用的表情包列表：\n`;
+                        stickerPromptAuto += _mountedStickersListAuto.map((s, i) => `${i + 1}. ${s.description}`).join('\n');
                         stickerPromptAuto += `\n\n⚠️ 表情包规则：`;
-                        stickerPromptAuto += `\n- 必须从上面列表中选择描述，使用 [sticker:描述] 格式`;
+                        stickerPromptAuto += `\n- 使用 [sticker:编号] 最简单可靠（如 [sticker:1]），也可以用 [sticker:完整描述]`;
                         stickerPromptAuto += `\n- 严禁编造不在列表中的表情包描述`;
                         stickerPromptAuto += `\n- 严禁用 [imgcard:] 发表情包`;
                         stickerPromptAuto += `\n- 表情包单独作为一条消息，用 ||| 与文字分开`;
-                        stickerPromptAuto += `\n- 例如：哈哈好的|||[sticker:${_mountedStickersListAuto[0].description}]`;
+                        stickerPromptAuto += `\n- 例如：哈哈好的|||[sticker:1]`;
                         
                         systemPrompt += stickerPromptAuto;
                         console.log('[AutoChat] ✅ 已添加表情包系统提示，可用表情包数:', _mountedStickersListAuto.length);
@@ -14176,10 +14176,30 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
                 const history = getChatHistory(char, accountId);
                 const recentHistory = (history || []).slice(-10)
                     .filter(m => m.content && m.content.trim()) // 过滤空消息
-                    .map(m => ({
-                        role: m.role === 'char' ? 'assistant' : 'user',
-                        content: m.content
-                    }));
+                    .map(m => {
+                        let content = m.content || '';
+                        const role = m.role === 'char' ? 'assistant' : 'user';
+                        
+                        // 🖼️ 图片识别：将 [img:base64/url] 转为多模态格式
+                        if (content.startsWith('[img:') && content.endsWith(']')) {
+                            const imgData = content.substring(5, content.length - 1).trim();
+                            if (imgData.startsWith('data:') || imgData.startsWith('http')) {
+                                return {
+                                    role: role,
+                                    content: [
+                                        { type: 'text', text: '（用户发送了一张图片，请仔细查看并根据图片内容回复）' },
+                                        { type: 'image_url', image_url: { url: imgData } }
+                                    ]
+                                };
+                            }
+                        }
+                        
+                        return { role, content };
+                    })
+                    .filter(m => {
+                        if (Array.isArray(m.content)) return m.content.length > 0;
+                        return m.content && m.content.trim();
+                    });
 
                 const messages = [
                     { role: 'system', content: systemPrompt },
@@ -15131,31 +15151,43 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
                         continue; // 跳过这个分段，不作为消息发送
                     }
                     
-                    // 🎯 检测表情包指令 [sticker:描述] - 在主动聊天分段中检测并替换为实际表情包图片
+                    // 🎯 检测表情包指令 [sticker:描述/编号] - 在主动聊天分段中检测并替换为实际表情包图片
                     if (/\[sticker:[^\]]+\]/i.test(seg) && _mountedStickersListAuto.length > 0) {
                         seg = seg.replace(/\[sticker:([^\]]+)\]/gi, (match, keyword) => {
-                            const stickerKeyword = keyword.trim().toLowerCase();
+                            const stickerKeyword = keyword.trim();
                             console.log(`[AutoChat] 检测到表情包指令: ${stickerKeyword}`);
                             
+                            // 🔢 优先：按编号匹配（AI用 [sticker:1] 格式）
+                            const numMatch = stickerKeyword.match(/^\d+$/);
+                            if (numMatch) {
+                                const idx = parseInt(numMatch[0]) - 1;
+                                if (idx >= 0 && idx < _mountedStickersListAuto.length) {
+                                    console.log(`[AutoChat] ✅ 按编号匹配到表情包 #${idx + 1}: ${_mountedStickersListAuto[idx].description}`);
+                                    return `[img:${_mountedStickersListAuto[idx].url}]`;
+                                }
+                            }
+                            
+                            // 📝 其次：按描述模糊匹配
+                            const stickerKeywordLower = stickerKeyword.toLowerCase();
                             let bestMatch = null;
                             let bestScore = 0;
                             
                             for (const s of _mountedStickersListAuto) {
                                 const desc = s.description.toLowerCase();
-                                if (desc === stickerKeyword) {
+                                if (desc === stickerKeywordLower) {
                                     bestMatch = s;
                                     bestScore = 100;
                                     break;
                                 }
-                                if (desc.includes(stickerKeyword) && stickerKeyword.length > 1) {
-                                    const score = stickerKeyword.length / desc.length * 80;
+                                if (desc.includes(stickerKeywordLower) && stickerKeywordLower.length > 1) {
+                                    const score = stickerKeywordLower.length / desc.length * 80;
                                     if (score > bestScore) { bestMatch = s; bestScore = score; }
                                 }
-                                if (stickerKeyword.includes(desc) && desc.length > 1) {
-                                    const score = desc.length / stickerKeyword.length * 70;
+                                if (stickerKeywordLower.includes(desc) && desc.length > 1) {
+                                    const score = desc.length / stickerKeywordLower.length * 70;
                                     if (score > bestScore) { bestMatch = s; bestScore = score; }
                                 }
-                                const keywords = stickerKeyword.split(/[\s,，、]+/).filter(k => k.length > 0);
+                                const keywords = stickerKeywordLower.split(/[\s,，、]+/).filter(k => k.length > 0);
                                 let matchCount = 0;
                                 for (const kw of keywords) {
                                     if (desc.includes(kw)) matchCount++;
@@ -20287,15 +20319,15 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                     }
                     
                     if (_mountedStickersList.length > 0) {
-                        let stickerPrompt = `\n\n---\n\n## 表情包功能\n\n你有 ${_mountedStickersList.length} 个可用的表情包。想发表情包时，**必须**使用以下格式：\n\`[sticker:表情包描述]\`\n\n可用的表情包列表：\n`;
-                        stickerPrompt += _mountedStickersList.map(s => `- ${s.description}`).join('\n');
+                        let stickerPrompt = `\n\n---\n\n## 表情包功能\n\n你有 ${_mountedStickersList.length} 个可用的表情包。想发表情包时，使用 \`[sticker:编号]\` 或 \`[sticker:完整描述]\` 格式。\n\n可用的表情包列表：\n`;
+                        stickerPrompt += _mountedStickersList.map((s, i) => `${i + 1}. ${s.description}`).join('\n');
                         stickerPrompt += `\n\n**⚠️ 表情包规则（必须严格遵守）**：`;
-                        stickerPrompt += `\n1. 发表情包时，**必须**从上面列表中选择一个描述，使用 \`[sticker:描述]\` 格式`;
-                        stickerPrompt += `\n2. **严禁**自己编造不在列表中的表情包描述`;
+                        stickerPrompt += `\n1. 发表情包时，使用 \`[sticker:编号]\` 最简单可靠（如 \`[sticker:1]\`），也可以用 \`[sticker:完整描述]\``;
+                        stickerPrompt += `\n2. **严禁**自己编造不在列表中的表情包描述，必须从上面列表中选择`;
                         stickerPrompt += `\n3. **严禁**用 \`[imgcard:]\` 来发表情包——\`[imgcard:]\` 只能用于拍照/截图/风景照等真实图片`;
                         stickerPrompt += `\n4. 表情包可以单独作为一条消息，用 \`|||\` 与文字分开`;
                         stickerPrompt += `\n5. 自然地使用，不要每条消息都发表情包，像真人一样偶尔穿插`;
-                        stickerPrompt += `\n6. 例如：哈哈好的|||[sticker:${_mountedStickersList[0].description}]`;
+                        stickerPrompt += `\n6. 例如：哈哈好的|||[sticker:1]`;
                         
                         systemPrompt += stickerPrompt;
                         console.log('[triggerAiReply] ✅ 已添加表情包系统提示，可用表情包数:', _mountedStickersList.length);
@@ -20323,16 +20355,36 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                     .filter(m => m.role !== 'system') // 🔧 过滤掉 system 消息（如时间戳），不发送给 AI
                     .map(m => {
                         let content = m.content || '';
+                        const role = m.role === 'char' ? 'assistant' : 'user';
+                        
+                        // 🖼️ 图片识别：将 [img:base64/url] 转为多模态格式，让AI能看到图片
+                        if (content.startsWith('[img:') && content.endsWith(']')) {
+                            const imgData = content.substring(5, content.length - 1).trim();
+                            if (imgData.startsWith('data:') || imgData.startsWith('http')) {
+                                // 构建多模态内容：文字提示 + 图片
+                                return {
+                                    role: role,
+                                    content: [
+                                        { type: 'text', text: '（用户发送了一张图片，请仔细查看并根据图片内容回复）' },
+                                        { type: 'image_url', image_url: { url: imgData } }
+                                    ]
+                                };
+                            }
+                        }
+                        
                         // 如果有图片描述，拼接在后面给 AI 看
                         if (m.imageDescription) {
                             content += `\n(图片描述: ${m.imageDescription})`;
                         }
                         return {
-                            role: m.role === 'char' ? 'assistant' : 'user',
+                            role: role,
                             content: content
                         };
                     })
-                    .filter(m => m.content && m.content.trim()); // 过滤空消息
+                    .filter(m => {
+                        if (Array.isArray(m.content)) return m.content.length > 0;
+                        return m.content && m.content.trim();
+                    }); // 过滤空消息
                     
                 console.log('[triggerAiReply] 📝 处理后的历史消息数:', recentHistory.length);
 
@@ -20370,7 +20422,9 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 console.log('');
                 console.log('【最近的对话内容】');
                 recentHistory.slice(-3).forEach((msg, index) => {
-                    const displayContent = msg.content.substring(0, 100) + (msg.content.length > 100 ? '...' : '');
+                    const displayContent = Array.isArray(msg.content)
+                        ? `[多模态: ${msg.content.map(p => p.type === 'image_url' ? '🖼️图片' : (p.text || '').substring(0, 50)).join(' + ')}]`
+                        : msg.content.substring(0, 100) + (msg.content.length > 100 ? '...' : '');
                     console.log(`  ${msg.role === 'user' ? '👤' : '🤖'} ${msg.role}: ${displayContent}`);
                 });
                 console.log('='.repeat(80));
@@ -21451,36 +21505,47 @@ ${checkResult.checkResult}
                         continue; // 跳过这个分段，不作为消息发送
                     }
                     
-                    // 🎯 检测表情包指令 [sticker:描述] - 在分段中检测并替换为实际表情包图片
+                    // 🎯 检测表情包指令 [sticker:描述/编号] - 在分段中检测并替换为实际表情包图片
                     if (/\[sticker:[^\]]+\]/i.test(seg) && _mountedStickersList.length > 0) {
                         seg = seg.replace(/\[sticker:([^\]]+)\]/gi, (match, keyword) => {
-                            const stickerKeyword = keyword.trim().toLowerCase();
+                            const stickerKeyword = keyword.trim();
                             console.log(`[AiReply] 检测到表情包指令: ${stickerKeyword}`);
                             
-                            // 匹配最佳表情包
+                            // 🔢 优先：按编号匹配（AI用 [sticker:1] 格式）
+                            const numMatch = stickerKeyword.match(/^\d+$/);
+                            if (numMatch) {
+                                const idx = parseInt(numMatch[0]) - 1; // 编号从1开始
+                                if (idx >= 0 && idx < _mountedStickersList.length) {
+                                    console.log(`[AiReply] ✅ 按编号匹配到表情包 #${idx + 1}: ${_mountedStickersList[idx].description}`);
+                                    return `[img:${_mountedStickersList[idx].url}]`;
+                                }
+                            }
+                            
+                            // 📝 其次：按描述模糊匹配
+                            const stickerKeywordLower = stickerKeyword.toLowerCase();
                             let bestMatch = null;
                             let bestScore = 0;
                             
                             for (const s of _mountedStickersList) {
                                 const desc = s.description.toLowerCase();
                                 // 完全匹配
-                                if (desc === stickerKeyword) {
+                                if (desc === stickerKeywordLower) {
                                     bestMatch = s;
                                     bestScore = 100;
                                     break;
                                 }
                                 // 描述包含关键词
-                                if (desc.includes(stickerKeyword) && stickerKeyword.length > 1) {
-                                    const score = stickerKeyword.length / desc.length * 80;
+                                if (desc.includes(stickerKeywordLower) && stickerKeywordLower.length > 1) {
+                                    const score = stickerKeywordLower.length / desc.length * 80;
                                     if (score > bestScore) { bestMatch = s; bestScore = score; }
                                 }
                                 // 关键词包含描述
-                                if (stickerKeyword.includes(desc) && desc.length > 1) {
-                                    const score = desc.length / stickerKeyword.length * 70;
+                                if (stickerKeywordLower.includes(desc) && desc.length > 1) {
+                                    const score = desc.length / stickerKeywordLower.length * 70;
                                     if (score > bestScore) { bestMatch = s; bestScore = score; }
                                 }
                                 // 关键词的部分词匹配
-                                const keywords = stickerKeyword.split(/[\s,，、]+/).filter(k => k.length > 0);
+                                const keywords = stickerKeywordLower.split(/[\s,，、]+/).filter(k => k.length > 0);
                                 let matchCount = 0;
                                 for (const kw of keywords) {
                                     if (desc.includes(kw)) matchCount++;
@@ -22571,6 +22636,7 @@ ${loreContext}
             const requestUrl = getSmartUrl(urlValue, '/chat/completions');
             
             // ✅ 全局防御：清洗 messages，防止空内容或非法格式导致 400 错误
+            // 支持多模态消息格式（图片识别）：content 可以是字符串或数组
             const cleanMessages = messages.map(m => {
                 // 验证 role 字段
                 let role = m.role;
@@ -22579,8 +22645,21 @@ ${loreContext}
                     role = 'user';
                 }
                 
-                // 确保 content 是字符串
                 let content = m.content;
+                
+                // 支持多模态内容（数组格式，用于图片识别）
+                if (Array.isArray(content)) {
+                    // 验证数组中每个元素
+                    const validParts = content.filter(part => {
+                        if (part.type === 'text') return part.text && part.text.trim().length > 0;
+                        if (part.type === 'image_url') return part.image_url && part.image_url.url;
+                        return false;
+                    });
+                    if (validParts.length === 0) return { role, content: '' };
+                    return { role, content: validParts };
+                }
+                
+                // 确保 content 是字符串
                 if (content === null || content === undefined) content = "";
                 if (typeof content !== 'string') content = String(content);
                 
@@ -22588,7 +22667,10 @@ ${loreContext}
                     role: role,
                     content: content.trim()
                 };
-            }).filter(m => m.content.length > 0); // 再次过滤空消息
+            }).filter(m => {
+                if (Array.isArray(m.content)) return m.content.length > 0;
+                return m.content.length > 0;
+            }); // 再次过滤空消息
 
             // 如果过滤后只剩下 system 消息，有些模型可能会报错，但大多数支持。
             // 这里我们不做 System 的强制检查，只要不为空即可。
@@ -22627,7 +22709,9 @@ ${loreContext}
             console.log('[callAI] Messages count:', cleanMessages.length);
             console.log('[callAI] Messages preview:', cleanMessages.map(m => ({
                 role: m.role,
-                content: m.content.substring(0, 100) + (m.content.length > 100 ? '...' : '')
+                content: Array.isArray(m.content) 
+                    ? `[多模态: ${m.content.map(p => p.type === 'image_url' ? '🖼️图片' : p.text?.substring(0, 50)).join(' + ')}]`
+                    : m.content.substring(0, 100) + (m.content.length > 100 ? '...' : '')
             })));
             
             // 纯前端：直接调用 AI API（需要配置支持 CORS 的 API 端点）
