@@ -301,6 +301,7 @@ async function migratePhoneAndSmsToIndexedDB() {
         // 页面加载初始化
         window.onload = async function() {
             checkFirstVisitDisclaimer(); // 首次访问弹出免责声明
+            checkUpdateNotice(); // 更新公告（每个版本只弹一次）
             await restoreDesktopOrder(); // 优先恢复桌面图标顺序
             await restoreSetting(); // 异步恢复DEXie数据
             await migrateAccountData(); // 迁移账号隔离数据
@@ -871,6 +872,95 @@ async function migratePhoneAndSmsToIndexedDB() {
         function checkFirstVisitDisclaimer() {
             if (!localStorage.getItem('disclaimer_accepted')) {
                 showDisclaimerModal(true);
+            }
+        }
+
+        // ===== 更新公告弹窗 =====
+        const UPDATE_VERSION = 'v2026-02-09'; // 每次更新改这个版本号，就会重新弹出
+        
+        function checkUpdateNotice() {
+            const readKey = 'update_notice_read_' + UPDATE_VERSION;
+            if (localStorage.getItem(readKey)) return; // 已读过此版本，不再弹出
+            showUpdateNotice();
+        }
+        
+        function showUpdateNotice() {
+            const readKey = 'update_notice_read_' + UPDATE_VERSION;
+            const overlay = document.createElement('div');
+            overlay.id = 'update-notice-modal';
+            overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;z-index:999999;animation:fadeIn 0.25s ease-out;';
+            
+            overlay.innerHTML = `
+                <div style="background:#fff;border-radius:16px;width:310px;max-height:80vh;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,0.15);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;flex-direction:column;">
+                    <div style="padding:22px 20px 0;text-align:center;">
+                        <div style="font-size:28px;margin-bottom:6px;">🎉</div>
+                        <div style="font-size:17px;font-weight:700;color:#262626;letter-spacing:0.3px;">更新公告</div>
+                        <div style="font-size:11px;color:#c7c7c7;margin-top:3px;">Update Notes · ${UPDATE_VERSION}</div>
+                    </div>
+                    <div style="padding:16px 20px;font-size:13px;color:#444;line-height:1.9;letter-spacing:0.2px;overflow-y:auto;flex:1;">
+                        <div style="font-size:14px;font-weight:600;color:#333;margin-bottom:8px;">🔧 修复了Bug</div>
+                        <div style="padding-left:4px;">
+                            <p style="margin:0 0 4px;">1. 规范角色发送表情包</p>
+                            <p style="margin:0 0 4px;">2. 回复条数最大设置50</p>
+                            <p style="margin:0 0 4px;">3. 修复了编辑消息没反应</p>
+                            <p style="margin:0 0 4px;">4. 修复了长按消息</p>
+                            <p style="margin:0 0 4px;">5. 修复了群聊无法发送表情包红包</p>
+                            <p style="margin:0 0 4px;">6. 修复了快进时间戳</p>
+                            <p style="margin:0 0 4px;">7. 修复了视频不读人设</p>
+                            <p style="margin:0 0 4px;">8. 修复了线下不读人设</p>
+                            <p style="margin:0 0 4px;">9. 改进了一下翻译</p>
+                            <p style="margin:0 0 4px;">10. 修了点朋友圈</p>
+                        </div>
+                        <div style="margin-top:12px;padding-top:10px;border-top:1px solid #f0f0f0;font-size:12px;color:#888;line-height:1.7;">
+                            谢谢大家反馈 如果还有bug欢迎再告知 ❤️
+                        </div>
+                    </div>
+                    <div style="padding:12px 20px 20px;text-align:center;">
+                        <button id="update-notice-btn" disabled onclick="dismissUpdateNotice()" style="
+                            width:100%;
+                            padding:12px;
+                            border:none;
+                            border-radius:10px;
+                            font-size:15px;
+                            font-weight:600;
+                            cursor:not-allowed;
+                            background:#e0e0e0;
+                            color:#aaa;
+                            transition:all 0.3s ease;
+                            letter-spacing:0.5px;
+                        ">请阅读 (5s)</button>
+                    </div>
+                </div>
+            `;
+            
+            document.body.appendChild(overlay);
+            
+            // 5秒倒计时
+            let countdown = 5;
+            const btn = document.getElementById('update-notice-btn');
+            const timer = setInterval(() => {
+                countdown--;
+                if (countdown > 0) {
+                    btn.textContent = `请阅读 (${countdown}s)`;
+                } else {
+                    clearInterval(timer);
+                    btn.disabled = false;
+                    btn.style.cursor = 'pointer';
+                    btn.style.background = 'var(--ins-pink, #ff6b9d)';
+                    btn.style.color = '#fff';
+                    btn.textContent = '我已阅读';
+                }
+            }, 1000);
+        }
+        
+        function dismissUpdateNotice() {
+            const readKey = 'update_notice_read_' + UPDATE_VERSION;
+            localStorage.setItem(readKey, '1');
+            const modal = document.getElementById('update-notice-modal');
+            if (modal) {
+                modal.style.transition = 'opacity 0.25s ease';
+                modal.style.opacity = '0';
+                setTimeout(() => modal.remove(), 250);
             }
         }
 
@@ -1587,18 +1677,47 @@ async function migratePhoneAndSmsToIndexedDB() {
             }
         }
         
-        // 应用字体到全局
+        // 应用字体到全局（排除图标/等宽/SVG等特殊元素，避免影响布局）
         function applyFontGlobal(fontName) {
             // 移除旧的全局字体样式
             if (customFontStyleElement) {
                 customFontStyleElement.remove();
             }
             
-            // 创建新的样式元素
+            // 创建新的样式元素 —— 通过 body 继承，而非 * 强制覆盖
             customFontStyleElement = document.createElement('style');
             customFontStyleElement.id = 'custom-font-global';
             customFontStyleElement.textContent = `
-                * {
+                body,
+                .custom-item-text,
+                .custom-edit-tip,
+                .custom-edit-input,
+                .custom-sub-title,
+                .setting-title,
+                .setting-item,
+                .app-icon .name,
+                .dock-icon .name,
+                .top-widget .text .title,
+                .top-widget .text .subtext,
+                .circle-photo .name,
+                .circle-photo .bubble,
+                .days-capsule .capsule,
+                .chat-bubble,
+                .msg-text,
+                .wechat-title,
+                .wechat-item .wechat-info .wechat-name,
+                .wechat-item .wechat-info .wechat-msg,
+                .modal-title,
+                .modal-input,
+                textarea,
+                input[type="text"],
+                button,
+                .save-btn,
+                .back-btn,
+                .detail-item,
+                .moment-content,
+                .moment-author-name,
+                .moment-comment-text {
                     font-family: "${fontName}", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
                 }
             `;
