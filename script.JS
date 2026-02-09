@@ -13292,6 +13292,9 @@ ${chatContext || '（没有聊天记录）'}
             document.getElementById('detail-auto-chat-switch').checked = !!char.auto_reply_enabled;
             document.getElementById('detail-auto-chat-interval').value = char.auto_reply_interval || '';
             
+            // 3.5. 回显外语翻译模式设置
+            document.getElementById('detail-foreign-lang-switch').checked = !!char.foreign_lang_mode;
+            
             // 4. 回显AI查岗设置
             document.getElementById('detail-allow-check-switch').checked = !!char.allow_ai_check_account;
             
@@ -13409,6 +13412,9 @@ async function saveChatDetail() {
     const replyMinCount = parseInt(document.getElementById('detail-reply-min-count').value);
     const replyMaxCount = parseInt(document.getElementById('detail-reply-max-count').value);
     
+    // 外语翻译模式设置
+    const foreignLangMode = document.getElementById('detail-foreign-lang-switch').checked;
+    
     // AI查岗设置
     const allowCheckEnabled = document.getElementById('detail-allow-check-switch').checked;
     
@@ -13438,6 +13444,7 @@ async function saveChatDetail() {
     char.context_message_count = contextCount > 0 ? contextCount : 20; // 默认20条
     char.reply_min_count = (replyMinCount > 0 && replyMinCount <= 50) ? replyMinCount : 1; // 默认1条
     char.reply_max_count = (replyMaxCount > 0 && replyMaxCount <= 50) ? replyMaxCount : 3; // 默认3条
+    char.foreign_lang_mode = foreignLangMode; // 保存外语翻译模式开关
     char.allow_ai_check_account = allowCheckEnabled; // 保存查岗开关状态
     char.allow_shura_mode = allowShuraEnabled; // 保存修罗场模式开关状态
     char.allow_auto_avatar = allowAutoAvatar; // 保存自主换头像开关状态
@@ -14266,12 +14273,14 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
   "thought": "角色的心声/心理活动/想法"
 }
 
-【语言规则 - 重要！】
-如果你的人设是外国人、或你的角色使用非中文语言（如日语、韩语、英语、法语、俄语等），你必须：
-1. 永远用角色的母语/设定语言发消息，绝对不要直接用中文回复
-2. 每条消息后面用括号附上中文翻译，格式：外语消息（中文翻译）
-3. 分条消息时，每条都要单独带翻译：外语1（翻译1）|||外语2（翻译2）
-如果你是中文角色，请忽略此规则。
+${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
+你的角色开启了外语翻译模式。你必须：
+1. 仔细阅读你的人设，确定角色的母语/设定语言（日语、韩语、英语等）
+2. 永远用角色人设中的语言发消息，绝对不要直接用中文回复
+3. 每条消息后面用括号附上中文翻译，格式：外语消息（中文翻译）
+4. 分条消息时，每条都要单独带翻译：外语1（翻译1）|||外语2（翻译2）
+5. 语言必须与人设一致！不要用人设中没有的语言！` : `【语言规则】
+你必须全程使用中文回复。即使你的角色人设是外国人，也请直接用中文对话，不要使用任何外语。`}
 
 请严格返回JSON格式，不要包含Markdown代码块标记。`;
 
@@ -20157,6 +20166,28 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
             listContainer.innerHTML = html;
         }
         
+        // ✅ 智能分割：保护翻译括号不被拆散
+        // 在句号、问号、感叹号处断句，但不拆散 外語？（中文翻译）
+        function smartSplitWithTranslation(text) {
+            if (!text) return [];
+            
+            // 匹配每个句子块：非断句标点内容 + 断句标点（可选）+ 翻译括号（可选）
+            // 翻译括号: （含中文的内容）
+            const chunkRegex = /[^。！？!?.]+[。！？!?.~…]*(?:\s*[（(][^）)]*[\u4e00-\u9fff][^）)]*[）)])?/g;
+            const chunks = text.match(chunkRegex);
+            
+            if (!chunks || chunks.length <= 1) return [text]; // 无法分割，返回原文
+            
+            // 检查是否有遗漏的末尾文本
+            const joined = chunks.join('');
+            if (joined.length < text.length) {
+                const remaining = text.substring(joined.length).trim();
+                if (remaining) chunks.push(remaining);
+            }
+            
+            return chunks.map(s => s.trim()).filter(s => s.length > 0);
+        }
+        
         // 拟人化分句辅助函数
         function splitMessage(text) {
             if (!text) return [];
@@ -20187,6 +20218,25 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
                 return placeholder;
             });
             
+            // ✅ 修复：保护 "标点+翻译括号" 组合不被拆分
+            // 例如 "視界？（翻译）" 中的 "？（翻译）" 应作为整体保留，不在？处断句
+            const translationPlaceholders = [];
+            let transPlaceholderIndex = 0;
+            // 先保护 标点+翻译括号 组合（标点后紧跟翻译括号的情况）
+            temp = temp.replace(/([。.！!？\?~…]+)\s*([（(][^）)]*[\u4e00-\u9fff][^）)]*[）)])/g, (match, punct, bracket) => {
+                const placeholder = `###TRANS_COMBO_${transPlaceholderIndex}###`;
+                translationPlaceholders[transPlaceholderIndex] = { type: 'combo', punct, bracket, full: match };
+                transPlaceholderIndex++;
+                return placeholder;
+            });
+            // 再保护独立的翻译括号（不紧跟在标点后的情况）
+            temp = temp.replace(/[（(]([^）)]*[\u4e00-\u9fff][^）)]*)[）)]/g, (match) => {
+                const placeholder = `###TRANS_COMBO_${transPlaceholderIndex}###`;
+                translationPlaceholders[transPlaceholderIndex] = { type: 'standalone', full: match };
+                transPlaceholderIndex++;
+                return placeholder;
+            });
+            
             // 保护省略号 (将2个以上点替换为中文省略号)
             temp = temp.replace(/\.{2,}/g, '…');
             // 标记去除标点：句号（但不在URL占位符内）
@@ -20199,21 +20249,54 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
             // 拆分消息
             let segments = temp.split(/###(?:DROP|KEEP)###/).map(s => s.trim()).filter(s => s.length > 0);
             
-            // 先恢复URL占位符
+            // 恢复翻译括号占位符：combo类型在句末追加标点+翻译，standalone直接恢复
+            segments = segments.map(seg => {
+                return seg.replace(/###TRANS_COMBO_(\d+)###/g, (match, index) => {
+                    const data = translationPlaceholders[parseInt(index)];
+                    if (!data) return match;
+                    return data.full; // 恢复完整的 "标点+翻译括号" 或 独立翻译括号
+                });
+            });
+            
+            // 恢复URL占位符
             segments = segments.map(seg => {
                 return seg.replace(/###URL_PLACEHOLDER_(\d+)###/g, (match, index) => {
                     return urlPlaceholders[parseInt(index)] || match;
                 });
             });
             
-            // 再恢复特殊格式块占位符
+            // 恢复特殊格式块占位符
             segments = segments.map(seg => {
                 return seg.replace(/###SPECIAL_BLOCK_(\d+)###/g, (match, index) => {
                     return specialBlockPlaceholders[parseInt(index)] || match;
                 });
             });
             
-            return segments;
+            // ✅ 后处理：修复被拆散的翻译括号（以（或(开头且含中文的段落合并到前一段）
+            let finalSegments = [];
+            for (let i = 0; i < segments.length; i++) {
+                const seg = segments[i];
+                if (finalSegments.length > 0 && /^[（(]/.test(seg) && /[\u4e00-\u9fff]/.test(seg)) {
+                    // 这是被拆散的翻译括号，合并回前一个段落
+                    const closeIdx = Math.max(seg.indexOf('）'), seg.indexOf(')'));
+                    if (closeIdx !== -1) {
+                        finalSegments[finalSegments.length - 1] += seg.substring(0, closeIdx + 1);
+                        const rest = seg.substring(closeIdx + 1).trim();
+                        if (rest) finalSegments.push(rest);
+                    } else {
+                        finalSegments[finalSegments.length - 1] += seg;
+                    }
+                } else if (finalSegments.length > 0 && /^[）)]/.test(seg)) {
+                    // 以右括号开头 = 翻译括号被拆断了，合并回前一段
+                    finalSegments[finalSegments.length - 1] += seg.charAt(0);
+                    const rest = seg.substring(1).trim();
+                    if (rest) finalSegments.push(rest);
+                } else {
+                    finalSegments.push(seg);
+                }
+            }
+            
+            return finalSegments.filter(s => s.trim().length > 0);
         }
 
         async function triggerAiReply(additionalSystemInfo = null) {
@@ -20482,13 +20565,15 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 
 ---
 
-## 语言规则（重要！）
+${char.foreign_lang_mode ? `## 语言规则（重要！必须遵守！）
 
-如果你的人设是外国人、或你的角色使用非中文语言（如日语、韩语、英语、法语、俄语等），你**必须**遵守以下规则：
+你的角色设定了外语翻译模式。你**必须**严格遵守以下规则：
 
-1. **永远用角色的母语/设定语言发消息**，绝对不要直接用中文回复
-2. **每条消息后面用括号附上中文翻译**，格式：\`外语消息（中文翻译）\`
-3. 分条消息时，每条都要单独带翻译：\`外语1（翻译1）|||外语2（翻译2）\`
+1. **仔细阅读你的人设，确定角色的母语/设定语言**（可能是日语、韩语、英语、法语、俄语等）
+2. **永远用角色人设中的语言发消息**，绝对不要直接用中文回复
+3. **每条消息后面用括号附上中文翻译**，格式：\`外语消息（中文翻译）\`
+4. 分条消息时，每条都要单独带翻译：\`外语1（翻译1）|||外语2（翻译2）\`
+5. **语言必须与人设一致**：如果人设是日本人就说日语，韩国人就说韩语，美国人就说英语。不要用人设中没有的语言！
 
 示例（日语角色）：
 - おはよう～（早上好～）|||今日は何してたの？（你今天做了什么？）
@@ -20496,7 +20581,8 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 示例（英语角色）：
 - Good morning!（早上好！）|||What are you doing?（你在做什么？）
 
-⚠️ 如果你的人设是中文角色，请忽略此规则，正常用中文回复即可。
+⚠️ 绝对不要只用中文回复！必须先写外语，再写翻译！` : `## 语言规则
+你必须**全程使用中文**回复。即使你的角色人设是外国人，也请直接用中文对话，不要使用任何外语。`}
 
 ---
 
@@ -21513,11 +21599,16 @@ ${checkResult.checkResult}
                             
                             // 🔥 增强：如果单条消息过长（超过100字），尝试智能分割
                             if (cleaned.length > 100 && !cleaned.startsWith('[') && !cleaned.startsWith('((')) {
-                                // 尝试按照句号、问号、感叹号等自然断句点分割
-                                const naturalBreaks = cleaned.match(/[^。！？!?]+[。！？!?]+/g);
+                                // ✅ 修复：先移除翻译括号再判断断句点，避免拆散翻译
+                                const withoutTranslation = cleaned.replace(/[（(][^）)]*[\u4e00-\u9fff][^）)]*[）)]/g, '');
+                                const naturalBreaks = withoutTranslation.match(/[^。！？!?]+[。！？!?]+/g);
                                 if (naturalBreaks && naturalBreaks.length > 1) {
-                                    console.log(`[TriggerAI] ⚠️ 单条消息过长(${cleaned.length}字)，尝试智能分割为${naturalBreaks.length}条`);
-                                    return naturalBreaks.map(nb => nb.trim());
+                                    // 使用不破坏翻译括号的方式分割
+                                    const smartSegments = smartSplitWithTranslation(cleaned);
+                                    if (smartSegments.length > 1) {
+                                        console.log(`[TriggerAI] ⚠️ 单条消息过长(${cleaned.length}字)，智能分割为${smartSegments.length}条`);
+                                        return smartSegments;
+                                    }
                                 }
                             }
                             
@@ -21538,9 +21629,10 @@ ${checkResult.checkResult}
                 if (segments.length === 1 && segments[0].length > 150) {
                     console.log('[TriggerAI] ⚠️ 只有1条消息但长度过长(', segments[0].length, ')，强制智能分割');
                     const longMsg = segments[0];
-                    const naturalBreaks = longMsg.match(/[^。！？!?]+[。！？!?]+/g);
-                    if (naturalBreaks && naturalBreaks.length > 1) {
-                        segments = naturalBreaks.map(s => s.trim()).filter(s => s);
+                    // ✅ 修复：使用不破坏翻译括号的智能分割
+                    const smartSegments = smartSplitWithTranslation(longMsg);
+                    if (smartSegments.length > 1) {
+                        segments = smartSegments;
                         console.log('[TriggerAI] ✅ 强制分割为', segments.length, '条');
                     }
                 }
@@ -35162,9 +35254,12 @@ async function renderOfflineChatBody(char) {
         // 内容气泡（INS风格）
         const content = document.createElement('div');
         const isUser = msg.role === 'user';
-        content.style.cssText = `max-width:70%; padding:10px 14px; border-radius:18px; font-size:14px; line-height:1.8; word-wrap:break-word; white-space:pre-wrap; font-family:-apple-system, BlinkMacSystemFont, sans-serif; color:#333; ${isUser ? 'background:#ffb3d1; color:#fff; border-bottom-right-radius:4px;' : 'background:#f0f0f0; color:#333; border-bottom-left-radius:4px;'}`;
+        content.style.cssText = `max-width:70%; padding:10px 14px; border-radius:18px; font-size:14px; line-height:1.8; word-wrap:break-word; white-space:pre-wrap; font-family:-apple-system, BlinkMacSystemFont, sans-serif; color:#333; -webkit-user-select:none; user-select:none; ${isUser ? 'background:#ffb3d1; color:#fff; border-bottom-right-radius:4px;' : 'background:#f0f0f0; color:#333; border-bottom-left-radius:4px;'}`;
         // 使用innerHTML保留换行，并转义HTML防止XSS
         content.textContent = msg.content;
+        
+        // 🔧 绑定长按事件（编辑、删除）
+        bindOfflineMessageEvents(content, index);
         
         row.appendChild(avatar);
         row.appendChild(content);
@@ -35175,6 +35270,168 @@ async function renderOfflineChatBody(char) {
     setTimeout(() => {
         body.scrollTop = body.scrollHeight;
     }, 0);
+}
+
+// 线下模式消息长按事件绑定
+let offlineActiveMsgIndex = -1;
+let offlineLongPressTimer = null;
+let offlineIsLongPress = false;
+
+function bindOfflineMessageEvents(element, index) {
+    let touchStartEvent = null;
+    let touchMoved = false;
+    
+    const startHandler = (e) => {
+        offlineIsLongPress = false;
+        touchMoved = false;
+        touchStartEvent = e;
+        offlineLongPressTimer = setTimeout(() => {
+            offlineIsLongPress = true;
+            try {
+                if (touchStartEvent && touchStartEvent.cancelable) {
+                    touchStartEvent.preventDefault();
+                }
+            } catch(ex) {}
+            showOfflineContextMenu(e, index, element);
+        }, 500);
+    };
+    
+    const cancelHandler = () => {
+        touchMoved = true;
+        if (offlineLongPressTimer) {
+            clearTimeout(offlineLongPressTimer);
+            offlineLongPressTimer = null;
+        }
+    };
+    
+    const endHandler = (e) => {
+        cancelHandler();
+        touchStartEvent = null;
+        if (offlineIsLongPress) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+    };
+    
+    element.addEventListener('touchstart', startHandler, {passive: false});
+    element.addEventListener('touchmove', cancelHandler, {passive: true});
+    element.addEventListener('touchend', endHandler);
+    element.addEventListener('mousedown', startHandler);
+    element.addEventListener('mousemove', cancelHandler);
+    element.addEventListener('mouseup', endHandler);
+    element.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+
+// 显示线下模式长按菜单
+function showOfflineContextMenu(event, index, element) {
+    if (navigator.vibrate) navigator.vibrate(50);
+    
+    offlineActiveMsgIndex = index;
+    element.style.transform = 'scale(0.98)';
+    element.style.filter = 'brightness(0.9)';
+    
+    const menu = document.getElementById('offline-msg-context-menu');
+    const overlay = document.getElementById('offline-menu-overlay');
+    
+    let clientX, clientY;
+    if (event.touches && event.touches.length > 0) {
+        clientX = event.touches[0].clientX;
+        clientY = event.touches[0].clientY;
+    } else {
+        clientX = event.clientX;
+        clientY = event.clientY;
+    }
+    
+    const winWidth = window.innerWidth;
+    const winHeight = window.innerHeight;
+    let menuX = clientX;
+    let menuY = clientY - 60;
+    
+    menu.style.display = 'flex';
+    
+    if (menuX + menu.offsetWidth > winWidth) {
+        menuX = winWidth - menu.offsetWidth - 10;
+    }
+    if (menuX < 10) menuX = 10;
+    if (menuY < 10) menuY = clientY + 10;
+    if (menuY + menu.offsetHeight > winHeight) {
+        menuY = winHeight - menu.offsetHeight - 10;
+    }
+    
+    menu.style.left = menuX + 'px';
+    menu.style.top = menuY + 'px';
+    
+    overlay.style.display = 'block';
+    overlay.style.pointerEvents = 'none';
+    setTimeout(() => {
+        overlay.style.pointerEvents = 'auto';
+    }, 350);
+}
+
+// 隐藏线下模式长按菜单
+function hideOfflineContextMenu() {
+    const menu = document.getElementById('offline-msg-context-menu');
+    const overlay = document.getElementById('offline-menu-overlay');
+    menu.style.display = 'none';
+    overlay.style.display = 'none';
+    
+    // 移除高亮
+    const body = document.getElementById('offline-chat-body');
+    if (body) {
+        body.querySelectorAll('div').forEach(el => {
+            el.style.transform = '';
+            el.style.filter = '';
+        });
+    }
+    offlineActiveMsgIndex = -1;
+}
+
+// 线下模式 - 编辑消息
+async function handleOfflineMsgEdit() {
+    hideOfflineContextMenu();
+    if (offlineActiveMsgIndex === -1 || !offlineModeCharId) return;
+    
+    const msg = offlineModeHistory[offlineActiveMsgIndex];
+    if (!msg) return;
+    
+    const newContent = prompt('编辑消息:', msg.content);
+    if (newContent === null) return; // 用户取消
+    if (newContent.trim() === '') {
+        alert('消息内容不能为空');
+        return;
+    }
+    
+    // 更新消息
+    offlineModeHistory[offlineActiveMsgIndex].content = newContent.trim();
+    
+    // 保存到localStorage
+    const accountId = getCurrentAccountId();
+    const key = `offline_chat_${accountId}_${offlineModeCharId}`;
+    localStorage.setItem(key, JSON.stringify(offlineModeHistory));
+    
+    // 刷新显示
+    const char = await db.characters.get(offlineModeCharId);
+    if (char) renderOfflineChatBody(char);
+}
+
+// 线下模式 - 删除消息
+async function handleOfflineMsgDelete() {
+    hideOfflineContextMenu();
+    if (offlineActiveMsgIndex === -1 || !offlineModeCharId) return;
+    
+    if (!confirm('删除这条消息？')) return;
+    
+    // 删除消息
+    offlineModeHistory.splice(offlineActiveMsgIndex, 1);
+    
+    // 保存到localStorage
+    const accountId = getCurrentAccountId();
+    const key = `offline_chat_${accountId}_${offlineModeCharId}`;
+    localStorage.setItem(key, JSON.stringify(offlineModeHistory));
+    
+    // 刷新显示
+    const char = await db.characters.get(offlineModeCharId);
+    if (char) renderOfflineChatBody(char);
 }
 
 // 处理线下模式输入框按键
