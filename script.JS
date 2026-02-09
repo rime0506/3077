@@ -8460,6 +8460,11 @@ ${loreContext}
                 });
             }
             
+            // ✅ 如果有新消息（非空历史），自动清除聊天列表隐藏标记
+            if (history && history.length > 0 && char.chat_hidden_by_user && accountId && char.chat_hidden_by_user[accountId]) {
+                char.chat_hidden_by_user[accountId] = false;
+            }
+            
             if (!accountId) {
                 // 兼容旧代码：如果没有账号ID，使用旧结构
                 char.chat_history = history;
@@ -8612,6 +8617,8 @@ ${loreContext}
             let allChars = await db.characters.toArray();
             let friends = allChars.filter(c => {
                 if (c.type === 'user') return false; // 排除User类型
+                // 过滤掉被用户从聊天列表隐藏的好友
+                if (c.chat_hidden_by_user && c.chat_hidden_by_user[accountId]) return false;
                 const status = getFriendStatus(c, accountId);
                 return status === 'friend' || status === 'deleted' || status === 'blocked' || status === 'deleted_by_char' || status === 'blocked_by_char'; // 包括已删除和已拉黑的好友（含被角色操作的）
             });
@@ -8976,11 +8983,20 @@ ${loreContext}
 
         async function deleteFriend(id, e) {
             e.stopPropagation();
-            if (confirm('确定要删除这位好友吗？\n(角色档案保留，仅删除好友关系)')) {
+            if (confirm('确定要删除该好友吗？\n(聊天记录将被清空，好友将从聊天列表和通讯录中移除)')) {
                 const char = await db.characters.get(id);
                 if (char) {
                     const accountId = getCurrentAccountId();
+                    
+                    // 清空聊天记录
+                    await setChatHistory(char, accountId, []);
+                    
+                    // 将好友状态改为已删除（从通讯录和聊天列表中移除）
                     await setFriendStatus(char, accountId, 'deleted');
+                    
+                    // 设置隐藏标记（防止聊天列表仍显示）
+                    if (!char.chat_hidden_by_user) char.chat_hidden_by_user = {};
+                    char.chat_hidden_by_user[accountId] = true;
                     char.is_pinned = false;
                     
                     // 初始化等待好友申请的设置
@@ -8997,12 +9013,14 @@ ${loreContext}
                     }
                     await db.characters.put(char);
                     
-                    // 刷新聊天窗口显示等待界面
+                    // 如果当前正在和这个好友聊天，关闭聊天窗口
                     if (currentChatCharId === id) {
-                        await renderChatBody(char, true);
+                        document.getElementById('chat-window').style.display = 'none';
+                        currentChatCharId = null;
                     }
                     
                     renderWechatList(document.getElementById('wechat-content'));
+                    showToast('已删除好友');
                 }
             }
         }
@@ -13138,8 +13156,14 @@ ${chatContext || '（没有聊天记录）'}
             // ✅ 打开聊天时标记所有角色消息为已读
             markChatAsRead(charId);
             
-            // 根据好友状态显示或隐藏输入框
+            // ✅ 清除聊天列表隐藏标记（重新打开聊天时恢复显示）
             const accountId = getCurrentAccountId();
+            if (char.chat_hidden_by_user && char.chat_hidden_by_user[accountId]) {
+                char.chat_hidden_by_user[accountId] = false;
+                db.characters.put(char).catch(e => console.error('清除隐藏标记失败:', e));
+            }
+            
+            // 根据好友状态显示或隐藏输入框
             const friendStatus = getFriendStatus(char, accountId);
             const chatFooter = document.getElementById('chat-footer');
             if (friendStatus === 'blocked' || friendStatus === 'deleted' || friendStatus === 'deleted_by_char' || friendStatus === 'blocked_by_char') {
