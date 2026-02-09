@@ -1287,6 +1287,18 @@
             font-size: 16px;
             background: #f9f9f9;
             outline: none;
+            box-sizing: border-box;
+        }
+        .modal-input:focus {
+            border-color: var(--ins-pink);
+            box-shadow: 0 0 0 2px rgba(255, 107, 157, 0.15);
+        }
+        textarea.modal-input {
+            min-height: 120px;
+            max-height: 50vh;
+            resize: vertical;
+            font-family: inherit;
+            line-height: 1.6;
         }
         .modal-btns {
             display: flex;
@@ -3115,11 +3127,14 @@
             padding: 6px;
             display: none;
             flex-direction: row;
+            flex-wrap: wrap;
+            justify-content: center;
             z-index: 9999;
             box-shadow: 0 2px 12px rgba(0,0,0,0.08);
             gap: 4px;
             animation: menuFadeIn 0.2s ease;
             border: 1px solid #f0f0f0;
+            max-width: calc(100vw - 20px);
         }
         @keyframes menuFadeIn {
             from { opacity: 0; transform: scale(0.95) translateY(-5px); }
@@ -6635,7 +6650,7 @@
 /* 关闭按钮 (绝对定位在卡片右上角或页面右上角) */
 .calendar-close-btn {
     position: absolute;
-    top: 20px;
+    top: 50px;
     right: 20px;
     width: 40px;
     height: 40px;

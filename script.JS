@@ -10867,22 +10867,31 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
 
             const winWidth = window.innerWidth;
             const winHeight = window.innerHeight;
-            let menuX = clientX;
-            let menuY = clientY - 60;
 
+            // ✅ 先显示菜单以获取真实尺寸
             menu.style.display = 'flex';
+            menu.style.left = '0px';
+            menu.style.top = '0px';
             
-            if (menuX + menu.offsetWidth > winWidth) {
-                menuX = winWidth - menu.offsetWidth - 10;
+            const menuWidth = menu.offsetWidth;
+            const menuHeight = menu.offsetHeight;
+            
+            // ✅ 水平居中于点击位置
+            let menuX = clientX - menuWidth / 2;
+            if (menuX + menuWidth > winWidth - 10) {
+                menuX = winWidth - menuWidth - 10;
             }
             if (menuX < 10) {
                 menuX = 10;
             }
+            
+            // ✅ 垂直：优先上方
+            let menuY = clientY - menuHeight - 10;
             if (menuY < 10) {
                 menuY = clientY + 10;
             }
-            if (menuY + menu.offsetHeight > winHeight) {
-                menuY = winHeight - menu.offsetHeight - 10;
+            if (menuY + menuHeight > winHeight - 10) {
+                menuY = winHeight - menuHeight - 10;
             }
 
             menu.style.left = menuX + 'px';
@@ -17869,28 +17878,34 @@ ${groupContextStr}
                 clientY = event.clientY;
             }
 
-            // 简单的边界检测（横排菜单）
             const winWidth = window.innerWidth;
             const winHeight = window.innerHeight;
-            let menuX = clientX;
-            let menuY = clientY - 60; // 显示在点击位置上方
 
-            menu.style.display = 'flex'; // 先显示以获取 offsetWidth
+            // ✅ 先显示菜单以获取真实尺寸（flex-wrap 可能导致多行）
+            menu.style.display = 'flex';
+            menu.style.left = '0px';
+            menu.style.top = '0px';
             
-            // 水平边界检测
-            if (menuX + menu.offsetWidth > winWidth) {
-                menuX = winWidth - menu.offsetWidth - 10;
+            // 强制重新布局以获取准确的尺寸
+            const menuWidth = menu.offsetWidth;
+            const menuHeight = menu.offsetHeight;
+            
+            // ✅ 水平居中于点击位置，同时确保不超出屏幕
+            let menuX = clientX - menuWidth / 2;
+            if (menuX + menuWidth > winWidth - 10) {
+                menuX = winWidth - menuWidth - 10;
             }
             if (menuX < 10) {
                 menuX = 10;
             }
             
-            // 垂直边界检测
+            // ✅ 垂直：优先显示在点击位置上方
+            let menuY = clientY - menuHeight - 10;
             if (menuY < 10) {
-                menuY = clientY + 10; // 如果上方空间不够，显示在下方
+                menuY = clientY + 10; // 上方空间不够，显示在下方
             }
-            if (menuY + menu.offsetHeight > winHeight) {
-                menuY = winHeight - menu.offsetHeight - 10;
+            if (menuY + menuHeight > winHeight - 10) {
+                menuY = winHeight - menuHeight - 10;
             }
 
             menu.style.left = menuX + 'px';
@@ -17916,6 +17931,107 @@ ${groupContextStr}
 
         // --- 菜单功能实现 ---
         
+        // 0. 复制消息内容
+        async function handleMsgCopy() {
+            hideContextMenu();
+            if (activeMsgIndex === -1) return;
+            
+            let textToCopy = '';
+            
+            // 群聊复制
+            if (window.currentGroupChatId) {
+                const group = await db.group_chats.get(window.currentGroupChatId);
+                if (group && group.chat_history && group.chat_history[activeMsgIndex]) {
+                    const msg = group.chat_history[activeMsgIndex];
+                    textToCopy = msg.content || '';
+                }
+            } else {
+                // 私聊复制
+                if (!currentChatCharId) return;
+                const char = await db.characters.get(currentChatCharId);
+                const accountId = getCurrentAccountId();
+                let history = getChatHistory(char, accountId);
+                const msg = history[activeMsgIndex];
+                if (msg) {
+                    textToCopy = msg.content || '';
+                }
+            }
+            
+            // 清理特殊格式：[img:...] → [图片], [voice:...] → [语音]
+            textToCopy = textToCopy
+                .replace(/\[img:[^\]]*\]/g, '[图片]')
+                .replace(/\[voice:[^\]]*\]/g, '[语音]')
+                .replace(/\[sticker:[^\]]*\]/g, '[表情]');
+            
+            // 如果是转账等 JSON 格式消息，提取可读内容
+            if (textToCopy.startsWith('{') && textToCopy.includes('"amount"')) {
+                try {
+                    const data = JSON.parse(textToCopy);
+                    textToCopy = `[转账] ¥${data.amount} ${data.desc || ''}`.trim();
+                } catch(e) {}
+            }
+            
+            if (!textToCopy) {
+                showToast('无内容可复制');
+                return;
+            }
+            
+            try {
+                await navigator.clipboard.writeText(textToCopy);
+                showToast('已复制');
+            } catch (e) {
+                // 降级方案：使用 textarea 复制
+                const ta = document.createElement('textarea');
+                ta.value = textToCopy;
+                ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;';
+                document.body.appendChild(ta);
+                ta.select();
+                try {
+                    document.execCommand('copy');
+                    showToast('已复制');
+                } catch (ex) {
+                    showToast('复制失败');
+                }
+                document.body.removeChild(ta);
+            }
+        }
+        
+        // === 编辑消息弹窗 ===
+        let editMsgCallback = null; // 保存编辑完成后的回调
+
+        function openEditMsgModal(content, callback) {
+            const modal = document.getElementById('edit-msg-modal');
+            const textarea = document.getElementById('edit-msg-textarea');
+            textarea.value = content || '';
+            editMsgCallback = callback;
+            modal.style.display = 'flex';
+            // 延迟聚焦，让动画先播放
+            setTimeout(() => {
+                textarea.focus();
+                // 光标移到末尾
+                textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+            }, 100);
+        }
+
+        function closeEditMsgModal() {
+            const modal = document.getElementById('edit-msg-modal');
+            modal.style.display = 'none';
+            editMsgCallback = null;
+        }
+
+        function confirmEditMsg() {
+            const textarea = document.getElementById('edit-msg-textarea');
+            const newContent = textarea.value.trim();
+            if (!newContent) {
+                showToast('消息内容不能为空');
+                return;
+            }
+            if (editMsgCallback) {
+                editMsgCallback(newContent);
+            }
+            closeEditMsgModal();
+        }
+
         // 1. 编辑
         async function handleMsgEdit() {
             hideContextMenu();
@@ -17937,21 +18053,23 @@ ${groupContextStr}
                     return;
                 }
 
-                const newContent = prompt("编辑消息", msg.content);
-                if (newContent !== null && newContent.trim() !== "") {
-                    group.chat_history[activeMsgIndex].content = newContent.trim();
-                    await db.group_chats.put(group);
+                const editIndex = activeMsgIndex;
+                openEditMsgModal(msg.content, async (newContent) => {
+                    const grp = await db.group_chats.get(window.currentGroupChatId);
+                    if (!grp || !grp.chat_history) return;
+                    grp.chat_history[editIndex].content = newContent;
+                    await db.group_chats.put(grp);
                     
                     // 直接更新DOM，不刷新整个群聊
                     const chatBody = document.getElementById('chat-body');
-                    const msgEl = chatBody.querySelector(`[data-index="${activeMsgIndex}"]`);
+                    const msgEl = chatBody.querySelector(`[data-index="${editIndex}"]`);
                     if (msgEl) {
                         const messageContent = msgEl.querySelector('.message-content') || msgEl.querySelector('.group-msg-content');
                         if (messageContent) {
-                            messageContent.innerHTML = renderMessageContent(newContent.trim());
+                            messageContent.innerHTML = renderMessageContent(newContent);
                         }
                     }
-                }
+                });
                 return;
             }
             
@@ -17964,26 +18082,30 @@ ${groupContextStr}
             const msg = history[activeMsgIndex];
             
             if (msg.content.startsWith('[img:')) {
-                alert("图片消息暂不支持编辑");
+                showToast("图片消息暂不支持编辑");
                 return;
             }
 
-            const newContent = prompt("编辑消息", msg.content);
-            if (newContent !== null && newContent.trim() !== "") {
-                msg.content = newContent.trim();
-                history[activeMsgIndex] = msg;
-                await setChatHistory(char, accountId, history);
+            const editIndex = activeMsgIndex;
+            const editCharId = currentChatCharId;
+            openEditMsgModal(msg.content, async (newContent) => {
+                const c = await db.characters.get(editCharId);
+                const aid = getCurrentAccountId();
+                let h = getChatHistory(c, aid);
+                if (!h[editIndex]) return;
+                h[editIndex].content = newContent;
+                await setChatHistory(c, aid, h);
                 
                 // 🔧 立即更新UI，用data-index精确定位，不重新渲染整个聊天
                 const chatBody = document.getElementById('chat-body');
-                const msgEl = chatBody.querySelector(`[data-index="${activeMsgIndex}"]`);
+                const msgEl = chatBody.querySelector(`[data-index="${editIndex}"]`);
                 if (msgEl) {
                     const messageContent = msgEl.querySelector('.message-content');
                     if (messageContent) {
-                        messageContent.innerHTML = renderMessageContent(newContent.trim());
+                        messageContent.innerHTML = renderMessageContent(newContent);
                     }
                 }
-            }
+            });
         }
 
         // 2. 撤回（保存原内容，点击可查看）
@@ -35344,18 +35466,27 @@ function showOfflineContextMenu(event, index, element) {
     
     const winWidth = window.innerWidth;
     const winHeight = window.innerHeight;
-    let menuX = clientX;
-    let menuY = clientY - 60;
     
+    // ✅ 先显示以获取真实尺寸
     menu.style.display = 'flex';
+    menu.style.left = '0px';
+    menu.style.top = '0px';
     
-    if (menuX + menu.offsetWidth > winWidth) {
-        menuX = winWidth - menu.offsetWidth - 10;
+    const menuWidth = menu.offsetWidth;
+    const menuHeight = menu.offsetHeight;
+    
+    // ✅ 水平居中于点击位置
+    let menuX = clientX - menuWidth / 2;
+    if (menuX + menuWidth > winWidth - 10) {
+        menuX = winWidth - menuWidth - 10;
     }
     if (menuX < 10) menuX = 10;
+    
+    // ✅ 垂直：优先上方
+    let menuY = clientY - menuHeight - 10;
     if (menuY < 10) menuY = clientY + 10;
-    if (menuY + menu.offsetHeight > winHeight) {
-        menuY = winHeight - menu.offsetHeight - 10;
+    if (menuY + menuHeight > winHeight - 10) {
+        menuY = winHeight - menuHeight - 10;
     }
     
     menu.style.left = menuX + 'px';
@@ -35386,6 +35517,36 @@ function hideOfflineContextMenu() {
     offlineActiveMsgIndex = -1;
 }
 
+// 线下模式 - 复制消息
+async function handleOfflineMsgCopy() {
+    hideOfflineContextMenu();
+    if (offlineActiveMsgIndex === -1) return;
+    
+    const msg = offlineModeHistory[offlineActiveMsgIndex];
+    if (!msg || !msg.content) {
+        showToast('无内容可复制');
+        return;
+    }
+    
+    try {
+        await navigator.clipboard.writeText(msg.content);
+        showToast('已复制');
+    } catch (e) {
+        const ta = document.createElement('textarea');
+        ta.value = msg.content;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            document.execCommand('copy');
+            showToast('已复制');
+        } catch (ex) {
+            showToast('复制失败');
+        }
+        document.body.removeChild(ta);
+    }
+}
+
 // 线下模式 - 编辑消息
 async function handleOfflineMsgEdit() {
     hideOfflineContextMenu();
@@ -35394,24 +35555,21 @@ async function handleOfflineMsgEdit() {
     const msg = offlineModeHistory[offlineActiveMsgIndex];
     if (!msg) return;
     
-    const newContent = prompt('编辑消息:', msg.content);
-    if (newContent === null) return; // 用户取消
-    if (newContent.trim() === '') {
-        alert('消息内容不能为空');
-        return;
-    }
-    
-    // 更新消息
-    offlineModeHistory[offlineActiveMsgIndex].content = newContent.trim();
-    
-    // 保存到localStorage
-    const accountId = getCurrentAccountId();
-    const key = `offline_chat_${accountId}_${offlineModeCharId}`;
-    localStorage.setItem(key, JSON.stringify(offlineModeHistory));
-    
-    // 刷新显示
-    const char = await db.characters.get(offlineModeCharId);
-    if (char) renderOfflineChatBody(char);
+    const editIndex = offlineActiveMsgIndex;
+    const editCharId = offlineModeCharId;
+    openEditMsgModal(msg.content, async (newContent) => {
+        // 更新消息
+        offlineModeHistory[editIndex].content = newContent;
+        
+        // 保存到localStorage
+        const accountId = getCurrentAccountId();
+        const key = `offline_chat_${accountId}_${editCharId}`;
+        localStorage.setItem(key, JSON.stringify(offlineModeHistory));
+        
+        // 刷新显示
+        const char = await db.characters.get(editCharId);
+        if (char) renderOfflineChatBody(char);
+    });
 }
 
 // 线下模式 - 删除消息

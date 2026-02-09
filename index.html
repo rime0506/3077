@@ -714,6 +714,18 @@
     <!-- 隐藏的数据导入文件选择器 -->
     <input type="file" id="import-data-input" style="display:none;" accept=".json" onchange="importAllData(this)">
 
+    <!-- 编辑消息弹窗 -->
+    <div class="modal-overlay" id="edit-msg-modal" style="display:none;" onclick="if(event.target===this)closeEditMsgModal()">
+        <div class="modal-box" style="max-width:360px;">
+            <div class="modal-title">✏️ 编辑消息</div>
+            <textarea id="edit-msg-textarea" class="modal-input" placeholder="编辑消息内容..." onkeydown="if(event.key==='Escape'){closeEditMsgModal();event.preventDefault();}"></textarea>
+            <div class="modal-btns">
+                <button class="modal-btn btn-cancel" onclick="closeEditMsgModal()">取消</button>
+                <button class="modal-btn btn-confirm" onclick="confirmEditMsg()">保存</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 联机登录弹窗 -->
     <div class="modal-overlay" id="online-login-modal" style="display:none;">
         <div class="modal-box" style="max-width:340px;">
@@ -2677,6 +2689,10 @@
 
     <!-- 消息上下文菜单 -->
     <div class="context-menu" id="msg-context-menu">
+        <div class="context-menu-item" onclick="handleMsgCopy()">
+            <span>复制</span>
+            <svg class="svg-icon" style="width:16px; height:16px;" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        </div>
         <div class="context-menu-item" onclick="handleMsgQuote()">
             <span>引用</span>
             <svg class="svg-icon" style="width:16px; height:16px;" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
@@ -3315,7 +3331,7 @@
     <!-- 头像预览弹窗 -->
     <div id="avatar-preview-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(255,255,255,0.97); z-index:10001; align-items:center; justify-content:center; flex-direction:column;">
         <!-- 关闭按钮 -->
-        <div onclick="hideAvatarPreview()" style="position:absolute; top:20px; right:20px; cursor:pointer; padding:8px;">
+        <div onclick="hideAvatarPreview()" style="position:absolute; top:50px; right:20px; cursor:pointer; padding:8px;">
             <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:none; stroke:#262626; stroke-width:1.8;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
         </div>
         <img id="avatar-preview-img" src="" style="width:220px; height:220px; border-radius:50%; object-fit:cover; border:1px solid #efefef;">
@@ -4155,6 +4171,10 @@
 
     <!-- 线下模式长按菜单 -->
     <div class="context-menu" id="offline-msg-context-menu" style="z-index:9999;">
+        <div class="context-menu-item" onclick="handleOfflineMsgCopy()">
+            <span>复制</span>
+            <svg class="svg-icon" style="width:16px; height:16px;" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        </div>
         <div class="context-menu-item" onclick="handleOfflineMsgEdit()">
             <span>编辑</span>
             <svg class="svg-icon" style="width:16px; height:16px;" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
