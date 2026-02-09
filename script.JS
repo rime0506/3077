@@ -10171,12 +10171,14 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 }
             };
 
+            // 触摸设备（CSS已通过user-select:none和touch-callout:none禁止了浏览器默认选择）
             element.addEventListener('touchstart', startHandler, {passive: true});
             element.addEventListener('touchmove', cancelHandler, {passive: true});
             element.addEventListener('touchend', endHandler);
             element.addEventListener('mousedown', startHandler);
             element.addEventListener('mousemove', cancelHandler);
             element.addEventListener('mouseup', endHandler);
+            // 禁用右键默认菜单（同时覆盖手机端长按触发的contextmenu）
             element.addEventListener('contextmenu', (e) => e.preventDefault());
         }
         
@@ -13558,7 +13560,7 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 这些是你身边的人，你可以在聊天中自然地提到他们，也可以让他们加对方好友。` : ''}
 
 【可用互动功能 - 积极使用，让聊天更真实！】
-- **图片/自拍/分享图**：[imgcard:图片描述] — 想发图片、自拍、风景照、截图等时使用，用文字描述即可。例如：[imgcard:刚拍的自拍 穿着新裙子比了个耶]、[imgcard:窗外的晚霞好美]（注意：禁止使用[img:URL]格式）
+- **图片/自拍/分享图**：[imgcard:图片描述] — 想发真实照片、自拍、风景照、截图等时使用，用文字描述即可。例如：[imgcard:刚拍的自拍 穿着新裙子比了个耶]、[imgcard:窗外的晚霞好美]（注意：禁止使用[img:URL]格式。⚠️ [imgcard:]仅限拍照/截图等真实图片，严禁用来发表情包！发表情包必须用 [sticker:] 格式）
 - **撤回消息**：((RECALL)) — 说错话、后悔、打错字时，真人经常撤回
 - **戳一戳**：((POKE: 动作, 部位)) — 调皮互动、撒娇、引起注意（例如 ((POKE: 戳了戳, 脸蛋))、((POKE: 拍了拍, 肩膀))、((POKE: 揉了揉, 头发))）
 - **打开APP**：((OPEN_APP: APP名称)) — 展示你有自己的生活！（例如 ((OPEN_APP: 王者荣耀))、((OPEN_APP: 抖音))、((OPEN_APP: 网易云音乐))、((OPEN_APP: B站))。聊到要忙、玩游戏、刷视频时都可以用）
@@ -13597,6 +13599,40 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
 }
 
 请严格返回JSON格式，不要包含Markdown代码块标记。`;
+
+                // 添加表情包系统提示（如果角色挂载了表情包）- 主动聊天
+                let _mountedStickersListAuto = [];
+                try {
+                    const mountedStickerIdsAuto = char.mounted_sticker_categories || [];
+                    if (mountedStickerIdsAuto.length > 0) {
+                        for (const catId of mountedStickerIdsAuto) {
+                            const cat = await db.sticker_categories.get(catId);
+                            if (cat && cat.stickers && cat.stickers.length > 0) {
+                                for (const s of cat.stickers) {
+                                    if (s.description && s.url) {
+                                        _mountedStickersListAuto.push({ description: s.description, url: s.url });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (_mountedStickersListAuto.length > 0) {
+                        let stickerPromptAuto = `\n\n【表情包功能】\n你有 ${_mountedStickersListAuto.length} 个可用的表情包。想发表情包时，必须使用格式：[sticker:表情包描述]\n\n可用的表情包列表：\n`;
+                        stickerPromptAuto += _mountedStickersListAuto.map(s => `- ${s.description}`).join('\n');
+                        stickerPromptAuto += `\n\n⚠️ 表情包规则：`;
+                        stickerPromptAuto += `\n- 必须从上面列表中选择描述，使用 [sticker:描述] 格式`;
+                        stickerPromptAuto += `\n- 严禁编造不在列表中的表情包描述`;
+                        stickerPromptAuto += `\n- 严禁用 [imgcard:] 发表情包`;
+                        stickerPromptAuto += `\n- 表情包单独作为一条消息，用 ||| 与文字分开`;
+                        stickerPromptAuto += `\n- 例如：哈哈好的|||[sticker:${_mountedStickersListAuto[0].description}]`;
+                        
+                        systemPrompt += stickerPromptAuto;
+                        console.log('[AutoChat] ✅ 已添加表情包系统提示，可用表情包数:', _mountedStickersListAuto.length);
+                    }
+                } catch (e) {
+                    console.error('[AutoChat] 表情包提示构建失败:', e);
+                }
 
                 // 取最近 10 条历史记录作为参考（按账号）
                 const history = getChatHistory(char, accountId);
@@ -13668,10 +13704,10 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
                         }
                     }
                 
-                // ✅ 修复：清理末尾多余的 ]，但保留 [img:] [voice:] [imgcard:] 等格式的闭合括号
+                // ✅ 修复：清理末尾多余的 ]，但保留 [img:] [voice:] [imgcard:] [sticker:] 等格式的闭合括号
                 function cleanMessage(text) {
                     if (!text) return text;
-                    // 🔒 安全转换：AI禁止发真实图片，将 [img:URL] 转换为 [imgcard:图片描述]
+                    // 🔒 安全转换：AI禁止发真实图片，将 [img:URL] 转换为 [imgcard:图片描述]（但不处理 [sticker:]）
                     text = text.replace(/\[img:([^\]]+)\]/gi, (match, url) => {
                         // 如果是base64或真实URL，转换为文字卡片
                         if (url.startsWith('http') || url.startsWith('data:')) {
@@ -13681,7 +13717,7 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
                         return `[imgcard:${url}]`;
                     });
                     // 检查是否是特殊格式消息（以 [ 开头，以 ] 结尾）
-                    const specialFormats = /^\[(voice|imgcard):/i;
+                    const specialFormats = /^\[(voice|imgcard|sticker|img):/i;
                     if (specialFormats.test(text) && text.endsWith(']')) {
                         // 是特殊格式，不删除末尾的 ]
                         return text;
@@ -14518,6 +14554,52 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
                         continue; // 跳过这个分段，不作为消息发送
                     }
                     
+                    // 🎯 检测表情包指令 [sticker:描述] - 在主动聊天分段中检测并替换为实际表情包图片
+                    if (/\[sticker:[^\]]+\]/i.test(seg) && _mountedStickersListAuto.length > 0) {
+                        seg = seg.replace(/\[sticker:([^\]]+)\]/gi, (match, keyword) => {
+                            const stickerKeyword = keyword.trim().toLowerCase();
+                            console.log(`[AutoChat] 检测到表情包指令: ${stickerKeyword}`);
+                            
+                            let bestMatch = null;
+                            let bestScore = 0;
+                            
+                            for (const s of _mountedStickersListAuto) {
+                                const desc = s.description.toLowerCase();
+                                if (desc === stickerKeyword) {
+                                    bestMatch = s;
+                                    bestScore = 100;
+                                    break;
+                                }
+                                if (desc.includes(stickerKeyword) && stickerKeyword.length > 1) {
+                                    const score = stickerKeyword.length / desc.length * 80;
+                                    if (score > bestScore) { bestMatch = s; bestScore = score; }
+                                }
+                                if (stickerKeyword.includes(desc) && desc.length > 1) {
+                                    const score = desc.length / stickerKeyword.length * 70;
+                                    if (score > bestScore) { bestMatch = s; bestScore = score; }
+                                }
+                                const keywords = stickerKeyword.split(/[\s,，、]+/).filter(k => k.length > 0);
+                                let matchCount = 0;
+                                for (const kw of keywords) {
+                                    if (desc.includes(kw)) matchCount++;
+                                }
+                                if (matchCount > 0) {
+                                    const score = matchCount / keywords.length * 60;
+                                    if (score > bestScore) { bestMatch = s; bestScore = score; }
+                                }
+                            }
+                            
+                            if (bestMatch) {
+                                console.log(`[AutoChat] ✅ 匹配到表情包: ${bestMatch.description} (得分: ${bestScore})`);
+                                return `[img:${bestMatch.url}]`;
+                            } else {
+                                const randomSticker = _mountedStickersListAuto[Math.floor(Math.random() * _mountedStickersListAuto.length)];
+                                console.log(`[AutoChat] ⚠️ 未找到匹配的表情包，随机选择: ${randomSticker.description}`);
+                                return `[img:${randomSticker.url}]`;
+                            }
+                        });
+                    }
+                    
                     // 延时：第一条稍快，后续模拟打字
                     if (i > 0) {
                         const delay = 500 + Math.min(seg.length * 80, 2000);
@@ -15247,12 +15329,15 @@ ${groupContextStr}
                             } catch (e3) {
                                 console.error('[triggerGroupMemberReply] 修复后仍然失败:', e3);
                                 
-                                // 最后尝试：逐个提取对象
-                                const objectMatches = aiResponse.matchAll(/\{[^{}]*"name"\s*:\s*"[^"]+"\s*,\s*"content"\s*:\s*"[^"]*"[^{}]*\}/g);
+                                // 最后尝试：逐个提取所有JSON对象（包括带content的普通消息和不带content的指令如红包等）
+                                const objectMatches = aiResponse.matchAll(/\{[^{}]*"(?:name|type)"\s*:\s*"[^"]*"[^{}]*\}/g);
                                 for (const match of objectMatches) {
                                     try {
                                         const obj = JSON.parse(match[0]);
-                                        replies.push(obj);
+                                        // 需要有name字段才是有效的回复
+                                        if (obj.name) {
+                                            replies.push(obj);
+                                        }
                                     } catch (e4) {
                                         // 忽略单个解析失败
                                     }
@@ -15274,15 +15359,21 @@ ${groupContextStr}
                     if (!updatedGroup.mutedMembers) updatedGroup.mutedMembers = [];
                     
                     let msgIndex = 0;
+                    const memberNicknamesMap = updatedGroup.memberNicknames || {};
                     for (const reply of replies) {
-                        // 查找操作者的成员ID
+                        // 查找操作者的成员ID（匹配：角色名、备注名、微信昵称、群昵称）
                         let senderId = null;
                         if (reply.name) {
+                            const replyName = reply.name.trim();
                             for (const [memberId, char] of Object.entries(memberMap)) {
-                                if (char.name === reply.name || char.remark === reply.name || char.nick === reply.name) {
+                                const groupNick = memberNicknamesMap[memberId];
+                                if (char.name === replyName || char.remark === replyName || char.nick === replyName || char.wx_nickname === replyName || (groupNick && groupNick === replyName)) {
                                     senderId = parseInt(memberId);
                                     break;
                                 }
+                            }
+                            if (!senderId) {
+                                console.warn(`[群聊回复] 找不到角色 "${replyName}" 的成员ID，跳过该条回复`, reply);
                             }
                         }
                         
@@ -15396,11 +15487,23 @@ ${groupContextStr}
                         }
                         
                         // 处理发送红包指令
-                        if (reply.type === 'send_redpacket' && reply.totalAmount && reply.count && reply.redpacketType) {
-                            if (!senderId) continue;
+                        if (reply.type === 'send_redpacket') {
+                            console.log('[群聊红包] 检测到发红包指令:', JSON.stringify(reply));
+                            
+                            if (!reply.totalAmount || !reply.count || !reply.redpacketType) {
+                                console.warn('[群聊红包] 缺少必要字段 totalAmount/count/redpacketType，跳过');
+                                continue;
+                            }
+                            if (!senderId) {
+                                console.warn('[群聊红包] 找不到发送者ID，角色名:', reply.name);
+                                continue;
+                            }
                             
                             const sender = memberMap[senderId];
-                            if (!sender) continue;
+                            if (!sender) {
+                                console.warn('[群聊红包] memberMap中找不到发送者:', senderId);
+                                continue;
+                            }
                             
                             const totalAmount = parseFloat(reply.totalAmount);
                             const count = parseInt(reply.count);
@@ -15408,24 +15511,31 @@ ${groupContextStr}
                             const redpacketType = reply.redpacketType;
                             
                             // 验证金额和数量
-                            if (totalAmount <= 0 || count <= 0) continue;
-                            if (totalAmount > 200) continue; // 限制最大金额
-                            if (count > 100) continue; // 限制最大个数
-                            
-                            // 检查余额（可选：如果需要检查角色余额）
-                            if (!sender.identity) sender.identity = {};
-                            const balance = parseFloat(sender.identity.balance || 0);
-                            if (balance < totalAmount) {
-                                // 余额不足，跳过发红包，可以添加一条吐槽消息
-                                const senderName = sender.remark || sender.wx_nickname || sender.name;
-                                updatedGroup.chat_history.push({
-                                    role: 'char',
-                                    senderId: senderId,
-                                    content: '啊...余额不足，发不了红包了😅',
-                                    time: Date.now() + msgIndex * 50
-                                });
-                                msgIndex++;
+                            if (totalAmount <= 0 || count <= 0) {
+                                console.warn('[群聊红包] 金额或数量无效:', totalAmount, count);
                                 continue;
+                            }
+                            // 角色发红包不限制金额，按人设自由发送
+                            
+                            // 只有角色生成了账号数据（有account和balance）时，才检查余额和扣款
+                            // 没有生成账号数据的角色可以自由发红包
+                            const hasAccountData = sender.identity && sender.identity.account && sender.identity.balance !== undefined && sender.identity.balance !== null;
+                            if (hasAccountData) {
+                                const balance = parseFloat(sender.identity.balance || 0);
+                                if (balance < totalAmount) {
+                                    // 余额不足，发一条吐槽消息
+                                    updatedGroup.chat_history.push({
+                                        role: 'char',
+                                        senderId: senderId,
+                                        content: '啊...余额不足，发不了红包了😅',
+                                        time: Date.now() + msgIndex * 50
+                                    });
+                                    msgIndex++;
+                                    continue;
+                                }
+                                // 扣除余额
+                                sender.identity.balance = (balance - totalAmount).toFixed(2);
+                                await db.characters.put(sender);
                             }
                             
                             // 生成红包ID
@@ -15445,10 +15555,6 @@ ${groupContextStr}
                                 targetName: reply.targetName || null // 专属红包的目标角色
                             };
                             
-                            // 扣除发送者余额
-                            sender.identity.balance = (balance - totalAmount).toFixed(2);
-                            await db.characters.put(sender);
-                            
                             // 添加红包消息
                             updatedGroup.chat_history.push({
                                 role: 'char',
@@ -15458,6 +15564,7 @@ ${groupContextStr}
                                 time: Date.now() + msgIndex * 50
                             });
                             msgIndex++;
+                            console.log('[群聊红包] ✅ 红包已创建:', redpacketId, '金额:', totalAmount, '个数:', count, '发送者:', sender.name);
                             
                             // 记录红包ID供后续领取使用
                             if (!window._lastRedpacketId) window._lastRedpacketId = {};
@@ -15704,7 +15811,7 @@ ${groupContextStr}
             let cleaned = text.trim();
             
             // ✅ 保护特殊格式：如果是以特殊格式开头，不要清理方括号
-            if (/^\[(img|voice|imgcard):/.test(cleaned)) {
+            if (/^\[(img|voice|imgcard|sticker):/.test(cleaned)) {
                 // 这是特殊格式消息，保持原样
                 return cleaned;
             }
@@ -16284,33 +16391,8 @@ ${groupContextStr}
                     content.innerHTML = quoteHtml + renderMessageContent(translationParsed.foreign);
                     content.dataset.chinese = translationParsed.chinese;
                     content.dataset.expanded = 'false';
-                    
-                    // 点击显示/隐藏翻译
-                    content.onclick = (e) => {
-                        if (isLongPress || isSelectionMode) return;
-                        if (e.target.tagName === 'A' || e.target.tagName === 'IMG') return;
-                        e.stopPropagation();
-                        
-                        const isExpanded = content.dataset.expanded === 'true';
-                        let transEl = content.querySelector('.msg-translation');
-                        
-                        if (isExpanded) {
-                            // 收起翻译
-                            if (transEl) transEl.style.display = 'none';
-                            content.dataset.expanded = 'false';
-                        } else {
-                            // 显示翻译
-                            if (!transEl) {
-                                transEl = document.createElement('div');
-                                transEl.className = 'msg-translation';
-                                transEl.innerHTML = renderMessageContent(content.dataset.chinese);
-                                content.appendChild(transEl);
-                            } else {
-                                transEl.style.display = 'block';
-                            }
-                            content.dataset.expanded = 'true';
-                        }
-                    };
+                    content.dataset.hasTranslation = 'true';
+                    content.style.cursor = 'pointer';
                 } else {
                     // 普通消息，使用统一的渲染函数
                     content.innerHTML = quoteHtml + renderMessageContent(cleanedContent);
@@ -16818,9 +16900,12 @@ ${groupContextStr}
 
         // --- 核心交互：长按与菜单 ---
         function bindMessageEvents(element, index) {
+            let touchMoved = false;
+            
             const startHandler = (e) => {
                 if (isSelectionMode) return; // 多选模式下禁用长按
                 isLongPress = false;
+                touchMoved = false;
                 longPressTimer = setTimeout(() => {
                     isLongPress = true;
                     showContextMenu(e, index, element);
@@ -16828,6 +16913,7 @@ ${groupContextStr}
             };
 
             const cancelHandler = () => {
+                touchMoved = true;
                 if (longPressTimer) {
                     clearTimeout(longPressTimer);
                     longPressTimer = null;
@@ -16839,20 +16925,66 @@ ${groupContextStr}
                 if (isLongPress) {
                     e.preventDefault(); // 阻止默认点击
                     e.stopPropagation();
+                    return;
+                }
+                
+                // 短按且没有滑动 → 当作点击处理
+                if (!touchMoved && !isSelectionMode) {
+                    // 翻译消息：切换翻译显示
+                    if (element.dataset.hasTranslation === 'true') {
+                        toggleTranslation(element);
+                    }
                 }
             };
 
-            // 触摸设备
+            // 触摸设备（CSS已通过user-select:none和touch-callout:none禁止了浏览器默认选择）
             element.addEventListener('touchstart', startHandler, {passive: true});
             element.addEventListener('touchmove', cancelHandler, {passive: true});
             element.addEventListener('touchend', endHandler);
             
-            // PC 鼠标
+            // PC 鼠标 - 用click事件处理翻译（PC端click可靠）
             element.addEventListener('mousedown', startHandler);
             element.addEventListener('mousemove', cancelHandler); // 移动算取消
-            element.addEventListener('mouseup', endHandler);
-            // 禁用右键默认菜单
+            element.addEventListener('mouseup', (e) => {
+                cancelHandler();
+                if (isLongPress) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            });
+            element.addEventListener('click', (e) => {
+                if (isLongPress || isSelectionMode) return;
+                if (e.target.tagName === 'A' || e.target.tagName === 'IMG') return;
+                // 翻译消息：切换翻译显示
+                if (element.dataset.hasTranslation === 'true') {
+                    toggleTranslation(element);
+                }
+            });
+            // 禁用右键默认菜单（同时覆盖手机端长按触发的contextmenu）
             element.addEventListener('contextmenu', (e) => e.preventDefault());
+        }
+        
+        // 切换翻译显示/隐藏
+        function toggleTranslation(element) {
+            const isExpanded = element.dataset.expanded === 'true';
+            let transEl = element.querySelector('.msg-translation');
+            
+            if (isExpanded) {
+                // 收起翻译
+                if (transEl) transEl.style.display = 'none';
+                element.dataset.expanded = 'false';
+            } else {
+                // 显示翻译
+                if (!transEl) {
+                    transEl = document.createElement('div');
+                    transEl.className = 'msg-translation';
+                    transEl.innerHTML = renderMessageContent(element.dataset.chinese);
+                    element.appendChild(transEl);
+                } else {
+                    transEl.style.display = 'block';
+                }
+                element.dataset.expanded = 'true';
+            }
         }
 
         function showContextMenu(event, index, element) {
@@ -16942,7 +17074,16 @@ ${groupContextStr}
                 if (newContent !== null && newContent.trim() !== "") {
                     group.chat_history[activeMsgIndex].content = newContent.trim();
                     await db.group_chats.put(group);
-                    await renderGroupChatBody(group);
+                    
+                    // 直接更新DOM，不刷新整个群聊
+                    const chatBody = document.getElementById('chat-body');
+                    const msgEl = chatBody.querySelector(`[data-index="${activeMsgIndex}"]`);
+                    if (msgEl) {
+                        const messageContent = msgEl.querySelector('.message-content') || msgEl.querySelector('.group-msg-content');
+                        if (messageContent) {
+                            messageContent.innerHTML = renderMessageContent(newContent.trim());
+                        }
+                    }
                 }
                 return;
             }
@@ -16966,13 +17107,12 @@ ${groupContextStr}
                 history[activeMsgIndex] = msg;
                 await setChatHistory(char, accountId, history);
                 
-                // 🔧 立即更新UI，不重新渲染整个聊天
+                // 🔧 立即更新UI，用data-index精确定位，不重新渲染整个聊天
                 const chatBody = document.getElementById('chat-body');
-                const messageRows = chatBody.querySelectorAll('.message-row');
-                if (messageRows[activeMsgIndex]) {
-                    const messageContent = messageRows[activeMsgIndex].querySelector('.message-content');
+                const msgEl = chatBody.querySelector(`[data-index="${activeMsgIndex}"]`);
+                if (msgEl) {
+                    const messageContent = msgEl.querySelector('.message-content');
                     if (messageContent) {
-                        // 使用renderMessageContent来正确渲染内容（支持表情等）
                         messageContent.innerHTML = renderMessageContent(newContent.trim());
                     }
                 }
@@ -19156,7 +19296,7 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
             if (!text) return [];
             
             // ✅ 修复：先保护特殊格式块不被拆分
-            const specialBlockRegex = /(\[(?:img|voice|imgcard):[^\]]+\])/g;
+            const specialBlockRegex = /(\[(?:img|voice|imgcard|sticker):[^\]]+\])/g;
             const specialBlockPlaceholders = [];
             let specialPlaceholderIndex = 0;
             
@@ -19386,7 +19526,7 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 - **语音**：\`[voice:内容]\`（情绪强烈或懒得打字时用）
 
 **互动功能（积极使用，让聊天更真实生动！）**：
-- **图片/自拍/分享图**：\`[imgcard:图片描述]\`（想发图片、自拍、风景照、截图等时使用，用文字描述图片内容即可。例如：\`[imgcard:一张对着镜子的自拍，穿着新买的裙子，比了个耶]\`、\`[imgcard:窗外的夕阳，天空是橘红色的]\`、\`[imgcard:今天的午餐，一碗拉面加了双份叉烧]\`）
+- **图片/自拍/分享图**：\`[imgcard:图片描述]\`（想发真实照片、自拍、风景照、截图等时使用，用文字描述图片内容即可。例如：\`[imgcard:一张对着镜子的自拍，穿着新买的裙子，比了个耶]\`、\`[imgcard:窗外的夕阳，天空是橘红色的]\`、\`[imgcard:今天的午餐，一碗拉面加了双份叉烧]\`。**⚠️ [imgcard:]仅限拍照/截图等真实图片，严禁用来发表情包！发表情包必须用 [sticker:] 格式，见下方表情包功能说明**）
 - **长文卡片**：\`[imgcard:内容]\`（超过50字的长文时也可以使用）
 - **转账**：\`((TRANSFER: 金额, 备注))\`（请客、AA、还钱、发红包、节日转账等，真人经常转账）
 - **亲属卡**：\`((FAMILY_CARD: 额度))\`（关系亲密时赠送）
@@ -19514,12 +19654,48 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                     }
                 }
 
+                // 添加表情包系统提示（如果角色挂载了表情包）
+                let _mountedStickersList = [];
+                try {
+                    const mountedStickerIds = char.mounted_sticker_categories || [];
+                    if (mountedStickerIds.length > 0) {
+                        for (const catId of mountedStickerIds) {
+                            const cat = await db.sticker_categories.get(catId);
+                            if (cat && cat.stickers && cat.stickers.length > 0) {
+                                for (const s of cat.stickers) {
+                                    if (s.description && s.url) {
+                                        _mountedStickersList.push({ description: s.description, url: s.url });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (_mountedStickersList.length > 0) {
+                        let stickerPrompt = `\n\n---\n\n## 表情包功能\n\n你有 ${_mountedStickersList.length} 个可用的表情包。想发表情包时，**必须**使用以下格式：\n\`[sticker:表情包描述]\`\n\n可用的表情包列表：\n`;
+                        stickerPrompt += _mountedStickersList.map(s => `- ${s.description}`).join('\n');
+                        stickerPrompt += `\n\n**⚠️ 表情包规则（必须严格遵守）**：`;
+                        stickerPrompt += `\n1. 发表情包时，**必须**从上面列表中选择一个描述，使用 \`[sticker:描述]\` 格式`;
+                        stickerPrompt += `\n2. **严禁**自己编造不在列表中的表情包描述`;
+                        stickerPrompt += `\n3. **严禁**用 \`[imgcard:]\` 来发表情包——\`[imgcard:]\` 只能用于拍照/截图/风景照等真实图片`;
+                        stickerPrompt += `\n4. 表情包可以单独作为一条消息，用 \`|||\` 与文字分开`;
+                        stickerPrompt += `\n5. 自然地使用，不要每条消息都发表情包，像真人一样偶尔穿插`;
+                        stickerPrompt += `\n6. 例如：哈哈好的|||[sticker:${_mountedStickersList[0].description}]`;
+                        
+                        systemPrompt += stickerPrompt;
+                        console.log('[triggerAiReply] ✅ 已添加表情包系统提示，可用表情包数:', _mountedStickersList.length);
+                    }
+                } catch (e) {
+                    console.error('[triggerAiReply] 表情包提示构建失败:', e);
+                }
+
                 // 显示 System Prompt 的关键信息
                 console.log('[triggerAiReply] 📝 System Prompt 构建完成');
                 console.log('[triggerAiReply] - 角色名称:', char.name);
                 console.log('[triggerAiReply] - 角色设定长度:', (char.description || '').length);
                 console.log('[triggerAiReply] - 用户人设:', userName, userDesc ? '✅已包含' : '❌未包含');
                 console.log('[triggerAiReply] - 世界书:', loreContext ? `✅已包含(${loreContext.length}字)` : '❌未包含');
+                console.log('[triggerAiReply] - 表情包:', _mountedStickersList.length > 0 ? `✅已包含(${_mountedStickersList.length}个)` : '❌未挂载');
                 console.log('[triggerAiReply] - System Prompt 总长度:', systemPrompt.length);
 
                 // 取最近 N 条历史记录（使用自定义的上下文条数，默认20条）
@@ -19587,10 +19763,10 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 // 2. 调用 AI（已经是防御式解析，直接拿到内容）
                 const aiResponse = await callAI(messages);
                 
-                // ✅ 修复：清理末尾多余的 ]，但保留 [voice:] [imgcard:] 等格式的闭合括号
+                // ✅ 修复：清理末尾多余的 ]，但保留 [voice:] [imgcard:] [sticker:] 等格式的闭合括号
                 function cleanMessage(text) {
                     if (!text) return text;
-                    // 🔒 安全转换：AI禁止发真实图片，将 [img:URL] 转换为 [imgcard:图片描述]
+                    // 🔒 安全转换：AI禁止发真实图片，将 [img:URL] 转换为 [imgcard:图片描述]（但不处理 [sticker:]）
                     text = text.replace(/\[img:([^\]]+)\]/gi, (match, url) => {
                         if (url.startsWith('http') || url.startsWith('data:')) {
                             return '[imgcard:发送了一张图片]';
@@ -19598,7 +19774,7 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                         return `[imgcard:${url}]`;
                     });
                     // 检查是否是特殊格式消息（以 [ 开头，以 ] 结尾）
-                    const specialFormats = /^\[(voice|imgcard):/i;
+                    const specialFormats = /^\[(voice|imgcard|sticker|img):/i;
                     if (specialFormats.test(text) && text.endsWith(']')) {
                         // 是特殊格式，不删除末尾的 ]
                         return text;
@@ -20610,6 +20786,63 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                             }
                         }
                         continue; // 跳过这个分段，不作为消息发送
+                    }
+                    
+                    // 🎯 检测表情包指令 [sticker:描述] - 在分段中检测并替换为实际表情包图片
+                    if (/\[sticker:[^\]]+\]/i.test(seg) && _mountedStickersList.length > 0) {
+                        seg = seg.replace(/\[sticker:([^\]]+)\]/gi, (match, keyword) => {
+                            const stickerKeyword = keyword.trim().toLowerCase();
+                            console.log(`[AiReply] 检测到表情包指令: ${stickerKeyword}`);
+                            
+                            // 匹配最佳表情包
+                            let bestMatch = null;
+                            let bestScore = 0;
+                            
+                            for (const s of _mountedStickersList) {
+                                const desc = s.description.toLowerCase();
+                                // 完全匹配
+                                if (desc === stickerKeyword) {
+                                    bestMatch = s;
+                                    bestScore = 100;
+                                    break;
+                                }
+                                // 描述包含关键词
+                                if (desc.includes(stickerKeyword) && stickerKeyword.length > 1) {
+                                    const score = stickerKeyword.length / desc.length * 80;
+                                    if (score > bestScore) { bestMatch = s; bestScore = score; }
+                                }
+                                // 关键词包含描述
+                                if (stickerKeyword.includes(desc) && desc.length > 1) {
+                                    const score = desc.length / stickerKeyword.length * 70;
+                                    if (score > bestScore) { bestMatch = s; bestScore = score; }
+                                }
+                                // 关键词的部分词匹配
+                                const keywords = stickerKeyword.split(/[\s,，、]+/).filter(k => k.length > 0);
+                                let matchCount = 0;
+                                for (const kw of keywords) {
+                                    if (desc.includes(kw)) matchCount++;
+                                }
+                                if (matchCount > 0) {
+                                    const score = matchCount / keywords.length * 60;
+                                    if (score > bestScore) { bestMatch = s; bestScore = score; }
+                                }
+                            }
+                            
+                            if (bestMatch) {
+                                console.log(`[AiReply] ✅ 匹配到表情包: ${bestMatch.description} (得分: ${bestScore})`);
+                                return `[img:${bestMatch.url}]`;
+                            } else {
+                                // 没找到匹配，随机选一个
+                                const randomSticker = _mountedStickersList[Math.floor(Math.random() * _mountedStickersList.length)];
+                                console.log(`[AiReply] ⚠️ 未找到匹配的表情包，随机选择: ${randomSticker.description}`);
+                                return `[img:${randomSticker.url}]`;
+                            }
+                        });
+                        
+                        // 如果整条消息只是表情包（替换后只有 [img:...] ），不需要额外处理
+                        if (!seg.replace(/\[img:[^\]]+\]/gi, '').trim()) {
+                            // 整条就是表情包，继续正常流程发送
+                        }
                     }
                     
                     // 延时：第一条直接发(前面loading已经是等待了)，后续模拟打字
@@ -23592,6 +23825,29 @@ async function sendSuggestedSticker(catId, url) {
 async function sendGlobalSticker(catId, url) {
     // 用户发送表情包：可以发送所有表情包，不需要检查挂载
     // 角色发送表情包：只能发送挂载的（这个限制在角色自动回复时检查）
+    
+    const msgContent = `[img:${url}]`; // 图片显示内容
+    
+    // ✅ 支持群聊模式：和私聊一样，追加消息到UI即可
+    if (window.currentGroupChatId) {
+        const group = await db.group_chats.get(window.currentGroupChatId);
+        if (!group) return;
+        
+        if (!group.chat_history) group.chat_history = [];
+        const msg = {
+            role: 'user',
+            content: msgContent,
+            time: Date.now()
+        };
+        group.chat_history.push(msg);
+        group.updated_at = Date.now();
+        await db.group_chats.put(group);
+        
+        await appendUserGroupMessageToUI(msg, group);
+        closeChatPanel();
+        return;
+    }
+    
     if (!currentChatCharId) {
         alert('请先选择一个聊天对象');
         return;
@@ -23607,15 +23863,6 @@ async function sendGlobalSticker(catId, url) {
         const s = cat.stickers.find(sticker => sticker.url === url);
         if (s) desc = s.description;
     }
-    
-    // 发送逻辑
-    const msgContent = `[img:${url}]`; // 图片显示内容
-    // 我们需要把 description 附带在消息里吗？
-    // 标准做法：User 发送图片，AI 只能看到 [img:...]
-    // 为了让 AI 识别，我们可以把 description 作为 system prompt 的一部分，或者 hidden text
-    // 方案：在 msgContent 里增加 hidden tag，例如 [img:url|desc:描述]
-    // 但渲染时要去掉。
-    // 或者，我们在 chat_history 存对象时，增加一个字段 `imageDescription`
     
     // 发送消息 - 使用按账号隔离的聊天记录
     let history = getChatHistory(char, accountId);
@@ -27854,15 +28101,28 @@ async function showRedPacketDetail(redPacketId) {
     const data = JSON.parse(msg.content);
     currentViewingRedPacketId = redPacketId;
     
-    // 获取发送者信息（红包消息的role是user）
+    // 获取发送者信息
     let senderAvatar = '';
-    let senderName = '红包发送者';
-    if (currentMyCharId && msg.role === 'user') {
-        const user = await db.characters.get(parseInt(currentMyCharId));
-        if (user) {
-            senderAvatar = user.avatar || '';
+    let senderName = data.senderName || '红包发送者';
+    if (msg.role === 'user') {
+        // 用户发的红包
+        const myId = currentMyCharId ? parseInt(currentMyCharId) : null;
+        if (myId) {
+            const user = await db.characters.get(myId);
+            if (user) {
+                senderAvatar = user.avatar || '';
+                const memberNicknames = group.memberNicknames || {};
+                senderName = memberNicknames[myId] || user.name || '我';
+            }
+        }
+    } else if (msg.senderId || data.senderId) {
+        // 角色发的红包
+        const charId = msg.senderId || data.senderId;
+        const char = await db.characters.get(typeof charId === 'number' ? charId : parseInt(charId));
+        if (char) {
+            senderAvatar = char.avatar || '';
             const memberNicknames = group.memberNicknames || {};
-            senderName = memberNicknames[currentMyCharId] || user.name || '我';
+            senderName = memberNicknames[charId] || char.remark || char.name || data.senderName || '红包发送者';
         }
     }
     
@@ -27942,10 +28202,20 @@ function hideRedPacketDetail() {
 
 // 领取红包
 async function claimRedPacket() {
-    if (!currentViewingRedPacketId || !window.currentGroupChatId) return;
+    console.log('[领取红包] 开始领取, redpacketId:', currentViewingRedPacketId, 'groupId:', window.currentGroupChatId);
+    
+    if (!currentViewingRedPacketId || !window.currentGroupChatId) {
+        console.warn('[领取红包] 缺少红包ID或群聊ID');
+        showToast('红包信息异常');
+        return;
+    }
     
     const group = await db.group_chats.get(window.currentGroupChatId);
-    if (!group || !group.chat_history) return;
+    if (!group || !group.chat_history) {
+        console.warn('[领取红包] 找不到群聊或聊天记录');
+        showToast('群聊数据异常');
+        return;
+    }
     
     // 找到红包消息
     const msgIndex = group.chat_history.findIndex(m => {
@@ -27958,20 +28228,26 @@ async function claimRedPacket() {
         }
     });
     
-    if (msgIndex === -1) return;
+    if (msgIndex === -1) {
+        console.warn('[领取红包] 在聊天记录中找不到该红包');
+        showToast('找不到该红包');
+        return;
+    }
     
     const msg = group.chat_history[msgIndex];
     const data = JSON.parse(msg.content);
+    console.log('[领取红包] 红包数据:', data);
     
     // 检查是否已领取完
     if ((data.claimed?.length || 0) >= data.count) {
         showToast('红包已被领完');
-        await showRedPacketDetail(currentViewingRedPacketId); // 刷新页面
+        await showRedPacketDetail(currentViewingRedPacketId);
         return;
     }
     
     // 检查是否已领取过
     const myId = currentMyCharId ? parseInt(currentMyCharId) : null;
+    console.log('[领取红包] 当前用户ID:', myId, 'currentMyCharId:', currentMyCharId);
     if (!myId) {
         showToast('请先设置身份');
         return;

@@ -2143,6 +2143,13 @@
             color: var(--ins-gray);
         }
         /* 气泡样式重构 - INS 风格 */
+        /* 禁止手机端长按消息时弹出浏览器默认选择菜单 */
+        .message-row,
+        .group-message-row {
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
         .message-row {
             display: flex;
             gap: 8px;
