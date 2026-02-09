@@ -4104,7 +4104,12 @@
                 <svg class="svg-icon" viewBox="0 0 24 24" style="stroke:#666;"><polyline points="15 18 9 12 15 6"></polyline></svg>
             </div>
             <div class="chat-title" id="offline-chat-title" style="margin-right:0; text-align:center; color:#333; font-weight:400; font-size:16px;">线下模式</div>
-            <div style="width:40px;"></div>
+            <div style="width:40px; display:flex; align-items:center; justify-content:center; cursor:pointer;" onclick="showOfflineSettings()">
+                <svg viewBox="0 0 24 24" style="width:22px; height:22px; stroke:#666; fill:none; stroke-width:1.8;">
+                    <circle cx="12" cy="12" r="3"></circle>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                </svg>
+            </div>
         </div>
         
         <div class="chat-body" id="offline-chat-body" style="background:#fff;">
@@ -4128,6 +4133,42 @@
                     </svg>
                 </button>
             </div>
+        </div>
+    </div>
+
+    <!-- 线下模式设置页面 -->
+    <div class="chat-window" id="offline-settings-page" style="display:none; z-index:290; background:#f5f5f5;">
+        <div class="chat-header" style="background:#fff; border-bottom:1px solid #f0f0f0;">
+            <div class="chat-back" onclick="hideOfflineSettings()" style="color:#666;">
+                <svg class="svg-icon" viewBox="0 0 24 24" style="stroke:#666;"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            </div>
+            <div class="chat-title" style="margin-right:0; text-align:center; color:#333; font-weight:400; font-size:16px;">线下模式设置</div>
+            <div style="width:40px;"></div>
+        </div>
+        <div style="flex:1; overflow-y:auto; padding:16px;">
+            <!-- 回复字数设置 -->
+            <div style="background:#fff; border-radius:12px; padding:16px; margin-bottom:16px;">
+                <div style="font-size:15px; font-weight:500; color:#333; margin-bottom:12px;">回复字数范围</div>
+                <div style="display:flex; align-items:center; gap:10px;">
+                    <input type="number" id="offline-min-words" value="100" min="10" max="5000" style="flex:1; border:1px solid #e0e0e0; background:#fafafa; padding:10px 12px; border-radius:8px; font-size:15px; color:#333; text-align:center; outline:none;" onfocus="this.style.borderColor='#ffb3d1'" onblur="this.style.borderColor='#e0e0e0'">
+                    <span style="color:#999; font-size:14px;">字 ~</span>
+                    <input type="number" id="offline-max-words" value="500" min="10" max="5000" style="flex:1; border:1px solid #e0e0e0; background:#fafafa; padding:10px 12px; border-radius:8px; font-size:15px; color:#333; text-align:center; outline:none;" onfocus="this.style.borderColor='#ffb3d1'" onblur="this.style.borderColor='#e0e0e0'">
+                    <span style="color:#999; font-size:14px;">字</span>
+                </div>
+            </div>
+
+            <!-- 预设/系统提示 -->
+            <div style="background:#fff; border-radius:12px; padding:16px; margin-bottom:16px;">
+                <div style="font-size:15px; font-weight:500; color:#333; margin-bottom:4px;">自定义预设</div>
+                <div style="font-size:12px; color:#999; margin-bottom:12px;">追加到系统提示词末尾，可用于自定义场景、地点、规则等。留空则使用默认设定。</div>
+                <textarea id="offline-custom-preset" placeholder="例如：&#10;场景是在一家安静的咖啡厅里，窗外下着小雨...&#10;&#10;或者：&#10;请使用更加文学化的描写风格，多使用比喻和象征手法。" style="width:100%; min-height:150px; border:1px solid #e0e0e0; background:#fafafa; padding:12px; border-radius:8px; font-size:14px; color:#333; line-height:1.6; resize:vertical; outline:none; box-sizing:border-box; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;" onfocus="this.style.borderColor='#ffb3d1'" onblur="this.style.borderColor='#e0e0e0'"></textarea>
+            </div>
+
+            <!-- 保存按钮 -->
+            <button onclick="saveOfflineSettings()" style="width:100%; padding:14px; background:#ffb3d1; color:#fff; border:none; border-radius:12px; font-size:16px; font-weight:500; cursor:pointer; transition:opacity 0.2s;" onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">保存设置</button>
+            
+            <!-- 清空聊天记录 -->
+            <button onclick="clearOfflineChatHistory()" style="width:100%; padding:14px; background:#fff; color:#ff6b6b; border:1px solid #ffe0e0; border-radius:12px; font-size:14px; cursor:pointer; margin-top:12px; transition:background 0.2s;" onmouseover="this.style.background='#fff5f5'" onmouseout="this.style.background='#fff'">清空线下聊天记录</button>
         </div>
     </div>
 
