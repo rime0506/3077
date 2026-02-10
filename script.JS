@@ -282,6 +282,7 @@ async function migratePhoneAndSmsToIndexedDB() {
         const lastAutoChatActionTime = new Map(); // 🔧 记录每个角色上次主动聊天的时间戳（用于冷却判断）
         const autoMomentsLocks = new Set(); // 存储正在生成朋友圈的 charId，防止并发
         const lastMomentsPostTime = new Map(); // 记录每个角色上次发朋友圈的时间
+        const nextMomentsTriggerTime = new Map(); // 🔧 记录每个角色下次应该发朋友圈的确定时间点
         let deviceBatteryLevel = null; // 用户设备真实电量 (0-100)
         let deviceBatteryCharging = false; // 是否正在充电
         let lowBatteryShownThisSession = new Set(); // 记录本次会话已提醒过的聊天，避免重复弹
@@ -16022,32 +16023,46 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                 const intervalRange = getMomentsInterval(char.moments_frequency);
                 if (!intervalRange) continue;
                 
-                // 获取上次发朋友圈的时间
-                let lastPostTime = lastMomentsPostTime.get(char.id);
+                // 🔧 使用「下次触发时间点」机制，避免每次随机导致实际间隔偏短
+                let scheduledTime = nextMomentsTriggerTime.get(char.id);
                 
-                // 如果没有记录，从数据库中查找该角色最近一条朋友圈
-                if (!lastPostTime) {
+                if (!scheduledTime) {
+                    // 首次：需要确定下次触发时间
+                    // 先查数据库获取最后一条朋友圈的时间
+                    let baseTime = now; // 默认从现在开始算
                     try {
                         const recentMoments = await db.moments
                             .where('userId').equals(char.id)
                             .reverse()
                             .limit(1)
                             .toArray();
-                        lastPostTime = recentMoments.length > 0 ? recentMoments[0].time : (now - intervalRange[1] * 60 * 1000);
-                        lastMomentsPostTime.set(char.id, lastPostTime);
+                        if (recentMoments.length > 0) {
+                            baseTime = recentMoments[0].time;
+                        }
                     } catch (e) {
-                        lastPostTime = now;
-                        lastMomentsPostTime.set(char.id, lastPostTime);
-                        continue;
+                        // 查询失败，从当前时间算起
                     }
+                    
+                    // 在 [min, max] 范围内随机一个间隔，计算下次触发时间
+                    const randomMinutes = intervalRange[0] + Math.random() * (intervalRange[1] - intervalRange[0]);
+                    scheduledTime = baseTime + randomMinutes * 60 * 1000;
+                    
+                    // 如果算出来的时间已经过去了（比如数据库里的朋友圈很久以前的），则从现在起等一个随机间隔
+                    if (scheduledTime <= now) {
+                        const freshInterval = intervalRange[0] + Math.random() * (intervalRange[1] - intervalRange[0]);
+                        scheduledTime = now + freshInterval * 60 * 1000;
+                    }
+                    
+                    nextMomentsTriggerTime.set(char.id, scheduledTime);
+                    const waitMinutes = ((scheduledTime - now) / 60000).toFixed(0);
+                    console.log(`[AutoMoments] ${char.name} 下次朋友圈预计在 ${waitMinutes} 分钟后 (频率: ${char.moments_frequency})`);
+                    continue;
                 }
                 
-                // 随机计算这次的间隔（在范围内）
-                const randomInterval = intervalRange[0] + Math.random() * (intervalRange[1] - intervalRange[0]);
-                const diffMinutes = (now - lastPostTime) / (1000 * 60);
-                
-                if (diffMinutes >= randomInterval) {
-                    console.log(`[AutoMoments] ✓ Triggering for ${char.name} (Frequency: ${char.moments_frequency}, Last post: ${diffMinutes.toFixed(1)} mins ago)`);
+                // 到了预定时间才触发
+                if (now >= scheduledTime) {
+                    const delayMin = ((now - scheduledTime) / 60000).toFixed(1);
+                    console.log(`[AutoMoments] ✓ Triggering for ${char.name} (Frequency: ${char.moments_frequency}, Scheduled ${delayMin}min ago)`);
                     triggerAutoMoments(char);
                 }
             }
@@ -16150,7 +16165,17 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
                     // 更新最后发布时间
                     lastMomentsPostTime.set(char.id, Date.now());
                     
-                    console.log(`[AutoMoments] ✓ ${char.name} 发布了朋友圈: ${momentContent}`);
+                    // 🔧 计算下一次朋友圈的触发时间点
+                    const nextRange = getMomentsInterval(char.moments_frequency);
+                    if (nextRange) {
+                        const nextWait = nextRange[0] + Math.random() * (nextRange[1] - nextRange[0]);
+                        const nextTime = Date.now() + nextWait * 60 * 1000;
+                        nextMomentsTriggerTime.set(char.id, nextTime);
+                        console.log(`[AutoMoments] ✓ ${char.name} 发布了朋友圈: ${momentContent}`);
+                        console.log(`[AutoMoments] ${char.name} 下次朋友圈预计在 ${nextWait.toFixed(0)} 分钟后`);
+                    } else {
+                        console.log(`[AutoMoments] ✓ ${char.name} 发布了朋友圈: ${momentContent}`);
+                    }
                     
                     // 发送通知
                     sendSystemNotification(char.name, `[朋友圈] ${momentContent.substring(0, 30)}...`);
@@ -16165,6 +16190,12 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
                 }
             } catch (err) {
                 console.error(`[AutoMoments] Failed for ${char.name}:`, err);
+                // 🔧 失败了也重新安排，防止连续重试
+                const retryRange = getMomentsInterval(char.moments_frequency);
+                if (retryRange) {
+                    const retryWait = retryRange[0] + Math.random() * (retryRange[1] - retryRange[0]);
+                    nextMomentsTriggerTime.set(char.id, Date.now() + retryWait * 60 * 1000);
+                }
             } finally {
                 autoMomentsLocks.delete(char.id);
             }
