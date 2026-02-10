@@ -14256,16 +14256,22 @@ window.unmountUser = unmountUser;
             const chatContainer = document.getElementById('chat-body');
             if (!chatContainer) return;
             
-            // 应用气泡样式类名（默认/仿微信）
+            // 🔧 如果有自定义气泡CSS，则不应用预设气泡样式，避免冲突
             chatContainer.classList.remove('bubble-style-default', 'bubble-style-wechat');
-            if (char.bubble_style === 'wechat') {
-                chatContainer.classList.add('bubble-style-wechat');
+            if (char.custom_bubble_css && char.custom_bubble_css.trim()) {
+                // 有自定义CSS时，不添加任何预设样式class
+                console.log('[applyCustomStyles] 检测到自定义气泡CSS，跳过预设样式');
             } else {
-                chatContainer.classList.add('bubble-style-default');
+                // 没有自定义CSS时，才应用预设样式
+                if (char.bubble_style === 'wechat') {
+                    chatContainer.classList.add('bubble-style-wechat');
+                } else {
+                    chatContainer.classList.add('bubble-style-default');
+                }
             }
             
             // 应用自定义气泡CSS
-            if (char.custom_bubble_css) {
+            if (char.custom_bubble_css && char.custom_bubble_css.trim()) {
                 const bubbleStyleId = 'custom-bubble-style';
                 let styleTag = document.getElementById(bubbleStyleId);
                 
@@ -14275,8 +14281,49 @@ window.unmountUser = unmountUser;
                     document.head.appendChild(styleTag);
                 }
                 
-                // 只应用到AI的消息气泡
-                styleTag.textContent = `.chat-bubble.ai-bubble { ${char.custom_bubble_css} }`;
+                // 🔧 自动给每个CSS属性加上 !important，确保覆盖默认样式
+                const addImportant = (cssText) => {
+                    return cssText
+                        .split(';')
+                        .map(prop => {
+                            prop = prop.trim();
+                            if (!prop || !prop.includes(':')) return '';
+                            // 如果已经有 !important 就不重复加
+                            if (prop.toLowerCase().includes('!important')) return prop + ';';
+                            return prop + ' !important;';
+                        })
+                        .filter(p => p)
+                        .join('\n');
+                };
+                
+                const importantCSS = addImportant(char.custom_bubble_css);
+                
+                // 🔧 修复：使用正确的选择器（.message-content 而非 .chat-bubble）
+                // 同时应用到AI气泡和用户气泡，并重置默认样式
+                styleTag.textContent = `
+                    /* 重置默认气泡样式 */
+                    .message-row.other .message-content:not(.card-message):not(.image-only) {
+                        background: none !important;
+                        border: none !important;
+                        box-shadow: none !important;
+                        border-radius: 18px !important;
+                    }
+                    .message-row.self .message-content:not(.card-message):not(.image-only) {
+                        background: none !important;
+                        border: none !important;
+                        box-shadow: none !important;
+                        border-radius: 18px !important;
+                    }
+                    /* 移除默认的小尾巴伪元素 */
+                    .message-row.other .message-content::before,
+                    .message-row.self .message-content::after {
+                        display: none !important;
+                    }
+                    /* 应用用户自定义样式到所有消息气泡 */
+                    .message-row .message-content:not(.card-message):not(.image-only) {
+                        ${importantCSS}
+                    }
+                `;
             }
             
             // 应用自定义CSS
