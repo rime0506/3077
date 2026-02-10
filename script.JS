@@ -1969,61 +1969,9 @@ async function migratePhoneAndSmsToIndexedDB() {
             });
         })();
 
-        // ===== 查手机功能 =====
+        // ===== 查手机（占位，暂无功能） =====
         function showFindPhonePage() {
-            // 创建查手机页面
-            let page = document.getElementById('findphone-page');
-            if (!page) {
-                page = document.createElement('div');
-                page.id = 'findphone-page';
-                page.className = 'wechat-page';
-                page.style.cssText = 'background:#fff; display:none;';
-                page.innerHTML = `
-                    <div class="wechat-header" style="background:rgba(255,255,255,0.95); backdrop-filter:blur(10px);">
-                        <div class="back-btn" onclick="hideFindPhonePage()" style="margin:0; background:none; width:40px; justify-content:flex-start; padding-left:0; color:var(--ins-text);">
-                            <svg class="svg-icon" viewBox="0 0 24 24" style="width:28px; height:28px;"><polyline points="15 18 9 12 15 6"></polyline></svg>
-                        </div>
-                        <div style="flex:1; text-align:center; font-size:17px; font-weight:600;">查手机</div>
-                        <div style="width:40px;"></div>
-                    </div>
-                    <div class="wechat-content" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:40px 20px; text-align:center;">
-                        <div style="width:80px; height:80px; background:linear-gradient(135deg, #ff6b9d 0%, #ff8fab 100%); border-radius:50%; display:flex; align-items:center; justify-content:center; margin-bottom:24px; box-shadow:0 8px 24px rgba(255,107,157,0.3);">
-                            <svg viewBox="0 0 24 24" style="width:40px; height:40px; fill:#fff;"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-                        </div>
-                        <div style="font-size:20px; font-weight:600; color:#333; margin-bottom:8px;">查找对方手机</div>
-                        <div style="font-size:14px; color:#999; margin-bottom:32px; line-height:1.6;">让对方的手机发出提示音，<br>帮助你找到 TA 的手机位置</div>
-                        <button id="findphone-ring-btn" onclick="triggerFindPhone()" style="width:200px; padding:14px 0; background:linear-gradient(135deg, #ff6b9d 0%, #ff8fab 100%); color:#fff; border:none; border-radius:24px; font-size:16px; font-weight:600; cursor:pointer; box-shadow:0 4px 16px rgba(255,107,157,0.3); transition:all 0.3s;">
-                            📱 让 TA 的手机响铃
-                        </button>
-                        <div id="findphone-status" style="margin-top:16px; font-size:13px; color:#999;"></div>
-                    </div>
-                `;
-                document.body.appendChild(page);
-            }
-            document.getElementById('home-page').style.display = 'none';
-            page.style.display = 'flex';
-        }
-
-        function hideFindPhonePage() {
-            const page = document.getElementById('findphone-page');
-            if (page) page.style.display = 'none';
-            document.getElementById('home-page').style.display = 'block';
-        }
-
-        function triggerFindPhone() {
-            const btn = document.getElementById('findphone-ring-btn');
-            const status = document.getElementById('findphone-status');
-            btn.style.opacity = '0.6';
-            btn.disabled = true;
-            status.textContent = '正在发送响铃请求...';
-            status.style.color = '#ff6b9d';
-
-            setTimeout(() => {
-                status.textContent = '✅ 已发送响铃请求！对方手机将会响铃~';
-                status.style.color = '#4caf50';
-                btn.style.opacity = '1';
-                btn.disabled = false;
-            }, 1500);
+            alert('暂无功能');
         }
 
         // 各项自定义方法（修改后自动保存到Dexie）
