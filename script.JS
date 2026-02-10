@@ -1882,28 +1882,90 @@ async function migratePhoneAndSmsToIndexedDB() {
             document.getElementById('home-page').style.display = 'block';
         }
 
-        // ===== 桌面多页滑动 =====
+        // ===== 桌面多页滑动（触摸滑动 + transform） =====
+        var desktopPageIndex = 0;
+        var desktopTotalPages = 2;
+
         (function initDesktopPages() {
             document.addEventListener('DOMContentLoaded', function() {
                 const wrapper = document.getElementById('desktop-pages-wrapper');
+                const track = document.getElementById('desktop-pages-track');
                 const dots = document.querySelectorAll('.page-dot');
-                if (!wrapper || !dots.length) return;
+                if (!wrapper || !track || !dots.length) return;
 
-                wrapper.addEventListener('scroll', function() {
-                    const pageWidth = wrapper.offsetWidth;
-                    const scrollLeft = wrapper.scrollLeft;
-                    const currentPage = Math.round(scrollLeft / pageWidth);
+                let startX = 0, startY = 0, moveX = 0, isDragging = false, isHorizontal = null;
+                const SWIPE_THRESHOLD = 50;
+
+                function goToPage(index) {
+                    if (index < 0) index = 0;
+                    if (index >= desktopTotalPages) index = desktopTotalPages - 1;
+                    desktopPageIndex = index;
+                    track.style.transform = `translateX(-${index * 100}%)`;
                     dots.forEach((dot, i) => {
-                        dot.classList.toggle('active', i === currentPage);
+                        dot.classList.toggle('active', i === index);
                     });
-                });
+                }
+
+                wrapper.addEventListener('touchstart', function(e) {
+                    startX = e.touches[0].clientX;
+                    startY = e.touches[0].clientY;
+                    moveX = 0;
+                    isDragging = true;
+                    isHorizontal = null;
+                    track.classList.add('dragging');
+                }, { passive: true });
+
+                wrapper.addEventListener('touchmove', function(e) {
+                    if (!isDragging) return;
+                    const dx = e.touches[0].clientX - startX;
+                    const dy = e.touches[0].clientY - startY;
+
+                    // 判断滑动方向：首次移动超过5px时决定
+                    if (isHorizontal === null && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
+                        isHorizontal = Math.abs(dx) > Math.abs(dy);
+                    }
+                    // 如果是纵向滑动，不拦截
+                    if (isHorizontal === false) {
+                        isDragging = false;
+                        track.classList.remove('dragging');
+                        return;
+                    }
+                    if (isHorizontal) {
+                        e.preventDefault();
+                        moveX = dx;
+                        const baseOffset = -desktopPageIndex * wrapper.offsetWidth;
+                        // 边缘阻尼
+                        let offset = baseOffset + moveX;
+                        if (desktopPageIndex === 0 && moveX > 0) offset = baseOffset + moveX * 0.3;
+                        if (desktopPageIndex === desktopTotalPages - 1 && moveX < 0) offset = baseOffset + moveX * 0.3;
+                        track.style.transform = `translateX(${offset}px)`;
+                    }
+                }, { passive: false });
+
+                wrapper.addEventListener('touchend', function() {
+                    if (!isDragging && isHorizontal !== true) {
+                        track.classList.remove('dragging');
+                        return;
+                    }
+                    isDragging = false;
+                    track.classList.remove('dragging');
+                    if (isHorizontal && Math.abs(moveX) > SWIPE_THRESHOLD) {
+                        if (moveX < 0) goToPage(desktopPageIndex + 1);
+                        else goToPage(desktopPageIndex - 1);
+                    } else {
+                        goToPage(desktopPageIndex);
+                    }
+                }, { passive: true });
 
                 // 点击圆点切换页面
                 dots.forEach((dot, i) => {
                     dot.addEventListener('click', function() {
-                        wrapper.scrollTo({ left: i * wrapper.offsetWidth, behavior: 'smooth' });
+                        goToPage(i);
                     });
                 });
+
+                // 暴露到全局方便调用
+                window.goToDesktopPage = goToPage;
             });
         })();
 
