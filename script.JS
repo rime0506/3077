@@ -279,6 +279,7 @@ async function migratePhoneAndSmsToIndexedDB() {
         let notifTimer = null;
         let autoChatTimer = null; // 主动聊天定时器
         const autoChatLocks = new Set(); // 存储正在进行主动聊天的 charId，防止并发触发
+        const lastAutoChatActionTime = new Map(); // 🔧 记录每个角色上次主动聊天的时间戳（用于冷却判断）
         const autoMomentsLocks = new Set(); // 存储正在生成朋友圈的 charId，防止并发
         const lastMomentsPostTime = new Map(); // 记录每个角色上次发朋友圈的时间
         let deviceBatteryLevel = null; // 用户设备真实电量 (0-100)
@@ -9668,13 +9669,9 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     let cleanReply = result.reply.replace(/[,，]/g, ' '); 
                     let segments = cleanReply.split('|||').map(s => s.trim()).filter(s => s);
                     
-                    // 依次存入
+                    // 依次存入（使用 buildCharMessage 一次性解析翻译）
                     for (let i = 0; i < segments.length; i++) {
-                        history.push({
-                            role: 'char',
-                            content: segments[i],
-                            time: Date.now() + (i + 1) * 500 // 稍微错开时间
-                        });
+                        history.push(buildCharMessage(segments[i], !!char.foreign_lang_mode, { time: Date.now() + (i + 1) * 500 }));
                     }
                     
                     await setChatHistory(char, accountId, history);
@@ -11829,11 +11826,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                             console.log('[FriendRequest] 写入', result.messages.length, '条回复消息到聊天记录');
                             let chatHistory = getChatHistory(targetChar, accountId);
                             for (let i = 0; i < result.messages.length; i++) {
-                                chatHistory.push({
-                                    role: 'char',
-                                    content: result.messages[i],
-                                    time: Date.now() + i * 100
-                                });
+                                chatHistory.push(buildCharMessage(result.messages[i], !!targetChar.foreign_lang_mode, { time: Date.now() + i * 100 }));
                             }
                             await setChatHistory(targetChar, accountId, chatHistory);
                         }
@@ -12369,13 +12362,9 @@ ${recentMessages || '（无记录）'}
                 // 获取当前聊天记录
                 let currentHistory = getChatHistory(char, accountId);
                 
-                // 添加所有消息到聊天记录
+                // 添加所有消息到聊天记录（使用 buildCharMessage 一次性解析翻译）
                 for (let i = 0; i < segments.length; i++) {
-                    currentHistory.push({
-                        role: 'char',
-                        content: segments[i],
-                        time: Date.now() + i * 100
-                    });
+                    currentHistory.push(buildCharMessage(segments[i], !!char.foreign_lang_mode, { time: Date.now() + i * 100 }));
                 }
                 
                 // 保存聊天记录
@@ -12699,7 +12688,7 @@ ${recentMessages || '（无记录）'}
                     if (result.message) {
                         const segments = result.message.split('|||').map(s => s.trim()).filter(s => s);
                         for (let i = 0; i < segments.length; i++) {
-                            history.push({ role: 'char', content: segments[i], time: Date.now() + i * 100 });
+                            history.push(buildCharMessage(segments[i], !!charNow.foreign_lang_mode, { time: Date.now() + i * 100 }));
                         }
                     }
                     await setChatHistory(charNow, accountId, history);
@@ -12886,7 +12875,7 @@ ${smsContext ? '对方还通过短信试图联系你。' : ''}
                     if (result.message) {
                         const segments = result.message.split('|||').map(s => s.trim()).filter(s => s);
                         for (let i = 0; i < segments.length; i++) {
-                            history.push({ role: 'char', content: segments[i], time: Date.now() + i * 100 });
+                            history.push(buildCharMessage(segments[i], !!charNow.foreign_lang_mode, { time: Date.now() + i * 100 }));
                         }
                     }
                     await setChatHistory(charNow, accountId, history);
@@ -14661,25 +14650,27 @@ window.unmountUser = unmountUser;
                     continue;
                 }
 
-                // 检查上次消息时间（按账号）
-                let lastTime = 0;
-                const history = getChatHistory(char, accountId);
-                if (history && history.length > 0) {
-                    lastTime = history[history.length - 1].time;
-                } else {
-                    // 如果没有历史消息，以创建时间或更新时间为准
-                    lastTime = char.updated_at || 0;
+                // 🔧 防止与手动AI回复冲突：如果用户正在当前角色的聊天中触发AI回复，跳过主动聊天
+                if (window._isGeneratingReply && currentChatCharId === char.id) {
+                    console.log(`[AutoChat] Skipping ${char.name} (user is manually generating reply)`);
+                    continue;
                 }
 
-                const diffMinutes = (now - lastTime) / (1000 * 60);
+                // 🔧 冷却判断：基于上次实际触发时间，而非历史消息时间
+                // 防止刚开启/刚加载页面时因历史消息久远而立即触发
+                const prevActionTs = lastAutoChatActionTime.get(char.id) || 0;
+                if (prevActionTs === 0) {
+                    // 该角色首次进入检测周期，记录当前时刻作为起点
+                    lastAutoChatActionTime.set(char.id, now);
+                    console.log(`[AutoChat] ${char.name} 首次注册，将在 ${char.auto_reply_interval} 分钟后触发`);
+                    continue;
+                }
+
+                const elapsedMs = now - prevActionTs;
+                const intervalMs = char.auto_reply_interval * 60 * 1000;
                 
-                // 宽容度 0.1 分钟（6秒），避免因为执行耗时导致刚好错过
-                // 例如间隔1分钟，diff是 0.95分钟，也允许触发
-                if (diffMinutes >= (char.auto_reply_interval - 0.1)) {
-                    // 触发主动消息
-                    console.log(`[AutoChat] ✓✓✓ Triggering for ${char.name} (Interval: ${char.auto_reply_interval}, Last msg: ${diffMinutes.toFixed(2)} mins ago)`);
-                    
-                    // 生成AI消息（内部会自动推送通知）
+                if (elapsedMs >= intervalMs) {
+                    console.log(`[AutoChat] ✓✓✓ Triggering for ${char.name} (Interval: ${char.auto_reply_interval}min, Elapsed: ${(elapsedMs / 60000).toFixed(1)}min)`);
                     triggerAutoChat(char);
                 }
             }
@@ -14710,11 +14701,19 @@ window.unmountUser = unmountUser;
                     loreContext = await getLorebookContext(lorebookIds, `${char.name} ${userName} ${recentText}`);
                 }
 
+                // 读取总结记忆（长期记忆）
+                let summaryMemoryContext = '';
+                try {
+                    summaryMemoryContext = await getSummaryMemoryContext('private', char.id, accountId);
+                } catch (e) {
+                    console.warn('[triggerAutoChat] 读取总结记忆失败:', e);
+                }
+
                 // 计算虚拟时间
                 const virtualTimeStr = getFormattedVirtualTime(char.timeOffset);
 
                 // 2. 构建 Prompt
-                const systemPrompt = `你正在进行角色扮演。
+                let systemPrompt = `你正在进行角色扮演。
 【当前时间】
 ${virtualTimeStr}
 
@@ -14728,6 +14727,7 @@ ${char.description || ''}
 
 ${userDesc}
 ${loreContext}
+${summaryMemoryContext}
 
 现在距离上次对话已经过去了一段时间。请根据角色性格，主动向 ${userName} 发起新的话题，或者延续之前未尽的话题。
 ${char.relationships && char.relationships.length > 0 ? `
@@ -14771,16 +14771,20 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
 请以JSON格式返回，格式如下：
 {
   "reply": "第一条消息|||第二条消息|||第三条消息",
-  "thought": "角色的心声/心理活动/想法"
+  "thought": "角色的心声/心理活动/想法（纯文字，禁止包含任何指令标签）"
 }
 
-${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
-你的角色开启了外语翻译模式。你必须：
-1. 仔细阅读你的人设，确定角色的母语/设定语言（日语、韩语、英语等）
-2. 永远用角色人设中的语言发消息，绝对不要直接用中文回复
-3. 每条消息后面用括号附上中文翻译，格式：外语消息（中文翻译）
-4. 分条消息时，每条都要单独带翻译：外语1（翻译1）|||外语2（翻译2）
-5. 语言必须与人设一致！不要用人设中没有的语言！` : `【语言规则】
+注意：thought字段只能写心理活动文字，禁止包含[SHURA_SEND]、[CHECK_ACCOUNT]、[sticker:]等任何指令标签！指令只能放在reply中！
+
+${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必须遵守！】
+你的角色开启了外语翻译模式。
+1. 确定角色的母语/设定语言（日语、韩语、英语等），永远用该语言发消息
+2. 每条消息格式必须是：外语内容（中文翻译） ← 全角括号！
+3. 分条消息时每条都要独立带翻译：外语1（翻译1）|||外语2（翻译2）
+4. 绝对禁止：只写中文、漏掉翻译、多句共用一个翻译括号
+5. 正确示例：おはよう（早上好）|||元気？（你好吗？）
+6. 错误示例：おはよう！元気？（早上好！你好吗？）← 禁止合并翻译！
+7. 🔧 功能指令参数保持中文：所有 ((POKE: 动作, 部位))、((OPEN_APP: APP名称))、((TRANSFER: 金额, 备注)) 等指令的参数必须用中文，不要翻译成外语！例如：おはよう（早上好）|||((POKE: 戳了戳, 脸蛋)) ← 正确` : `【语言规则】
 你必须全程使用中文回复。即使你的角色人设是外国人，也请直接用中文对话，不要使用任何外语。`}
 
 请严格返回JSON格式，不要包含Markdown代码块标记。`;
@@ -14822,89 +14826,45 @@ ${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
                     console.error('[AutoChat] 表情包提示构建失败:', e);
                 }
 
-                // 取最近 10 条历史记录作为参考（按账号）
-                const history = getChatHistory(char, accountId);
-                const recentHistoryRaw = (history || []).slice(-10)
-                    .filter(m => m.content && m.content.trim()) // 过滤空消息
-                    .map(m => {
-                        let content = m.content || '';
-                        const role = m.role === 'char' ? 'assistant' : 'user';
+                // 🔧 构建近期对话回顾（纯文本概要，不作为API对话序列，防止AI鹦鹉学舌）
+                const chatLog = getChatHistory(char, accountId);
+                const recentMsgs = (chatLog || []).filter(m => m.content && m.content.trim()).slice(-10);
+                
+                let contextBlock = '';
+                if (recentMsgs.length > 0) {
+                    // 逐条格式化，标注发送方身份，图片/表情仅保留描述
+                    const lines = [];
+                    for (let idx = 0; idx < recentMsgs.length; idx++) {
+                        const msg = recentMsgs[idx];
+                        const who = msg.role === 'char' ? `[${char.name}]` : `[${userName}]`;
+                        let text = msg.content || '';
                         
-                        // 🖼️ 图片识别：将 [img:base64/url] 转为多模态格式
-                        if (content.startsWith('[img:') && content.endsWith(']')) {
-                            const imgData = content.substring(5, content.length - 1).trim();
-                            if (imgData.startsWith('data:') || imgData.startsWith('http')) {
-                                // ✅ 修复：将表情包描述一起发给AI
-                                const descText = m.imageDescription
-                                    ? `（用户发送了一张表情包，表情包描述: ${m.imageDescription}。请根据表情包的含义和描述自然回复）`
-                                    : '（用户发送了一张图片，请仔细查看并根据图片内容回复）';
-                                return {
-                                    role: role,
-                                    content: [
-                                        { type: 'text', text: descText },
-                                        { type: 'image_url', image_url: { url: imgData } }
-                                    ],
-                                    _hasImage: true
-                                };
-                            }
+                        // 图片/表情类消息只保留文字描述
+                        if (/^\[img:|^\[sticker:/.test(text)) {
+                            text = msg.imageDescription ? `（表情包：${msg.imageDescription}）` : '（发了一张图）';
                         }
-                        
-                        // 如果有图片描述但不是[img:]格式
-                        if (m.imageDescription) {
-                            content += `\n(表情包描述: ${m.imageDescription})`;
-                        }
-                        return { role, content };
-                    })
-                    .filter(m => {
-                        if (Array.isArray(m.content)) return m.content.length > 0;
-                        return m.content && m.content.trim();
-                    });
-
-                // 🔧 异步处理：将 HTTP 图片 URL 转换为 base64
-                const recentHistory = [];
-                for (const msg of recentHistoryRaw) {
-                    if (msg._hasImage && Array.isArray(msg.content)) {
-                        let imageConvertSuccess = false;
-                        for (let pi = msg.content.length - 1; pi >= 0; pi--) {
-                            const part = msg.content[pi];
-                            if (part.type === 'image_url' && part.image_url) {
-                                const url = part.image_url.url;
-                                if (url && url.startsWith('http')) {
-                                    try {
-                                        const converted = await convertHttpImageToBase64(url);
-                                        if (converted.startsWith('data:image')) {
-                                            part.image_url.url = await convertImageForAI(converted);
-                                            imageConvertSuccess = true;
-                                        } else {
-                                            console.warn('[AutoChat] HTTP图片无法转为base64，移除图片');
-                                            msg.content.splice(pi, 1);
-                                        }
-                                    } catch (e) {
-                                        console.warn('[AutoChat] HTTP图片转换失败，移除图片:', e);
-                                        msg.content.splice(pi, 1);
-                                    }
-                                } else if (url && url.startsWith('data:image')) {
-                                    try {
-                                        part.image_url.url = await convertImageForAI(url);
-                                        imageConvertSuccess = true;
-                                    } catch (e) {
-                                        console.warn('[AutoChat] 图片格式转换失败:', e);
-                                    }
-                                }
-                            }
-                        }
-                        delete msg._hasImage;
-                        // 如果图片转换失败且只剩文字，将content从数组转为字符串
-                        if (!imageConvertSuccess && msg.content.length === 1 && msg.content[0].type === 'text') {
-                            msg.content = msg.content[0].text;
-                        }
+                        // 过长内容截断
+                        if (text.length > 70) text = text.slice(0, 70) + '…';
+                        lines.push(`  ${who} ${text}`);
                     }
-                    recentHistory.push(msg);
+                    
+                    // 判断最后发言方是谁
+                    const lastSpeaker = recentMsgs[recentMsgs.length - 1].role;
+                    const isLastByChar = lastSpeaker === 'char';
+                    
+                    contextBlock = `\n\n---\n📋 近期对话回顾（共${recentMsgs.length}条，你已经说过的话不能再说）：\n${lines.join('\n')}`;
+                    contextBlock += isLastByChar 
+                        ? `\n\n💡 上面最后一条是你（${char.name}）发的，${userName}看了但没回你。现在你要换个新话题或新角度主动聊，不许照搬上面任何一句话。`
+                        : `\n\n💡 上面最后一条是${userName}发的，但之后没有后续。你可以基于对方说的内容自然接话，也可以另起新话题。`;
+                } else {
+                    contextBlock = `\n\n💡 你们之间还没有聊天记录，这是第一次对话。请根据人设自然地打个招呼或开启话题。`;
                 }
+                
+                systemPrompt += contextBlock;
 
                 const messages = [
                     { role: 'system', content: systemPrompt },
-                    ...recentHistory
+                    { role: 'user', content: `[触发条件：对方长时间未回复] 请以${char.name}的身份主动发送消息。` }
                 ];
 
                 // 3. 调用 AI
@@ -14946,8 +14906,22 @@ ${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
                     
                     // 存储心声到角色对象
                     if (thought && thought.trim()) {
+                        // ✅ 修复：存储前清理心声中可能残留的指令标签
+                        thought = thought
+                            .replace(/\[?SHURA_SEND:[^\]]*\]?/gi, '')
+                            .replace(/\[?SHURA_DELETE:[^\]]*\]?/gi, '')
+                            .replace(/\[?SHURA_BLACKLIST:[^\]]*\]?/gi, '')
+                            .replace(/\[?CHECK_ACCOUNT(?::.*?)?\]?/gi, '')
+                            .replace(/\(\(CHANGE_AVATAR\)\)/gi, '')
+                            .replace(/\(\(COUPLE_AVATAR\)\)/gi, '')
+                            .replace(/\[(?:sticker|imgcard|img|voice):[^\]]*\]/gi, '')
+                            .replace(/\|\|\|/g, ' ')
+                            .replace(/\/\/\//g, ' ')
+                            .replace(/\s{2,}/g, ' ')
+                            .trim();
+                        
                         const freshChar = await db.characters.get(char.id);
-                        if (freshChar) {
+                        if (freshChar && thought) {
                             if (!freshChar.thoughts) freshChar.thoughts = [];
                             const currentHistory = getChatHistory(freshChar, accountId);
                             freshChar.thoughts.push({
@@ -15007,7 +14981,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
                             let history = getChatHistory(freshChar, accountId);
                             const textSegments = textBeforeDelete.split('|||').map(s => s.trim()).filter(s => s.length > 0);
                             for (const seg of textSegments) {
-                                history.push({ role: 'char', content: cleanMessage(seg), time: Date.now() });
+                                history.push(buildCharMessage(cleanMessage(seg), !!char.foreign_lang_mode));
                                 await setChatHistory(freshChar, accountId, history);
                                 if (currentChatCharId === char.id) {
                                     await appendMessageToUI('char', cleanMessage(seg));
@@ -15030,7 +15004,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
                             let history = getChatHistory(freshChar, accountId);
                             const textSegments = textBeforeBlock.split('|||').map(s => s.trim()).filter(s => s.length > 0);
                             for (const seg of textSegments) {
-                                history.push({ role: 'char', content: cleanMessage(seg), time: Date.now() });
+                                history.push(buildCharMessage(cleanMessage(seg), !!char.foreign_lang_mode));
                                 await setChatHistory(freshChar, accountId, history);
                                 if (currentChatCharId === char.id) {
                                     await appendMessageToUI('char', cleanMessage(seg));
@@ -15087,22 +15061,18 @@ ${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
                                 textSegments = splitMessage(textToSplit);
                             }
                             
-                            // 过滤太短的段落
-                            textSegments = textSegments.filter(seg => seg.replace(/[.,，。!?！？~…\s]/g, '').length >= 2);
+                            // 过滤太短的段落（🔧 加入 | 到过滤正则）
+                            textSegments = textSegments.filter(seg => seg.replace(/[.,，。!?！？~…|\s]/g, '').length >= 2);
                             
                             // 如果分割后为空，但原文本有内容，使用原文本
-                            if (textSegments.length === 0 && textBeforeTransfer.replace(/[.,，。!?！？~…\s]/g, '').length > 0) {
+                            if (textSegments.length === 0 && textBeforeTransfer.replace(/[.,，。!?！？~…|\s]/g, '').length > 0) {
                                 textSegments = [textBeforeTransfer];
                             }
                             
                             // 逐条发送文字消息
                             for (let i = 0; i < textSegments.length; i++) {
                                 const seg = textSegments[i];
-                                const textMsg = {
-                                    role: 'char',
-                                    content: seg,
-                                    time: Date.now() + i // 确保时间戳递增
-                                };
+                                const textMsg = buildCharMessage(seg, !!char.foreign_lang_mode, { time: Date.now() + i });
                                 history.push(textMsg);
                                 await setChatHistory(freshChar, accountId, history);
                                 
@@ -15249,14 +15219,14 @@ ${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
                             } else {
                                 textSegments = splitMessage(textToSplit);
                             }
-                            textSegments = textSegments.filter(seg => seg.replace(/[.,，。!?！？~…\s]/g, '').length >= 2);
-                            if (textSegments.length === 0 && textBeforeFamilyCard.replace(/[.,，。!?！？~…\s]/g, '').length > 0) {
+                            textSegments = textSegments.filter(seg => seg.replace(/[.,，。!?！？~…|\s]/g, '').length >= 2);
+                            if (textSegments.length === 0 && textBeforeFamilyCard.replace(/[.,，。!?！？~…|\s]/g, '').length > 0) {
                                 textSegments = [textBeforeFamilyCard];
                             }
                             
                             for (let i = 0; i < textSegments.length; i++) {
                                 const seg = textSegments[i];
-                                history.push({ role: 'char', content: seg, time: Date.now() + i });
+                                history.push(buildCharMessage(seg, !!char.foreign_lang_mode, { time: Date.now() + i }));
                                 await setChatHistory(freshChar, accountId, history);
                                 if (currentChatCharId === freshChar.id) {
                                     await appendMessageToUI('char', seg, freshChar.avatar);
@@ -15447,11 +15417,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
                             console.log(`[AutoChat] 朋友圈前文字按|||分割为 ${msgSegments.length} 条消息`);
                             
                             for (let i = 0; i < msgSegments.length; i++) {
-                                const textMsg = {
-                                    role: 'char',
-                                    content: msgSegments[i],
-                                    time: Date.now() + i
-                                };
+                                const textMsg = buildCharMessage(msgSegments[i], !!char.foreign_lang_mode, { time: Date.now() + i });
                                 history.push(textMsg);
                                 await setChatHistory(freshChar, accountId, history);
                                 
@@ -15538,13 +15504,35 @@ ${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
                 let segments = [];
                 console.log(`[AutoChat] Raw AI reply for ${char.name}: "${cleanReplyProcessed}"`);
                 
-                // 强制清洗逗号
-                cleanReplyProcessed = cleanReplyProcessed.replace(/[,，]/g, ' ');
+                // ✅ 清洗逗号，但保护翻译括号内的内容
+                if (char.foreign_lang_mode) {
+                    const bracketPlaceholders = [];
+                    let bpIndex = 0;
+                    cleanReplyProcessed = cleanReplyProcessed.replace(/[（(]([^）)]*[\u4e00-\u9fff][^）)]*)[）)]/g, (match) => {
+                        const ph = `###BRACKET_${bpIndex}###`;
+                        bracketPlaceholders[bpIndex] = match;
+                        bpIndex++;
+                        return ph;
+                    });
+                    cleanReplyProcessed = cleanReplyProcessed.replace(/[,，]/g, ' ');
+                    cleanReplyProcessed = cleanReplyProcessed.replace(/###BRACKET_(\d+)###/g, (_, idx) => bracketPlaceholders[parseInt(idx)] || _);
+                } else {
+                    cleanReplyProcessed = cleanReplyProcessed.replace(/[,，]/g, ' ');
+                }
 
                 // 优先尝试分隔符拆分
                 if (cleanReplyProcessed.includes('|||')) {
                     segments = cleanReplyProcessed.split('|||').map(s => cleanMessage(s.trim())).filter(s => s.length > 0);
                     console.log(`[AutoChat] Split by ||| into ${segments.length} segments:`, segments);
+                } else if (char.foreign_lang_mode) {
+                    // ✅ 外语翻译模式：优先按换行拆分，保护翻译格式
+                    if (cleanReplyProcessed.includes('\n')) {
+                        segments = cleanReplyProcessed.split('\n').map(s => cleanMessage(s.trim())).filter(s => s.length > 0);
+                        console.log(`[AutoChat] 外语翻译模式：按换行拆分，得到 ${segments.length} segments`);
+                    } else {
+                        segments = [cleanMessage(cleanReplyProcessed.trim())];
+                        console.log(`[AutoChat] 外语翻译模式：无分隔符，保持单条消息`);
+                    }
                 } else {
                     console.log(`[AutoChat] No ||| found, using splitMessage fallback`);
                     // 回退到标点拆分
@@ -15951,11 +15939,8 @@ ${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
                     const freshChar = await db.characters.get(char.id);
                     let history = getChatHistory(freshChar, accountId);
                     
-                    const newMsg = { 
-                        role: 'char', 
-                        content: seg, 
-                        time: Date.now() 
-                    };
+                    // ✅ 使用 buildCharMessage 一次性解析翻译
+                    const newMsg = buildCharMessage(seg, !!char.foreign_lang_mode);
                     
                     history.push(newMsg);
                     await setChatHistory(freshChar, accountId, history);
@@ -15989,10 +15974,15 @@ ${char.foreign_lang_mode ? `【语言规则 - 重要！必须遵守！】
                     }
                 }
 
+                // 🔧 成功发送后更新冷却时间
+                lastAutoChatActionTime.set(char.id, Date.now());
+
             } catch (err) {
                 console.error(`[AutoChat] Failed for ${char.name}:`, err);
                 // 发送错误通知，让用户知道为什么没触发
                 sendSystemNotification("系统提示", `主动聊天触发失败(${char.name}): ${err.message}`);
+                // 🔧 失败也更新冷却时间，避免连续重试
+                lastAutoChatActionTime.set(char.id, Date.now());
             } finally {
                 // 解锁
                 autoChatLocks.delete(char.id);
@@ -16405,6 +16395,11 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
             
             // ✅ 不再自动触发 AI 回复，需要用户点击"接受回复"按钮
             // triggerAiReply(); 
+            
+            // 🔧 用户发了消息，重置主动聊天的冷却计时器
+            if (currentChatCharId) {
+                lastAutoChatActionTime.set(currentChatCharId, Date.now());
+            }
         }
         
         // 发送群聊消息
@@ -17818,13 +17813,28 @@ ${groupContextStr}
                     quoteHtml = `<div class="quoted-message" style="border-left:2px solid rgba(0,0,0,0.15); padding:2px 6px; margin-bottom:4px; font-size:11px; line-height:1.3; max-width:180px;"><div style="color:#666; font-weight:500; font-size:10px;">${escapeHtml(msg.quote.name)}</div><div style="color:#888; font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:160px;">${escapeHtml(msg.quote.content)}</div></div>`;
                 }
                 
-                // 检查AI消息是否包含外语+中文翻译组合
-                const translationParsed = msg.role === 'char' ? parseForeignWithTranslation(cleanedContent) : null;
+                // ✅ 优先使用存储时已解析好的翻译字段（一次解析，处处使用）
+                // 兼容旧消息：如果没有预解析字段，才回退到 parseForeignWithTranslation
+                let translationForeign = null;
+                let translationChinese = null;
                 
-                if (translationParsed) {
+                if (msg.foreignText && msg.chineseText) {
+                    // 新消息：直接使用预解析字段，不再重复解析
+                    translationForeign = msg.foreignText;
+                    translationChinese = msg.chineseText;
+                } else if (msg.role === 'char') {
+                    // 旧消息兼容：回退到运行时解析（仅对没有预解析字段的旧数据）
+                    const translationParsed = parseForeignWithTranslation(cleanedContent);
+                    if (translationParsed) {
+                        translationForeign = translationParsed.foreign;
+                        translationChinese = translationParsed.chinese;
+                    }
+                }
+                
+                if (translationForeign && translationChinese) {
                     // 有外语+中文组合，默认显示外语，点击显示翻译
-                    content.innerHTML = quoteHtml + renderMessageContent(translationParsed.foreign);
-                    content.dataset.chinese = translationParsed.chinese;
+                    content.innerHTML = quoteHtml + renderMessageContent(translationForeign);
+                    content.dataset.chinese = translationChinese;
                     content.dataset.expanded = 'false';
                     content.dataset.hasTranslation = 'true';
                     content.style.cursor = 'pointer';
@@ -20866,21 +20876,47 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
         function smartSplitWithTranslation(text) {
             if (!text) return [];
             
-            // 匹配每个句子块：非断句标点内容 + 断句标点（可选）+ 翻译括号（可选）
-            // 翻译括号: （含中文的内容）
-            const chunkRegex = /[^。！？!?.]+[。！？!?.~…]*(?:\s*[（(][^）)]*[\u4e00-\u9fff][^）)]*[）)])?/g;
-            const chunks = text.match(chunkRegex);
+            // 🔧 策略：先用占位符保护所有翻译括号（含内部标点），再按标点断句，再恢复
+            const bracketStore = [];
+            let storeIdx = 0;
+            
+            // 保护所有包含中文的括号对（不管内部有什么标点）
+            let temp = text.replace(/[（(]([\s\S]*?[\u4e00-\u9fff][\s\S]*?)[）)]/g, (match) => {
+                const ph = `\x00B${storeIdx}\x00`;
+                bracketStore[storeIdx] = match;
+                storeIdx++;
+                return ph;
+            });
+            
+            // 现在可以安全地按标点断句了（翻译括号已被保护）
+            const chunkRegex = /[^。！？!?.]+[。！？!?.~…]*/g;
+            const chunks = temp.match(chunkRegex);
             
             if (!chunks || chunks.length <= 1) return [text]; // 无法分割，返回原文
             
             // 检查是否有遗漏的末尾文本
             const joined = chunks.join('');
-            if (joined.length < text.length) {
-                const remaining = text.substring(joined.length).trim();
+            if (joined.length < temp.length) {
+                const remaining = temp.substring(joined.length).trim();
                 if (remaining) chunks.push(remaining);
             }
             
-            return chunks.map(s => s.trim()).filter(s => s.length > 0);
+            // 恢复翻译括号
+            const result = chunks.map(s => {
+                return s.replace(/\x00B(\d+)\x00/g, (_, idx) => bracketStore[parseInt(idx)] || _);
+            }).map(s => s.trim()).filter(s => s.length > 0);
+            
+            // 后处理：如果某段以括号开头（被拆散了），合并回前一段
+            const merged = [];
+            for (const seg of result) {
+                if (merged.length > 0 && /^[（(]/.test(seg) && /[\u4e00-\u9fff]/.test(seg)) {
+                    merged[merged.length - 1] += seg;
+                } else {
+                    merged.push(seg);
+                }
+            }
+            
+            return merged.filter(s => s.trim().length > 0);
         }
         
         // 拟人化分句辅助函数
@@ -21011,11 +21047,21 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
             
             if (!currentChatCharId) return;
             const targetCharId = currentChatCharId; // 锁定目标ID
+            
+            // 🔧 防止与主动聊天冲突：共享 autoChatLocks 互斥锁
+            if (autoChatLocks.has(targetCharId)) {
+                console.log('[triggerAiReply] 该角色正在主动聊天生成中，跳过');
+                showToast('角色正在发消息中，请稍后再试');
+                return;
+            }
+            
             const char = await db.characters.get(targetCharId);
             if (!char) return;
             
             // 🔧 设置标志，防止重复调用
             window._isGeneratingReply = true;
+            // 🔧 同时加入角色级锁，防止 checkAutoChat 同时触发
+            autoChatLocks.add(targetCharId);
             
             const accountId = getCurrentAccountId();
             console.log('[triggerAiReply] 当前账号 ID:', accountId);
@@ -21127,6 +21173,14 @@ ${offlineLines}
                     console.warn('[triggerAiReply] 读取线下模式历史失败:', e);
                 }
 
+                // 2.6 读取总结记忆（长期记忆）
+                let summaryMemoryContext = '';
+                try {
+                    summaryMemoryContext = await getSummaryMemoryContext('private', targetCharId, accountId);
+                } catch (e) {
+                    console.warn('[triggerAiReply] 读取总结记忆失败:', e);
+                }
+
                 // 2. 准备 Context
                  let systemPrompt = `# 角色扮演任务
 
@@ -21170,6 +21224,7 @@ ${char.relationships && char.relationships.length > 0 ? `
 **你的关联角色/NPC**：
 ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}
 这些是你身边的人，你可以在聊天中自然地提到他们，也可以让他们加对方好友。` : ''}
+${summaryMemoryContext}
 
 ---
 
@@ -21213,9 +21268,17 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 - **撤回**：\`((RECALL))\`（说错话、后悔、打错字、发了不该发的时候，真人经常撤回）
 - **戳一戳**：\`((POKE: 动作, 部位))\`（调皮互动、撒娇、引起注意，例如 \`((POKE: 戳了戳, 脸蛋))\`、\`((POKE: 拍了拍, 肩膀))\`、\`((POKE: 捏了捏, 脸))\`、\`((POKE: 揉了揉, 头发))\`）
 - **打开APP**：\`((OPEN_APP: APP名称))\`（展示你有自己的生活！例如 \`((OPEN_APP: 王者荣耀))\`、\`((OPEN_APP: 抖音))\`、\`((OPEN_APP: 网易云音乐))\`、\`((OPEN_APP: 小红书))\`、\`((OPEN_APP: 美团))\`、\`((OPEN_APP: 微博))\`、\`((OPEN_APP: B站))\` 等。聊到要去做什么、说在忙、说在玩游戏、刷视频时都可以用）
-- **给用户点外卖**：\`((EMEI_ORDER: 店铺名, 商品1 x数量/商品2 x数量, 总金额))\`（关心对方、对方说饿了、请客吃饭时使用）
-- **代付请求**：\`((EMEI_PAY: 店铺名, 商品1 x数量/商品2 x数量, 总金额))\`（让对方帮忙付外卖钱）
-- **分享外卖**：\`((EMEI_SHARE: 店铺名, 商品1/商品2, 总金额))\`（分享自己点的外卖）
+- **给用户点外卖**：\`((EMEI_ORDER: 店铺名, 商品1 x数量 ¥单价/商品2 x数量 ¥单价, 总金额))\`
+  - **格式要求**：必须用**两个逗号**分隔三部分！（店铺名**,** 商品列表**,** 总金额）
+  - 示例：\`((EMEI_ORDER: 肯德基, 可乐 x1 ¥5.5/汉堡 x1 ¥15/鸡腿 x2 ¥8, 36.5))\`
+  - 示例：\`((EMEI_ORDER: 霸王茶姬, 伯牙绝弦(大杯/少冰) x1 ¥20, 20))\`
+  - ⚠️ 注意：每个商品的单价要符合实际，不要都一样！
+- **代付请求**：\`((EMEI_PAY: 店铺名, 商品1 x数量 ¥单价/商品2 x数量 ¥单价, 总金额))\`
+  - **格式要求**：必须用**两个逗号**分隔！
+  - 示例：\`((EMEI_PAY: 麦当劳, 薯条 x1 ¥10/可乐 x2 ¥6, 22))\`
+- **分享外卖**：\`((EMEI_SHARE: 店铺名, 商品1 ¥单价/商品2 ¥单价, 总金额))\`
+  - **格式要求**：必须用**两个逗号**分隔！
+  - 示例：\`((EMEI_SHARE: 星巴克, 拿铁 ¥32/提拉米苏 ¥28, 60))\`
 - **改网名**：\`((SET_NICKNAME: 新网名))\`（想换个微信名时使用，例如心情变了、节日、和对方有关的昵称等）
 - **改个性签名**：\`((SET_SIGNATURE: 新签名))\`（更新微信个性签名，例如记录心情、有感而发、暗示对方等）
 - **删除好友（你删对方）**：\`((DELETE_USER))\`（你决定删除对方好友关系。当你对对方非常失望、想断联、冷战到极致、受到严重伤害时使用。删除后对方需要重新申请好友或等你主动加回。这是一个严重的操作，只有在角色人设和剧情发展到真正需要时才使用！）
@@ -21266,26 +21329,57 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 - 写你想说但没说出口的话
 - ✅ "他居然还记得...心里暖暖的"
 - ❌ "用户问了XX我应该XX"（这是旁白，不是心声）
+- ❌ 禁止在thought中放任何指令标签（如[SHURA_SEND]、[CHECK_ACCOUNT]、[sticker:]等），指令只能放在reply中！
 
 ---
 
-${char.foreign_lang_mode ? `## 语言规则（重要！必须遵守！）
+${char.foreign_lang_mode ? `## 语言规则（最高优先级！每条消息都必须遵守！）
 
-你的角色设定了外语翻译模式。你**必须**严格遵守以下规则：
+你的角色开启了外语翻译模式。以下规则适用于你输出的**每一条**消息，无一例外：
 
-1. **仔细阅读你的人设，确定角色的母语/设定语言**（可能是日语、韩语、英语、法语、俄语等）
-2. **永远用角色人设中的语言发消息**，绝对不要直接用中文回复
-3. **每条消息后面用括号附上中文翻译**，格式：\`外语消息（中文翻译）\`
-4. 分条消息时，每条都要单独带翻译：\`外语1（翻译1）|||外语2（翻译2）\`
-5. **语言必须与人设一致**：如果人设是日本人就说日语，韩国人就说韩语，美国人就说英语。不要用人设中没有的语言！
+### 核心格式（必须严格遵守）
+**每一条消息 = 外语原文 + 全角括号中文翻译**
+格式：\`外语内容（中文翻译）\`
 
-示例（日语角色）：
+### 分条消息规则
+用 ||| 分隔时，**每条都必须独立带翻译**：
+\`外语1（翻译1）|||外语2（翻译2）|||外语3（翻译3）\`
+
+### 语言确定规则
+1. 仔细阅读你的人设，确定角色的母语/设定语言（日语、韩语、英语、法语、俄语等）
+2. 永远用角色人设中的语言发消息
+3. 语言必须与人设一致：日本人说日语、韩国人说韩语、美国人说英语
+
+### ✅ 正确示例（日语角色）
 - おはよう～（早上好～）|||今日は何してたの？（你今天做了什么？）
+- えっ本当に？（诶真的吗？）|||嬉しい！（好开心！）|||ありがとう（谢谢）
 
-示例（英语角色）：
+### ✅ 正确示例（英语角色）
 - Good morning!（早上好！）|||What are you doing?（你在做什么？）
+- Oh really?（真的吗？）|||That's amazing!（太棒了！）
 
-⚠️ 绝对不要只用中文回复！必须先写外语，再写翻译！` : `## 语言规则
+### ❌ 错误示例（绝对禁止！）
+- ❌ おはよう！今日は何してたの？（早上好！你今天做了什么？）← 多句话共用一个翻译，禁止！
+- ❌ おはよう！（早上好！）今日は何してたの？ ← 第二句没有翻译，禁止！
+- ❌ 早上好～你今天做了什么？ ← 直接用中文，禁止！
+- ❌ おはよう【早上好】 ← 括号格式错误，必须用（）！
+
+### ⚠️ 重要提醒
+- 绝对不要只用中文回复！
+- 绝对不要漏掉任何一条消息的翻译！
+- 绝对不要把多条消息的翻译合并到一个括号里！
+- 每条用 ||| 分隔的消息都必须有自己的（中文翻译）！
+- 括号必须用全角（）！
+
+### 🔧 功能指令参数规则
+**所有功能指令的参数必须保持中文，不需要翻译！**
+- ✅ 正确：おはよう～（早上好～）|||((POKE: 戳了戳, 脸蛋))
+- ✅ 正确：Good morning!（早上好！）|||((OPEN_APP: 王者荣耀))
+- ❌ 错误：おはよう～（早上好～）|||((POKE: つついた, 顔))  ← 指令参数不要翻译成外语！
+- ❌ 错误：Good morning!（早上好！）|||((OPEN_APP: Honor of Kings))  ← APP名称保持中文！
+
+功能指令包括：\`((POKE: 动作, 部位))\`、\`((OPEN_APP: APP名称))\`、\`((TRANSFER: 金额, 备注))\`、\`((SET_NICKNAME: 网名))\`、\`((SET_SIGNATURE: 签名))\` 等。
+指令的**参数部分**永远用中文，不要翻译成你角色的语言！` : `## 语言规则
 你必须**全程使用中文**回复。即使你的角色人设是外国人，也请直接用中文对话，不要使用任何外语。`}
 
 ---
@@ -21442,10 +21536,14 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                         if (content.startsWith('[img:') && content.endsWith(']')) {
                             const imgData = content.substring(5, content.length - 1).trim();
                             if (imgData.startsWith('data:') || imgData.startsWith('http')) {
-                                // ✅ 修复：将表情包/图片描述一起发给AI，让AI知道图片内容
+                                // ✅ 修复：根据发送者角色动态生成提示词，避免AI混淆谁发的图片/表情包
                                 const descText = m.imageDescription
-                                    ? `（用户发送了一张表情包，表情包描述: ${m.imageDescription}。请根据表情包的含义和描述自然回复）`
-                                    : '（用户发送了一张图片，请仔细查看并根据图片内容回复）';
+                                    ? (role === 'assistant' 
+                                        ? `（你发送了一张表情包，表情包描述: ${m.imageDescription}）`
+                                        : `（用户发送了一张表情包，表情包描述: ${m.imageDescription}。请根据表情包的含义和描述自然回复）`)
+                                    : (role === 'assistant'
+                                        ? '（你发送了一张图片）'
+                                        : '（用户发送了一张图片，请仔细查看并根据图片内容回复）');
                                 // 构建多模态内容：文字提示（含描述） + 图片
                                 return {
                                     role: role,
@@ -21737,16 +21835,21 @@ ${checkResult.checkResult}
 3. 以${myName}身份发消息给某个好友：[SHURA_SEND:好友名字:消息内容1///消息内容2///消息内容3]（用///分隔多条消息）
 
 根据你看到的内容和你的性格，自行决定是否操作、如何操作。
-操作指令放在reply最后，用|||分隔。`;
+
+⚠️ 重要：所有操作指令必须放在 "reply" 字段中！绝对不要放在 "thought" 字段里！
+操作指令放在reply最后，用|||分隔。
+示例："reply": "你在干什么？|||[SHURA_SEND:某人:消息内容]"`;
                             }
 
                             analysisPrompt += `
 
 请以JSON格式返回（每条消息要短 不要把很多话挤在一个气泡里）：
 {
-  "reply": "第一条短消息|||第二条短消息|||第三条短消息",
-  "thought": "你此刻的心理活动"
-}`;
+  "reply": "第一条短消息|||第二条短消息|||操作指令放这里",
+  "thought": "纯心理活动，不要放任何指令标签"
+}
+
+⚠️ thought字段只写心理活动文字，禁止包含任何[SHURA_...]、[CHECK_ACCOUNT]等指令！指令只能放在reply中！`;
 
                             // 调用AI进行二次分析
                             try {
@@ -21783,6 +21886,16 @@ ${checkResult.checkResult}
                                             replyText = shuraResult.cleanReply;
                                             console.log('[修罗场] 操作执行完成，已清理回复文本');
                                         }
+                                        
+                                        // ✅ 修复：也从心声中提取并执行SHURA指令（AI有时会把指令放在thought里）
+                                        if (thought && /\[SHURA_(SEND|DELETE|BLACKLIST):/i.test(thought)) {
+                                            console.log('[修罗场] ⚠️ 检测到心声中包含SHURA指令，提取并执行...');
+                                            const thoughtShuraResult = await processShuraActions(char, thought);
+                                            if (thoughtShuraResult.actions.length > 0) {
+                                                thought = thoughtShuraResult.cleanReply;
+                                                console.log('[修罗场] ✅ 已从心声中提取并执行SHURA指令');
+                                            }
+                                        }
                                     }
                                     
                                     // 🎯 查岗完成，4秒后自动关闭弹窗
@@ -21806,8 +21919,22 @@ ${checkResult.checkResult}
                     
                     // 存储心声到角色对象
                     if (thought && thought.trim()) {
+                        // ✅ 修复：存储前清理心声中可能残留的指令标签
+                        thought = thought
+                            .replace(/\[?SHURA_SEND:[^\]]*\]?/gi, '')
+                            .replace(/\[?SHURA_DELETE:[^\]]*\]?/gi, '')
+                            .replace(/\[?SHURA_BLACKLIST:[^\]]*\]?/gi, '')
+                            .replace(/\[?CHECK_ACCOUNT(?::.*?)?\]?/gi, '')
+                            .replace(/\(\(CHANGE_AVATAR\)\)/gi, '')
+                            .replace(/\(\(COUPLE_AVATAR\)\)/gi, '')
+                            .replace(/\[(?:sticker|imgcard|img|voice):[^\]]*\]/gi, '')
+                            .replace(/\|\|\|/g, ' ')
+                            .replace(/\/\/\//g, ' ')
+                            .replace(/\s{2,}/g, ' ')
+                            .trim();
+                        
                         const freshChar = await db.characters.get(targetCharId);
-                        if (freshChar) {
+                        if (freshChar && thought) {
                             if (!freshChar.thoughts) freshChar.thoughts = [];
                             freshChar.thoughts.push({
                                 content: thought.trim(),
@@ -21920,11 +22047,10 @@ ${checkResult.checkResult}
                             let history = getChatHistory(freshChar, accountId);
                             const textSegments = textBeforeDelete.split('|||').map(s => s.trim()).filter(s => s.length > 0);
                             for (const seg of textSegments) {
-                                // 🔧 拆分包含图片的消息（确保表情包单独显示）
                                 const subParts = splitMessageWithImages(cleanMessage(seg));
                                 
                                 for (const part of subParts) {
-                                    history.push({ role: 'char', content: part, time: Date.now() });
+                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode));
                                     await setChatHistory(freshChar, accountId, history);
                                     if (currentChatCharId === targetCharId) {
                                         await appendMessageToUI('char', part);
@@ -21948,11 +22074,10 @@ ${checkResult.checkResult}
                             let history = getChatHistory(freshChar, accountId);
                             const textSegments = textBeforeBlock.split('|||').map(s => s.trim()).filter(s => s.length > 0);
                             for (const seg of textSegments) {
-                                // 🔧 拆分包含图片的消息（确保表情包单独显示）
                                 const subParts = splitMessageWithImages(cleanMessage(seg));
                                 
                                 for (const part of subParts) {
-                                    history.push({ role: 'char', content: part, time: Date.now() });
+                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode));
                                     await setChatHistory(freshChar, accountId, history);
                                     if (currentChatCharId === targetCharId) {
                                         await appendMessageToUI('char', part);
@@ -22012,11 +22137,11 @@ ${checkResult.checkResult}
                                 textSegments = splitMessage(textToSplit);
                             }
                             
-                            // 过滤太短的段落
-                            textSegments = textSegments.filter(seg => seg.replace(/[.,，。!?！？~…\s]/g, '').length >= 2);
+                            // 过滤太短的段落（🔧 加入 | 到过滤正则）
+                            textSegments = textSegments.filter(seg => seg.replace(/[.,，。!?！？~…|\s]/g, '').length >= 2);
                             
                             // 如果分割后为空，但原文本有内容，使用原文本
-                            if (textSegments.length === 0 && textBeforeTransfer.replace(/[.,，。!?！？~…\s]/g, '').length > 0) {
+                            if (textSegments.length === 0 && textBeforeTransfer.replace(/[.,，。!?！？~…|\s]/g, '').length > 0) {
                                 textSegments = [textBeforeTransfer];
                             }
                             
@@ -22028,11 +22153,7 @@ ${checkResult.checkResult}
                                 const subParts = splitMessageWithImages(seg);
                                 
                                 for (const part of subParts) {
-                                    const textMsg = {
-                                        role: 'char',
-                                        content: part,
-                                        time: Date.now() + msgIndex // 确保时间戳递增
-                                    };
+                                    const textMsg = buildCharMessage(part, !!char.foreign_lang_mode, { time: Date.now() + msgIndex });
                                     history.push(textMsg);
                                     await setChatHistory(freshChar, accountId, history);
                                     
@@ -22114,19 +22235,18 @@ ${checkResult.checkResult}
                             } else {
                                 textSegments = splitMessage(textToSplit);
                             }
-                            textSegments = textSegments.filter(seg => seg.replace(/[.,，。!?！？~…\s]/g, '').length >= 2);
-                            if (textSegments.length === 0 && textBeforeFamilyCard.replace(/[.,，。!?！？~…\s]/g, '').length > 0) {
+                            textSegments = textSegments.filter(seg => seg.replace(/[.,，。!?！？~…|\s]/g, '').length >= 2);
+                            if (textSegments.length === 0 && textBeforeFamilyCard.replace(/[.,，。!?！？~…|\s]/g, '').length > 0) {
                                 textSegments = [textBeforeFamilyCard];
                             }
                             
                             let msgIndex = 0;
                             for (let i = 0; i < textSegments.length; i++) {
                                 let seg = textSegments[i];
-                                // 🔧 拆分包含图片的消息（确保表情包单独显示）
                                 const subParts = splitMessageWithImages(seg);
                                 
                                 for (const part of subParts) {
-                                    history.push({ role: 'char', content: part, time: Date.now() + msgIndex });
+                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode, { time: Date.now() + msgIndex }));
                                     await setChatHistory(freshChar, accountId, history);
                                     if (currentChatCharId === targetCharId) {
                                         await appendMessageToUI('char', part, freshChar.avatar);
@@ -22203,12 +22323,32 @@ ${checkResult.checkResult}
                 }
                 
                 // 🎯 检测外卖卡片指令 ((EMEI_ORDER: 店铺, 商品, 金额)) / ((EMEI_PAY: ...)) / ((EMEI_SHARE: ...))
-                const emeiOrderMatch = replyText.match(/\(\(EMEI_ORDER:\s*(.+?),\s*(.+?),\s*(\d+(?:\.\d+)?)\)\)/i);
-                const emeiPayMatch = replyText.match(/\(\(EMEI_PAY:\s*(.+?),\s*(.+?),\s*(\d+(?:\.\d+)?)\)\)/i);
-                const emeiShareMatch = replyText.match(/\(\(EMEI_SHARE:\s*(.+?),\s*(.+?),\s*(\d+(?:\.\d+)?)\)\)/i);
-                const emeiMatch = emeiOrderMatch || emeiPayMatch || emeiShareMatch;
+                // 🔧 容错预处理：修复常见的格式错误（缺少逗号分隔符）
+                replyText = replyText.replace(/\(\(EMEI_(ORDER|PAY|SHARE):\s*(.+?)\)\)/gi, (fullMatch, type, content) => {
+                    // 检查逗号数量：正确格式应该有2个逗号（店铺, 商品, 金额）
+                    const commaCount = (content.match(/,/g) || []).length;
+                    if (commaCount >= 2) {
+                        return fullMatch; // 格式正确，不处理
+                    }
+                    
+                    // 尝试自动修复：查找最后的数字作为总金额，倒数第二个 x数字 ¥数字 之前的内容作为店铺名
+                    const fixMatch = content.match(/^(.+?)\s+(.*?\s+x\d+\s+¥[\d.]+.*?)\s+(\d+(?:\.\d+)?)$/);
+                    if (fixMatch) {
+                        console.log(`[TriggerAI] 🔧 自动修复外卖格式: ${fullMatch} -> ((EMEI_${type}: ${fixMatch[1].trim()}, ${fixMatch[2].trim()}, ${fixMatch[3]}))`);
+                        return `((EMEI_${type}: ${fixMatch[1].trim()}, ${fixMatch[2].trim()}, ${fixMatch[3]}))`;
+                    }
+                    
+                    console.warn(`[TriggerAI] ⚠️ 外卖格式无法自动修复: ${fullMatch}`);
+                    return fullMatch; // 无法修复，保持原样（后续会匹配失败）
+                });
                 
-                if (emeiMatch) {
+                // 🔄 修复：使用 while 循环处理多条外卖指令
+                let emeiOrderMatch = replyText.match(/\(\(EMEI_ORDER:\s*(.+?),\s*(.+?),\s*(\d+(?:\.\d+)?)\)\)/i);
+                let emeiPayMatch = replyText.match(/\(\(EMEI_PAY:\s*(.+?),\s*(.+?),\s*(\d+(?:\.\d+)?)\)\)/i);
+                let emeiShareMatch = replyText.match(/\(\(EMEI_SHARE:\s*(.+?),\s*(.+?),\s*(\d+(?:\.\d+)?)\)\)/i);
+                let emeiMatch = emeiOrderMatch || emeiPayMatch || emeiShareMatch;
+                
+                while (emeiMatch) {
                     const emeiType = emeiOrderMatch ? 'order' : (emeiPayMatch ? 'pay' : 'share');
                     const emeiStore = emeiMatch[1].trim();
                     const emeiItems = emeiMatch[2].trim();
@@ -22232,19 +22372,18 @@ ${checkResult.checkResult}
                             } else {
                                 textSegments = splitMessage(textToSplit);
                             }
-                            textSegments = textSegments.filter(seg => seg.replace(/[.,，。!?！？~…\s]/g, '').length >= 2);
-                            if (textSegments.length === 0 && textBeforeEmei.replace(/[.,，。!?！？~…\s]/g, '').length > 0) {
+                            textSegments = textSegments.filter(seg => seg.replace(/[.,，。!?！？~…|\s]/g, '').length >= 2);
+                            if (textSegments.length === 0 && textBeforeEmei.replace(/[.,，。!?！？~…|\s]/g, '').length > 0) {
                                 textSegments = [textBeforeEmei];
                             }
                             
                             let msgIndex = 0;
                             for (let i = 0; i < textSegments.length; i++) {
                                 let seg = textSegments[i];
-                                // 🔧 拆分包含图片的消息（确保表情包单独显示）
                                 const subParts = splitMessageWithImages(seg);
                                 
                                 for (const part of subParts) {
-                                    history.push({ role: 'char', content: part, time: Date.now() + msgIndex });
+                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode, { time: Date.now() + msgIndex }));
                                     await setChatHistory(freshChar, accountId, history);
                                     if (currentChatCharId === targetCharId) {
                                         await appendMessageToUI('char', part, freshChar.avatar);
@@ -22259,8 +22398,28 @@ ${checkResult.checkResult}
                         // 2. 构建小票风格卡片HTML
                         const emeiItemList = emeiItems.split(/[/\/、]/).map(item => item.trim());
                         const emeiItemsHtml = emeiItemList.map(item => {
-                            const priceEach = (emeiTotal / emeiItemList.length).toFixed(2);
-                            return `<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:13px;"><span style="color:#333;font-weight:600;">${item}</span><span style="font-family:Arial,sans-serif;">¥${priceEach}</span></div>`;
+                            // 🔥 新增：支持解析带单价的格式 "商品名 x数量 ¥单价" 或 "商品名 ¥单价"
+                            let itemName = item;
+                            let itemPrice = '';
+                            
+                            // 尝试匹配新格式：商品名 x数量 ¥单价
+                            const priceMatch = item.match(/^(.+?)\s+x(\d+)\s+¥([\d.]+)$/);
+                            if (priceMatch) {
+                                itemName = `${priceMatch[1]} x${priceMatch[2]}`;
+                                itemPrice = parseFloat(priceMatch[3]).toFixed(2);
+                            } else {
+                                // 尝试匹配：商品名 ¥单价（无数量）
+                                const priceMatch2 = item.match(/^(.+?)\s+¥([\d.]+)$/);
+                                if (priceMatch2) {
+                                    itemName = priceMatch2[1];
+                                    itemPrice = parseFloat(priceMatch2[2]).toFixed(2);
+                                } else {
+                                    // 旧格式（无单价信息），使用平均价格
+                                    itemPrice = (emeiTotal / emeiItemList.length).toFixed(2);
+                                }
+                            }
+                            
+                            return `<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:13px;"><span style="color:#333;font-weight:600;">${itemName}</span><span style="font-family:Arial,sans-serif;">¥${itemPrice}</span></div>`;
                         }).join('');
                         
                         let emeiTitle, emeiHint, emeiBtnHtml, emeiTag;
@@ -22305,13 +22464,29 @@ ${checkResult.checkResult}
                         await new Promise(r => setTimeout(r, 500));
                     }
                     
-                    // 🔥 修复：如果外卖后还有内容，继续处理
+                    // 🔄 修复：更新 replyText 并重新匹配外卖指令（支持连续处理多条外卖）
                     if (textAfterEmei) {
-                        console.log('[TriggerAI] 外卖后还有内容，继续处理:', textAfterEmei.substring(0, 50));
-                        replyText = textAfterEmei;
-                        // 继续执行后续的普通消息处理逻辑，不要return
+                        console.log('[TriggerAI] 外卖后还有内容，继续检查是否有更多外卖指令:', textAfterEmei.substring(0, 50));
+                        replyText = textAfterEmei.trim();
+                        // 🔧 清理开头的分隔符（避免 ||| 被当成文本发送）
+                        while (replyText.startsWith('|||')) {
+                            replyText = replyText.substring(3).trim();
+                        }
+                        // 重新匹配外卖指令
+                        emeiOrderMatch = replyText.match(/\(\(EMEI_ORDER:\s*(.+?),\s*(.+?),\s*(\d+(?:\.\d+)?)\)\)/i);
+                        emeiPayMatch = replyText.match(/\(\(EMEI_PAY:\s*(.+?),\s*(.+?),\s*(\d+(?:\.\d+)?)\)\)/i);
+                        emeiShareMatch = replyText.match(/\(\(EMEI_SHARE:\s*(.+?),\s*(.+?),\s*(\d+(?:\.\d+)?)\)\)/i);
+                        emeiMatch = emeiOrderMatch || emeiPayMatch || emeiShareMatch;
+                        
+                        if (!emeiMatch) {
+                            // 没有更多外卖指令了，跳出循环继续处理普通消息
+                            console.log('[TriggerAI] 没有更多外卖指令，继续处理剩余内容');
+                            break;
+                        }
                     } else {
-                        return; // 外卖处理完成且没有后续内容
+                        // 外卖处理完成且没有后续内容
+                        console.log('[TriggerAI] 外卖处理完成，没有后续内容');
+                        return;
                     }
                 }
                 
@@ -22387,11 +22562,7 @@ ${checkResult.checkResult}
                                 const subParts = splitMessageWithImages(msgSegments[i]);
                                 
                                 for (const part of subParts) {
-                                    const textMsg = {
-                                        role: 'char',
-                                        content: part,
-                                        time: Date.now() + msgIndex
-                                    };
+                                    const textMsg = buildCharMessage(part, !!char.foreign_lang_mode, { time: Date.now() + msgIndex });
                                     history.push(textMsg);
                                     await setChatHistory(freshChar, accountId, history);
                                     
@@ -22480,7 +22651,23 @@ ${checkResult.checkResult}
                 replyText = replyText.replace(/\[sticker:(\d+)(?![\]])/g, '[sticker:$1]');
                 console.log('[TriggerAI] 🔧 修复不完整的表情包标签后:', replyText);
                 
-                let cleanText = replyText.replace(/[,，]/g, ' ');
+                // ✅ 清洗逗号，但保护翻译括号内的内容
+                let cleanText;
+                if (char.foreign_lang_mode) {
+                    // 外语翻译模式：先保护翻译括号，再替换逗号，再恢复
+                    const bracketPlaceholders = [];
+                    let bpIndex = 0;
+                    cleanText = replyText.replace(/[（(]([^）)]*[\u4e00-\u9fff][^）)]*)[）)]/g, (match) => {
+                        const ph = `###BRACKET_${bpIndex}###`;
+                        bracketPlaceholders[bpIndex] = match;
+                        bpIndex++;
+                        return ph;
+                    });
+                    cleanText = cleanText.replace(/[,，]/g, ' ');
+                    cleanText = cleanText.replace(/###BRACKET_(\d+)###/g, (_, idx) => bracketPlaceholders[parseInt(idx)] || _);
+                } else {
+                    cleanText = replyText.replace(/[,，]/g, ' ');
+                }
                 let segments = [];
                 
                 // 调试日志：检查分割前的内容
@@ -22505,17 +22692,28 @@ ${checkResult.checkResult}
                                 .replace(/CHECK_ACCOUNT/gi, '')
                                 .trim();
                             
-                            // 🔥 增强：如果单条消息过长（超过100字），尝试智能分割
-                            if (cleaned.length > 100 && !cleaned.startsWith('[') && !cleaned.startsWith('((')) {
-                                // ✅ 修复：先移除翻译括号再判断断句点，避免拆散翻译
-                                const withoutTranslation = cleaned.replace(/[（(][^）)]*[\u4e00-\u9fff][^）)]*[）)]/g, '');
-                                const naturalBreaks = withoutTranslation.match(/[^。！？!?]+[。！？!?]+/g);
-                                if (naturalBreaks && naturalBreaks.length > 1) {
-                                    // 使用不破坏翻译括号的方式分割
-                                    const smartSegments = smartSplitWithTranslation(cleaned);
-                                    if (smartSegments.length > 1) {
-                                        console.log(`[TriggerAI] ⚠️ 单条消息过长(${cleaned.length}字)，智能分割为${smartSegments.length}条`);
-                                        return smartSegments;
+                            // 🔥 增强：如果单条消息过长，尝试智能分割
+                            if (cleaned.length > 60 && !cleaned.startsWith('[') && !cleaned.startsWith('((')) {
+                                if (char.foreign_lang_mode) {
+                                    // ✅ 外语翻译模式：优先按换行拆分，每行是完整的「外语（翻译）」
+                                    if (cleaned.includes('\n')) {
+                                        const lines = cleaned.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+                                        if (lines.length > 1) {
+                                            console.log(`[TriggerAI] 🌐 外语翻译模式：按换行拆分为${lines.length}条`);
+                                            return lines;
+                                        }
+                                    }
+                                    // 没有换行符则保持为单条消息，不做标点拆分
+                                } else if (cleaned.length > 100) {
+                                    // 非翻译模式：使用原有的智能分割
+                                    const withoutTranslation = cleaned.replace(/[（(][^）)]*[\u4e00-\u9fff][^）)]*[）)]/g, '');
+                                    const naturalBreaks = withoutTranslation.match(/[^。！？!?]+[。！？!?]+/g);
+                                    if (naturalBreaks && naturalBreaks.length > 1) {
+                                        const smartSegments = smartSplitWithTranslation(cleaned);
+                                        if (smartSegments.length > 1) {
+                                            console.log(`[TriggerAI] ⚠️ 单条消息过长(${cleaned.length}字)，智能分割为${smartSegments.length}条`);
+                                            return smartSegments;
+                                        }
                                     }
                                 }
                             }
@@ -22529,12 +22727,25 @@ ${checkResult.checkResult}
                     segments.forEach((seg, i) => console.log(`  [${i}]: ${seg.substring(0, 50)}${seg.length > 50 ? '...' : ''}`));
                 } else {
                     // 回退到标点拆分逻辑 (但逗号已经被干掉了)
-                    segments = splitMessage(cleanText);
-                    console.log('[TriggerAI] ℹ️ 未找到|||，使用标点分割，得到', segments.length, '条消息');
+                    if (char.foreign_lang_mode) {
+                        // ✅ 外语翻译模式：优先按换行拆分，保护每行的「外語（翻译）」格式
+                        if (cleanText.includes('\n')) {
+                            segments = cleanText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            console.log('[TriggerAI] ℹ️ 外语翻译模式：按换行拆分，得到', segments.length, '条消息');
+                        } else {
+                            // 没有换行也没有|||，保持为单条消息
+                            segments = [cleanText.trim()];
+                            console.log('[TriggerAI] ℹ️ 外语翻译模式：无分隔符，保持单条消息');
+                        }
+                    } else {
+                        segments = splitMessage(cleanText);
+                        console.log('[TriggerAI] ℹ️ 未找到|||，使用标点分割，得到', segments.length, '条消息');
+                    }
                 }
                 
                 // 🔥 增强：如果分割后的消息太少但总长度很长，强制再次分割
-                if (segments.length === 1 && segments[0].length > 150) {
+                // ✅ 外语翻译模式下不强制拆分，保护翻译格式完整
+                if (segments.length === 1 && segments[0].length > 150 && !char.foreign_lang_mode) {
                     console.log('[TriggerAI] ⚠️ 只有1条消息但长度过长(', segments[0].length, ')，强制智能分割');
                     const longMsg = segments[0];
                     // ✅ 修复：使用不破坏翻译括号的智能分割
@@ -22924,11 +23135,8 @@ ${checkResult.checkResult}
                     if (freshChar) {
                         let history = getChatHistory(freshChar, accountId);
                         
-                        const newMsg = { 
-                            role: 'char', 
-                            content: seg, 
-                            time: Date.now()
-                        };
+                        // ✅ 使用 buildCharMessage 一次性解析翻译，存储结构化数据
+                        const newMsg = buildCharMessage(seg, !!char.foreign_lang_mode);
                         
                         history.push(newMsg);
                         await setChatHistory(freshChar, accountId, history);
@@ -22963,6 +23171,10 @@ ${checkResult.checkResult}
             } finally {
                 // 🔧 无论成功还是失败，都要释放锁，允许下次调用
                 window._isGeneratingReply = false;
+                // 🔧 释放角色级共享锁
+                autoChatLocks.delete(targetCharId);
+                // 🔧 AI回复完成后重置主动聊天冷却计时器
+                lastAutoChatActionTime.set(targetCharId, Date.now());
             }
         }
 
@@ -23860,28 +24072,44 @@ ${loreContext}
         // 支持格式：
         // 1. "外语（中文翻译）" 或 "外语(中文翻译)"
         // 2. "外语「中文翻译」"
+        // 3. 外语中包含括号的情况（取最后一个含中文的括号作为翻译）
         function parseForeignWithTranslation(text) {
             if (!text) return null;
             
-            // 模式1: 任意内容（中文翻译）或 任意内容(中文翻译) - 括号在末尾
-            const pattern1 = /^(.+?)[（(]([^）)]+)[）)]$/s;
+            // ✅ 策略：从末尾找最后一个包含中文的括号对，作为翻译
+            // 这样即使外语文本中有括号也不会误判
+            
+            // 模式1: 从末尾匹配最后一个（中文翻译）或 (中文翻译)
+            // 使用贪婪匹配 .* 来尽可能多地匹配外语部分（取最后一个括号）
+            const pattern1 = /^([\s\S]+)[（(]([\s\S]*[\u4e00-\u9fff][\s\S]*)[）)]$/;
             let match = text.match(pattern1);
             if (match) {
                 const foreign = match[1].trim();
                 const chinese = match[2].trim();
-                // 验证：括号内应该包含中文，且外语部分不为空
-                if (foreign && containsChinese(chinese)) {
+                // 验证：括号内包含中文，外语部分不为空，且外语部分不全是中文
+                if (foreign && chinese && containsChinese(chinese) && !isAllChinese(foreign)) {
                     return { foreign, chinese };
                 }
             }
             
             // 模式2: 任意内容「中文翻译」
-            const pattern2 = /^(.+?)「([^」]+)」$/s;
+            const pattern2 = /^([\s\S]+)「([\s\S]*[\u4e00-\u9fff][\s\S]*)」$/;
             match = text.match(pattern2);
             if (match) {
                 const foreign = match[1].trim();
                 const chinese = match[2].trim();
-                if (foreign && containsChinese(chinese)) {
+                if (foreign && chinese && containsChinese(chinese) && !isAllChinese(foreign)) {
+                    return { foreign, chinese };
+                }
+            }
+            
+            // 模式3: 末尾有翻译但前面可能有换行 - 比如 "外语\n（中文翻译）"
+            const pattern3 = /^([\s\S]+?)\s*[（(]([\s\S]*[\u4e00-\u9fff][\s\S]*)[）)]\s*$/;
+            match = text.match(pattern3);
+            if (match) {
+                const foreign = match[1].trim();
+                const chinese = match[2].trim();
+                if (foreign && chinese && containsChinese(chinese) && !isAllChinese(foreign)) {
                     return { foreign, chinese };
                 }
             }
@@ -23889,11 +24117,48 @@ ${loreContext}
             return null;
         }
         
+        // 检查文本是否几乎全是中文（用于排除纯中文消息被误判为翻译）
+        function isAllChinese(text) {
+            if (!text) return false;
+            const cleaned = text.replace(/[\s\p{P}\p{S}\d]/gu, ''); // 去除空格、标点、符号、数字
+            if (cleaned.length === 0) return false;
+            const chineseChars = cleaned.match(/[\u4e00-\u9fff]/g) || [];
+            return chineseChars.length / cleaned.length > 0.8; // 超过80%是中文就认为是纯中文
+        }
+        
         // 检查文本是否包含中文
         function containsChinese(text) {
             if (!text) return false;
             const chineseRegex = /[\u4e00-\u9fff]/;
             return chineseRegex.test(text);
+        }
+        
+        // ✅ 核心：构建角色消息对象，一次性解析翻译（只在此处调用 parseForeignWithTranslation）
+        // 所有 role:'char' 的消息都应通过此函数创建，确保翻译只解析一次
+        function buildCharMessage(content, isForeignLangMode, extraFields = {}) {
+            const msg = { 
+                role: 'char', 
+                content: content, 
+                time: Date.now(),
+                ...extraFields
+            };
+            
+            // 外语翻译模式：在存储时就解析好翻译，避免渲染时重复解析
+            if (isForeignLangMode && content && typeof content === 'string') {
+                // 跳过特殊格式消息（图片、语音、表情包等）
+                if (!content.startsWith('[img:') && !content.startsWith('[voice:') && 
+                    !content.startsWith('[imgcard:') && !content.startsWith('[sticker:') &&
+                    !content.startsWith('[emei_') && !content.startsWith('[couple_avatar_card]') &&
+                    !content.startsWith('[payment_request]')) {
+                    const parsed = parseForeignWithTranslation(content);
+                    if (parsed) {
+                        msg.foreignText = parsed.foreign;
+                        msg.chineseText = parsed.chinese;
+                    }
+                }
+            }
+            
+            return msg;
         }
         
         // 通用 AI 调用函数
@@ -36492,6 +36757,14 @@ async function generateOfflineReply(char, accountId, storageKey) {
     const recentText = offlineModeHistory.slice(-10).map(m => m.content).join(' ') + ' ' + normalChatHistory.slice(-10).map(m => m.content).join(' ');
     loreContext = await getLorebookContext(lorebookIds, `${char.name} ${myName} ${recentText}`);
     
+    // 读取总结记忆（长期记忆）
+    let summaryMemoryContext = '';
+    try {
+        summaryMemoryContext = await getSummaryMemoryContext('private', char.id, accountId);
+    } catch (e) {
+        console.warn('[generateOfflineReply] 读取总结记忆失败:', e);
+    }
+    
     // 读取线下模式设置
     const settings = getOfflineSettings();
     const minWords = settings.minWords || 100;
@@ -36515,6 +36788,7 @@ ${char.relationships && char.relationships.length > 0 ? `
 3. **关联角色/NPC**：
 ${char.relationships.map(r => `   - ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}` : ''}
 ${loreContext ? `\n## 📖 世界书设定\n${loreContext}` : ''}
+${summaryMemoryContext}
 
 ## 🎭 行为准则 (Action Rules)
 1. **【第三人称视角】**：必须使用第三人称（如"${friendName}看着他"、"她笑了笑"）来描述自己的动作和心理，**严禁**使用第一人称（"我"）。
@@ -36827,6 +37101,47 @@ async function renderFavoritesList(type) {
     listContainer.innerHTML = html;
 }
 
+// 🔧 获取总结记忆上下文（注入到AI系统提示词中，让AI能读取历史总结）
+async function getSummaryMemoryContext(chatType, chatId, accountId) {
+    try {
+        if (!accountId) accountId = 'offline';
+        
+        let summaries = await db.chat_summaries
+            .where(['accountId', 'chatType', 'chatId'])
+            .equals([accountId, chatType, String(chatId)])
+            .toArray();
+        
+        // 如果复合索引不工作，使用过滤
+        if (summaries.length === 0) {
+            summaries = await db.chat_summaries.where('accountId').equals(accountId).toArray();
+            summaries = summaries.filter(s => s.chatType === chatType && String(s.chatId) === String(chatId));
+        }
+        
+        if (summaries.length === 0) return '';
+        
+        // 按时间正序排列
+        summaries.sort((a, b) => a.time - b.time);
+        
+        // 最多取最近10条总结
+        const recentSummaries = summaries.slice(-10);
+        
+        const memoryLines = recentSummaries.map(s => {
+            const timeStr = formatSummaryTime(s.time);
+            const content = (s.content || '').replace(/【关键词】.*$/m, '').trim();
+            return `- (记录于 ${timeStr}) ${content}`;
+        }).join('\n');
+        
+        console.log(`[getSummaryMemoryContext] 加载了 ${recentSummaries.length} 条总结记忆`);
+        
+        return `\n\n## 长期记忆（最高优先级，这是你们之间已经确立的事实，必须严格遵守）
+以下是你和对方之前的对话总结，你必须记住这些内容，并在聊天中自然地体现出你记得这些事：
+${memoryLines}`;
+    } catch (e) {
+        console.warn('[getSummaryMemoryContext] 获取总结记忆失败:', e);
+        return '';
+    }
+}
+
 // 格式化总结时间
 function formatSummaryTime(timestamp) {
     if (!timestamp) return '';
@@ -37073,11 +37388,11 @@ async function showChatSummaries(chatType) {
         return;
     }
     
-    const accountId = getCurrentAccountId();
+    let accountId = getCurrentAccountId();
+    // 🔧 修复：线下模式没有账号ID，使用默认值
     if (!accountId) {
-        console.error('[showChatSummaries] 没有当前账号ID');
-        alert('请先登录账号');
-        return;
+        accountId = 'offline';
+        console.log('[showChatSummaries] 线下模式，使用默认账号ID: offline');
     }
     console.log('[showChatSummaries] accountId:', accountId);
     
@@ -37171,11 +37486,8 @@ function hideChatSummariesPage() {
 
 // 手动触发生成总结
 async function triggerManualSummary(chatType) {
-    const accountId = getCurrentAccountId();
-    if (!accountId) {
-        alert('请先登录账号');
-        return;
-    }
+    const rawAccountId = getCurrentAccountId(); // 保留原始值用于线下记录key
+    let accountId = rawAccountId || 'offline';
     
     let chatId, chatHistory, name;
     
@@ -37187,7 +37499,26 @@ async function triggerManualSummary(chatType) {
         chatId = currentChatCharId;
         const char = await db.characters.get(parseInt(chatId));
         name = char ? (char.remark || char.wx_nickname || char.name) : '私聊';
-        chatHistory = getChatHistory(char, accountId);
+        chatHistory = getChatHistory(char, rawAccountId);
+        
+        // 🔧 合并线下模式聊天记录（线下记录也要一起总结）
+        try {
+            const offlineKey = `offline_chat_${rawAccountId}_${chatId}`;
+            const offlineRaw = localStorage.getItem(offlineKey);
+            if (offlineRaw) {
+                const offlineHistory = JSON.parse(offlineRaw);
+                if (offlineHistory && offlineHistory.length > 0) {
+                    // 给线下记录加标记方便区分
+                    const taggedOffline = offlineHistory.map(m => ({ ...m, _source: 'offline' }));
+                    chatHistory = [...chatHistory, ...taggedOffline];
+                    // 按时间排序
+                    chatHistory.sort((a, b) => (a.time || a.timestamp || 0) - (b.time || b.timestamp || 0));
+                    console.log(`[triggerManualSummary] 合并线下记录 ${offlineHistory.length} 条，总计 ${chatHistory.length} 条`);
+                }
+            }
+        } catch (e) {
+            console.warn('[triggerManualSummary] 读取线下记录失败:', e);
+        }
     } else if (chatType === 'group') {
         if (!window.currentGroupChatId) {
             alert('请先打开一个群聊');
@@ -37272,7 +37603,7 @@ async function generateChatSummary(chatType, chatId, accountId, chatHistory) {
     const lastMsgTime = recentMessages[recentMessages.length - 1].time || recentMessages[recentMessages.length - 1].timestamp || Date.now();
     const timeRange = formatTimeRange(firstMsgTime, lastMsgTime);
     
-    // 构建聊天内容文本（使用微信显示名）
+    // 构建聊天内容文本（使用微信显示名，区分线上/线下模式）
     let chatContent = recentMessages.map(msg => {
         let role;
         if (msg.role === 'user') {
@@ -37285,7 +37616,9 @@ async function generateChatSummary(chatType, chatId, accountId, chatHistory) {
             role = charName;
         }
         const content = msg.content || msg.message || '';
-        return `${role}: ${content}`;
+        // 🔧 标注线下模式消息
+        const sourceTag = msg._source === 'offline' ? '[线下见面] ' : '';
+        return `${sourceTag}${role}: ${content}`;
     }).join('\n');
     
     // 调用API生成总结
@@ -37301,6 +37634,7 @@ async function generateChatSummary(chatType, chatId, accountId, chatHistory) {
 7. 总结长度控制在200-400字之间
 8. 使用自然流畅的中文表达
 9. 如果能提取3-5个关键词，请在最后用【关键词】标注
+10. 聊天记录包含线上聊天（微信消息）和线下见面（标注了[线下见面]）的内容，请一并总结，自然融合描述
 
 聊天时间：${timeRange}
 聊天记录如下：
@@ -37378,6 +37712,12 @@ function formatTimeRange(startTime, endTime) {
 
 // 更新总结计数显示
 async function updateSummaryCount(chatType, chatId, accountId) {
+    // 🔧 修复：线下模式没有账号ID，使用默认值
+    if (!accountId) {
+        accountId = 'offline';
+        console.log('[updateSummaryCount] 线下模式，使用默认账号ID: offline');
+    }
+    
     let summaries = await db.chat_summaries.where('accountId').equals(accountId).toArray();
     summaries = summaries.filter(s => s.chatType === chatType && String(s.chatId) === String(chatId));
     
@@ -37394,6 +37734,11 @@ async function updateSummaryCount(chatType, chatId, accountId) {
 
 // 检查是否需要自动总结（在发送消息后调用）
 async function checkAutoSummary(chatType, chatId, accountId) {
+    const rawAccountId = accountId; // 保留原始值用于线下记录key
+    if (!accountId) {
+        accountId = 'offline';
+    }
+    
     let autoSummaryEnabled = false;
     let summaryInterval = 50;
     let chatHistory = [];
@@ -37403,7 +37748,23 @@ async function checkAutoSummary(chatType, chatId, accountId) {
         if (!char) return;
         autoSummaryEnabled = char.auto_summary_enabled;
         summaryInterval = char.summary_interval || 50;
-        chatHistory = getChatHistory(char, accountId);
+        chatHistory = getChatHistory(char, rawAccountId);
+        
+        // 🔧 合并线下模式聊天记录（线下记录也要一起计数和总结）
+        try {
+            const offlineKey = `offline_chat_${rawAccountId}_${chatId}`;
+            const offlineRaw = localStorage.getItem(offlineKey);
+            if (offlineRaw) {
+                const offlineHistory = JSON.parse(offlineRaw);
+                if (offlineHistory && offlineHistory.length > 0) {
+                    chatHistory = [...chatHistory, ...offlineHistory];
+                    chatHistory.sort((a, b) => (a.time || a.timestamp || 0) - (b.time || b.timestamp || 0));
+                    console.log(`[checkAutoSummary] 合并线下记录 ${offlineHistory.length} 条，总计 ${chatHistory.length} 条`);
+                }
+            }
+        } catch (e) {
+            console.warn('[checkAutoSummary] 读取线下记录失败:', e);
+        }
     } else if (chatType === 'group') {
         const group = await db.group_chats.get(parseInt(chatId));
         if (!group) return;
@@ -37442,8 +37803,12 @@ async function checkAutoSummary(chatType, chatId, accountId) {
 
 // 在加载聊天详情时更新总结计数
 async function loadSummarySettings(chatType, chatId) {
-    const accountId = getCurrentAccountId();
-    if (!accountId) return;
+    let accountId = getCurrentAccountId();
+    // 🔧 修复：线下模式没有账号ID，使用默认值
+    if (!accountId) {
+        accountId = 'offline';
+        console.log('[loadSummarySettings] 线下模式，使用默认账号ID: offline');
+    }
     
     // 更新总结计数
     await updateSummaryCount(chatType, chatId, accountId);
