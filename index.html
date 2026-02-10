@@ -43,85 +43,108 @@
             <div class="notification-badge" id="notif-badge"></div>
         </div>
 
-        <!-- 应用网格 -->
-        <div class="app-container">
-            <div class="grid" id="app-grid">
-                <!-- 拍立得组件 -->
-                <div class="photo-widget" id="widget-photo">
-                    <div class="photo-item right" onclick="document.getElementById('upload-right').click()">
-                        <div class="tape"></div>
-                        <div class="img-box" id="img-right"></div>
-                        <input type="file" id="upload-right" class="photo-input" accept="image/*" onchange="setPhoto('right', this)">
-                    </div>
-                    <div class="photo-item left" onclick="document.getElementById('upload-left').click()">
-                        <div class="img-box" id="img-left"></div>
-                        <input type="file" id="upload-left" class="photo-input" accept="image/*" onchange="setPhoto('left', this)">
-                    </div>
-                </div>
+        <!-- 应用网格 - 多页桌面 -->
+        <div class="desktop-pages-wrapper" id="desktop-pages-wrapper">
+            <!-- 第一页 -->
+            <div class="desktop-page" id="desktop-page-1">
+                <div class="app-container">
+                    <div class="grid" id="app-grid">
+                        <!-- 拍立得组件 -->
+                        <div class="photo-widget" id="widget-photo">
+                            <div class="photo-item right" onclick="document.getElementById('upload-right').click()">
+                                <div class="tape"></div>
+                                <div class="img-box" id="img-right"></div>
+                                <input type="file" id="upload-right" class="photo-input" accept="image/*" onchange="setPhoto('right', this)">
+                            </div>
+                            <div class="photo-item left" onclick="document.getElementById('upload-left').click()">
+                                <div class="img-box" id="img-left"></div>
+                                <input type="file" id="upload-left" class="photo-input" accept="image/*" onchange="setPhoto('left', this)">
+                            </div>
+                        </div>
 
-                <!-- 应用图标 -->
-                <div class="app-icon" id="icon-appstore" onclick="showAppStorePage()">
-                    <div class="icon"></div>
-                    <div class="name">App Store</div>
-                </div>
-                <div class="app-icon" id="icon-notes" onclick="showWechatPage()">
-                    <div class="icon"></div>
-                    <div class="name">wechat</div>
-                </div>
-                <div class="app-icon" id="icon-remind" onclick="showCharacterPage()">
-                    <div class="icon"></div>
-                    <div class="name">角色档案</div>
-                </div>
-                <div class="app-icon" id="icon-facetime" onclick="showLorebookPage()">
-                    <div class="icon"></div>
-                    <div class="name">世界书</div>
-                </div>
-                <div class="app-icon" id="icon-calendar" style="display:none;">
-                    <div class="icon"></div>
-                    <div class="name">日历</div>
-                </div>
-                <!-- 情侣组件 (头像 + 倒数日) -->
-                <div class="couple-widget" id="widget-couple">
-                    <div class="avatars-row">
-                        <div class="circle-photo" id="app-avatar-1" onclick="document.getElementById('avatar1-input').click()">
-                            <div class="bubble" id="avatar-bubble1">> .. <</div>
-                            <div class="img" id="avatar-img-1"></div>
-                            <div class="name" id="avatar-name1">> .. <</div>
-                            <input type="file" id="avatar1-input" class="custom-input" accept="image/*" onchange="setAvatar('1', this)">
+                        <!-- 应用图标 -->
+                        <div class="app-icon" id="icon-appstore" onclick="showAppStorePage()">
+                            <div class="icon"></div>
+                            <div class="name">App Store</div>
                         </div>
-                        <div class="circle-photo" id="app-avatar-2" onclick="document.getElementById('avatar2-input').click()">
-                            <div class="bubble" id="avatar-bubble2">gw..♡</div>
-                            <div class="img" id="avatar-img-2"></div>
-                            <div class="name" id="avatar-name2">gw..♡</div>
-                            <input type="file" id="avatar2-input" class="custom-input" accept="image/*" onchange="setAvatar('2', this)">
+                        <div class="app-icon" id="icon-notes" onclick="showWechatPage()">
+                            <div class="icon"></div>
+                            <div class="name">wechat</div>
                         </div>
-                    </div>
-                    <!-- 倒数日胶囊 -->
-                    <div class="days-capsule" id="widget-days">
-                        <div class="capsule" onclick="document.getElementById('days-input').click()">
-                            <svg class="svg-icon" id="days-heart-icon" style="width:14px;height:14px;vertical-align:-2px;margin-right:2px;fill:var(--heart-color, var(--ins-pink));stroke:none;" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-                            <span id="days-text">446 days</span>
+                        <div class="app-icon" id="icon-remind" onclick="showCharacterPage()">
+                            <div class="icon"></div>
+                            <div class="name">角色档案</div>
                         </div>
-                    </div>
-                </div>
+                        <div class="app-icon" id="icon-facetime" onclick="showLorebookPage()">
+                            <div class="icon"></div>
+                            <div class="name">世界书</div>
+                        </div>
+                        <div class="app-icon" id="icon-calendar" style="display:none;">
+                            <div class="icon"></div>
+                            <div class="name">日历</div>
+                        </div>
+                        <!-- 情侣组件 (头像 + 倒数日) -->
+                        <div class="couple-widget" id="widget-couple">
+                            <div class="avatars-row">
+                                <div class="circle-photo" id="app-avatar-1" onclick="document.getElementById('avatar1-input').click()">
+                                    <div class="bubble" id="avatar-bubble1">> .. <</div>
+                                    <div class="img" id="avatar-img-1"></div>
+                                    <div class="name" id="avatar-name1">> .. <</div>
+                                    <input type="file" id="avatar1-input" class="custom-input" accept="image/*" onchange="setAvatar('1', this)">
+                                </div>
+                                <div class="circle-photo" id="app-avatar-2" onclick="document.getElementById('avatar2-input').click()">
+                                    <div class="bubble" id="avatar-bubble2">gw..♡</div>
+                                    <div class="img" id="avatar-img-2"></div>
+                                    <div class="name" id="avatar-name2">gw..♡</div>
+                                    <input type="file" id="avatar2-input" class="custom-input" accept="image/*" onchange="setAvatar('2', this)">
+                                </div>
+                            </div>
+                            <!-- 倒数日胶囊 -->
+                            <div class="days-capsule" id="widget-days">
+                                <div class="capsule" onclick="document.getElementById('days-input').click()">
+                                    <svg class="svg-icon" id="days-heart-icon" style="width:14px;height:14px;vertical-align:-2px;margin-right:2px;fill:var(--heart-color, var(--ins-pink));stroke:none;" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                                    <span id="days-text">446 days</span>
+                                </div>
+                            </div>
+                        </div>
 
-                <div class="app-icon" id="icon-photo" onclick="showMusicAppPage()">
-                    <div class="icon"></div>
-                    <div class="name">网易云</div>
-                </div>
-                <div class="app-icon" id="icon-xianyu" onclick="openXianyuApp()">
-                    <div class="icon"></div>
-                    <div class="name">闲鱼</div>
-                </div>
-                <div class="app-icon" id="icon-cabin" onclick="showCabinPage()">
-                    <div class="icon"></div>
-                    <div class="name">小屋</div>
-                </div>
-                <div class="app-icon" id="icon-icity" onclick="openIcityApp()">
-                    <div class="icon"></div>
-                    <div class="name">icity</div>
+                        <div class="app-icon" id="icon-photo" onclick="showMusicAppPage()">
+                            <div class="icon"></div>
+                            <div class="name">网易云</div>
+                        </div>
+                        <div class="app-icon" id="icon-xianyu" onclick="openXianyuApp()">
+                            <div class="icon"></div>
+                            <div class="name">闲鱼</div>
+                        </div>
+                        <div class="app-icon" id="icon-cabin" onclick="showCabinPage()">
+                            <div class="icon"></div>
+                            <div class="name">小屋</div>
+                        </div>
+                        <div class="app-icon" id="icon-icity" onclick="openIcityApp()">
+                            <div class="icon"></div>
+                            <div class="name">icity</div>
+                        </div>
+                    </div>
                 </div>
             </div>
+
+            <!-- 第二页 -->
+            <div class="desktop-page" id="desktop-page-2">
+                <div class="app-container">
+                    <div class="grid" id="app-grid-2">
+                        <div class="app-icon" id="icon-findphone" onclick="showFindPhonePage()">
+                            <div class="icon"></div>
+                            <div class="name">查手机</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 页面指示点 -->
+        <div class="page-dots" id="page-dots">
+            <div class="page-dot active" data-page="0"></div>
+            <div class="page-dot" data-page="1"></div>
         </div>
 
         <!-- 底部Dock栏 -->
@@ -237,6 +260,10 @@
                 <div class="icon-select-item" data-icon-id="icity" onclick="selectIconPicker(this,'icity')">
                     <div class="icon"></div>
                     <div class="name">icity</div>
+                </div>
+                <div class="icon-select-item" data-icon-id="findphone" onclick="selectIconPicker(this,'findphone')">
+                    <div class="icon"></div>
+                    <div class="name">查手机</div>
                 </div>
             </div>
             <div class="custom-edit-tip" style="font-size:11px; color:#bbb; margin-top:8px;">底部Dock栏图标</div>
@@ -2064,38 +2091,21 @@
                     <!-- 分割线 -->
                     <div style="height:1px; background:#e0e0e0; margin:16px 0;"></div>
                     
-                    <!-- 自定义样式 -->
+                    <!-- 自定义气泡CSS -->
                     <div style="margin-bottom:16px;">
-                        <div style="font-size:14px; font-weight:500; margin-bottom:8px; color:#333;">自定义样式</div>
-                        <div style="font-size:12px; color:#999; margin-bottom:12px;">在预设基础上进一步自定义，或完全自定义样式</div>
-                        
-                        <!-- 可用类名提示 -->
-                        <div style="background:#fff; border:1px solid #e0e0e0; border-radius:8px; padding:10px; margin-bottom:12px;">
-                            <div style="font-size:12px; font-weight:600; margin-bottom:6px; color:#333;">📝 可用类名：</div>
-                            <div style="font-size:10px; font-family:monospace; color:#666; line-height:1.6; display:flex; flex-wrap:wrap; gap:4px;">
-                                <span style="padding:2px 6px; background:#f5f5f5; border-radius:3px;">.ai-bubble</span>
-                                <span style="padding:2px 6px; background:#f5f5f5; border-radius:3px;">.user-bubble</span>
-                                <span style="padding:2px 6px; background:#f5f5f5; border-radius:3px;">.message-content</span>
-                                <span style="padding:2px 6px; background:#f5f5f5; border-radius:3px;">.message-avatar</span>
-                                <span style="padding:2px 6px; background:#f5f5f5; border-radius:3px;">.message-row.self</span>
-                                <span style="padding:2px 6px; background:#f5f5f5; border-radius:3px;">.message-row.other</span>
-                            </div>
+                        <div style="font-size:14px; font-weight:500; margin-bottom:8px; color:#333;">✏️ 自定义气泡CSS</div>
+                        <div style="font-size:12px; color:#999; margin-bottom:8px;">输入CSS代码直接覆盖气泡样式，填写后预设样式自动失效</div>
+                        <!-- 类名速查 -->
+                        <div style="background:#fff; border:1px solid #e8e8e8; border-radius:8px; padding:8px 10px; margin-bottom:10px; font-size:11px; color:#666; line-height:1.8;">
+                            <div style="font-weight:600; color:#333; margin-bottom:2px;">类名速查：</div>
+                            <code style="background:#f0f0f0; padding:1px 4px; border-radius:3px;">.message-row.other</code> 对方消息行　
+                            <code style="background:#f0f0f0; padding:1px 4px; border-radius:3px;">.message-row.self</code> 我的消息行<br>
+                            <code style="background:#f0f0f0; padding:1px 4px; border-radius:3px;">.message-content</code> 气泡　
+                            <code style="background:#f0f0f0; padding:1px 4px; border-radius:3px;">.ai-bubble</code> 对方气泡　
+                            <code style="background:#f0f0f0; padding:1px 4px; border-radius:3px;">.user-bubble</code> 我的气泡<br>
+                            <code style="background:#f0f0f0; padding:1px 4px; border-radius:3px;">.message-avatar</code> 头像
                         </div>
-                    </div>
-                    
-                    <div style="margin-bottom:16px;">
-                        <div style="font-size:13px; font-weight:500; margin-bottom:6px; color:#333;">气泡样式 (CSS)</div>
-                        <textarea id="detail-bubble-css" placeholder="例如：&#10;background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);&#10;color: white;" style="width:100%; min-height:80px; padding:10px; border:1px solid #ddd; border-radius:8px; font-family:monospace; font-size:11px; resize:vertical; outline:none; box-sizing:border-box;" oninput="saveChatDetail()"></textarea>
-                    </div>
-                    
-                    <div style="margin-bottom:16px;">
-                        <div style="font-size:13px; font-weight:500; margin-bottom:6px; color:#333;">自定义容器 (HTML)</div>
-                        <textarea id="detail-custom-html" placeholder="显示在聊天顶部的HTML" style="width:100%; min-height:60px; padding:10px; border:1px solid #ddd; border-radius:8px; font-family:monospace; font-size:11px; resize:vertical; outline:none; box-sizing:border-box;" oninput="saveChatDetail()"></textarea>
-                    </div>
-                    
-                    <div style="margin-bottom:16px;">
-                        <div style="font-size:13px; font-weight:500; margin-bottom:6px; color:#333;">容器样式 (CSS)</div>
-                        <textarea id="detail-custom-css" placeholder="自定义容器的CSS样式" style="width:100%; min-height:60px; padding:10px; border:1px solid #ddd; border-radius:8px; font-family:monospace; font-size:11px; resize:vertical; outline:none; box-sizing:border-box;" oninput="saveChatDetail()"></textarea>
+                        <textarea id="detail-bubble-css" placeholder="【简单写法】直接写CSS属性，自动应用到所有气泡：&#10;background: linear-gradient(135deg, #667eea, #764ba2);&#10;color: white;&#10;border-radius: 12px;&#10;&#10;【高级写法】带选择器的完整CSS规则：&#10;.message-row.other .message-content {&#10;    background: rgba(240,230,198,0.5) !important;&#10;}&#10;.message-row.self .message-content {&#10;    background: rgba(200,220,255,0.5) !important;&#10;}&#10;.message-avatar { opacity: 0 !important; }" style="width:100%; min-height:120px; padding:10px; border:1px solid #ddd; border-radius:8px; font-family:monospace; font-size:11px; resize:vertical; outline:none; box-sizing:border-box;" oninput="saveChatDetail()"></textarea>
                     </div>
                     
                     <div style="display:flex; gap:10px;">

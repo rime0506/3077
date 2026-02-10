@@ -1882,6 +1882,88 @@ async function migratePhoneAndSmsToIndexedDB() {
             document.getElementById('home-page').style.display = 'block';
         }
 
+        // ===== 桌面多页滑动 =====
+        (function initDesktopPages() {
+            document.addEventListener('DOMContentLoaded', function() {
+                const wrapper = document.getElementById('desktop-pages-wrapper');
+                const dots = document.querySelectorAll('.page-dot');
+                if (!wrapper || !dots.length) return;
+
+                wrapper.addEventListener('scroll', function() {
+                    const pageWidth = wrapper.offsetWidth;
+                    const scrollLeft = wrapper.scrollLeft;
+                    const currentPage = Math.round(scrollLeft / pageWidth);
+                    dots.forEach((dot, i) => {
+                        dot.classList.toggle('active', i === currentPage);
+                    });
+                });
+
+                // 点击圆点切换页面
+                dots.forEach((dot, i) => {
+                    dot.addEventListener('click', function() {
+                        wrapper.scrollTo({ left: i * wrapper.offsetWidth, behavior: 'smooth' });
+                    });
+                });
+            });
+        })();
+
+        // ===== 查手机功能 =====
+        function showFindPhonePage() {
+            // 创建查手机页面
+            let page = document.getElementById('findphone-page');
+            if (!page) {
+                page = document.createElement('div');
+                page.id = 'findphone-page';
+                page.className = 'wechat-page';
+                page.style.cssText = 'background:#fff; display:none;';
+                page.innerHTML = `
+                    <div class="wechat-header" style="background:rgba(255,255,255,0.95); backdrop-filter:blur(10px);">
+                        <div class="back-btn" onclick="hideFindPhonePage()" style="margin:0; background:none; width:40px; justify-content:flex-start; padding-left:0; color:var(--ins-text);">
+                            <svg class="svg-icon" viewBox="0 0 24 24" style="width:28px; height:28px;"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                        </div>
+                        <div style="flex:1; text-align:center; font-size:17px; font-weight:600;">查手机</div>
+                        <div style="width:40px;"></div>
+                    </div>
+                    <div class="wechat-content" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:40px 20px; text-align:center;">
+                        <div style="width:80px; height:80px; background:linear-gradient(135deg, #ff6b9d 0%, #ff8fab 100%); border-radius:50%; display:flex; align-items:center; justify-content:center; margin-bottom:24px; box-shadow:0 8px 24px rgba(255,107,157,0.3);">
+                            <svg viewBox="0 0 24 24" style="width:40px; height:40px; fill:#fff;"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                        </div>
+                        <div style="font-size:20px; font-weight:600; color:#333; margin-bottom:8px;">查找对方手机</div>
+                        <div style="font-size:14px; color:#999; margin-bottom:32px; line-height:1.6;">让对方的手机发出提示音，<br>帮助你找到 TA 的手机位置</div>
+                        <button id="findphone-ring-btn" onclick="triggerFindPhone()" style="width:200px; padding:14px 0; background:linear-gradient(135deg, #ff6b9d 0%, #ff8fab 100%); color:#fff; border:none; border-radius:24px; font-size:16px; font-weight:600; cursor:pointer; box-shadow:0 4px 16px rgba(255,107,157,0.3); transition:all 0.3s;">
+                            📱 让 TA 的手机响铃
+                        </button>
+                        <div id="findphone-status" style="margin-top:16px; font-size:13px; color:#999;"></div>
+                    </div>
+                `;
+                document.body.appendChild(page);
+            }
+            document.getElementById('home-page').style.display = 'none';
+            page.style.display = 'flex';
+        }
+
+        function hideFindPhonePage() {
+            const page = document.getElementById('findphone-page');
+            if (page) page.style.display = 'none';
+            document.getElementById('home-page').style.display = 'block';
+        }
+
+        function triggerFindPhone() {
+            const btn = document.getElementById('findphone-ring-btn');
+            const status = document.getElementById('findphone-status');
+            btn.style.opacity = '0.6';
+            btn.disabled = true;
+            status.textContent = '正在发送响铃请求...';
+            status.style.color = '#ff6b9d';
+
+            setTimeout(() => {
+                status.textContent = '✅ 已发送响铃请求！对方手机将会响铃~';
+                status.style.color = '#4caf50';
+                btn.style.opacity = '1';
+                btn.disabled = false;
+            }, 1500);
+        }
+
         // 各项自定义方法（修改后自动保存到Dexie）
         function setWallpaper(input) {
             const file = input.files[0];
@@ -2106,7 +2188,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                     if (avatar2) saveItems.avatar2 = avatar2;
                     
                     // 应用图标
-                    const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
+                    const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity','findphone'];
                     iconIds.forEach(id => {
                         const el = document.getElementById(`icon-${id}`)?.querySelector('.icon');
                         if (el?.style.backgroundImage) {
@@ -2711,7 +2793,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                 };
                 
                 // 存储应用图标
-                const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
+                const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity','findphone'];
                 iconIds.forEach(id => {
                     const el = document.getElementById(`icon-${id}`)?.querySelector('.icon');
                     if (el) saveData[`icon${id.charAt(0).toUpperCase() + id.slice(1)}`] = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
@@ -2817,7 +2899,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                 // 倒数日
                 theme.daysText = document.getElementById('days-text')?.innerText?.trim() || '';
                 // 应用图标
-                const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
+                const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity','findphone'];
                 iconIds.forEach(id => {
                     const el = document.getElementById(`icon-${id}`)?.querySelector('.icon');
                     if (el && el.style.backgroundImage) theme[`icon_${id}`] = el.style.backgroundImage.replace(/url\(|\)|"/g, '');
@@ -2944,7 +3026,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                     if (di) di.value = theme.daysText;
                 }
                 // 应用图标
-                const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
+                const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity','findphone'];
                 iconIds.forEach(id => {
                     const val = theme[`icon_${id}`];
                     if (val) {
@@ -13534,10 +13616,8 @@ ${chatContext || '（没有聊天记录）'}
             // 7. 更新视频通话记录数量
             updateVideoCallRecordCount();
             
-            // 7. 加载自定义样式设置
+            // 7. 加载自定义气泡CSS
             document.getElementById('detail-bubble-css').value = char.custom_bubble_css || '';
-            document.getElementById('detail-custom-html').value = char.custom_html || '';
-            document.getElementById('detail-custom-css').value = char.custom_css || '';
             
             // 8. 加载聊天背景图
             const bgPreview = document.getElementById('detail-chat-bg-preview');
@@ -13667,14 +13747,9 @@ async function saveChatDetail() {
     char.auto_summary_enabled = autoSummaryEnabled; // 自动总结开关
     char.summary_interval = summaryInterval > 0 ? summaryInterval : 50; // 总结间隔，默认50条
     
-    // 保存自定义样式（严格过滤JS）
+    // 保存自定义气泡CSS（严格过滤JS）
     const bubbleCSS = document.getElementById('detail-bubble-css').value;
-    const customHTML = document.getElementById('detail-custom-html').value;
-    const customCSS = document.getElementById('detail-custom-css').value;
-    
     char.custom_bubble_css = sanitizeCSS(bubbleCSS);
-    char.custom_html = sanitizeHTML(customHTML);
-    char.custom_css = sanitizeCSS(customCSS);
     
     // 保存气泡样式选择
     const selectedBubbleOption = document.querySelector('.bubble-style-option.selected');
@@ -14050,16 +14125,11 @@ window.unmountUser = unmountUser;
             const char = await db.characters.get(currentChatCharId);
             if (!char) return;
             
-            // 临时保存当前输入的内容
-            const tempBubbleCSS = sanitizeCSS(document.getElementById('detail-bubble-css').value);
-            const tempHTML = sanitizeHTML(document.getElementById('detail-custom-html').value);
-            const tempCSS = sanitizeCSS(document.getElementById('detail-custom-css').value);
-            
             // 临时应用样式
+            const tempBubbleCSS = sanitizeCSS(document.getElementById('detail-bubble-css').value);
             applyCustomStyles({
                 custom_bubble_css: tempBubbleCSS,
-                custom_html: tempHTML,
-                custom_css: tempCSS
+                bubble_style: char.bubble_style
             });
             
             alert('预览效果已应用！\n返回聊天界面查看效果。\n保存后将永久生效。');
@@ -14067,16 +14137,20 @@ window.unmountUser = unmountUser;
 
         // 清除自定义样式
         async function clearCustomStyle() {
-            if (!confirm('确定要清除所有自定义样式吗？')) return;
+            if (!confirm('确定要清除自定义气泡CSS吗？')) return;
             
             document.getElementById('detail-bubble-css').value = '';
-            document.getElementById('detail-custom-html').value = '';
-            document.getElementById('detail-custom-css').value = '';
             
             await saveChatDetail();
             
             // 移除已应用的样式
             removeCustomStyles();
+            
+            // 重新应用预设样式
+            if (currentChatCharId) {
+                const char = await db.characters.get(currentChatCharId);
+                if (char) applyCustomStyles(char);
+            }
             
             alert('自定义样式已清除！');
         }
@@ -14087,10 +14161,8 @@ window.unmountUser = unmountUser;
         async function saveChatStylePreset() {
             const bubbleStyle = document.querySelector('.bubble-style-option.selected');
             const bubbleCSS = document.getElementById('detail-bubble-css').value.trim();
-            const customHTML = document.getElementById('detail-custom-html').value.trim();
-            const customCSS = document.getElementById('detail-custom-css').value.trim();
             
-            if (!bubbleCSS && !customHTML && !customCSS && (!bubbleStyle || bubbleStyle.dataset.style === 'default')) {
+            if (!bubbleCSS && (!bubbleStyle || bubbleStyle.dataset.style === 'default')) {
                 showToast('当前没有自定义样式可保存');
                 return;
             }
@@ -14115,8 +14187,6 @@ window.unmountUser = unmountUser;
                     name: presetName.trim(),
                     bubble_style: bubbleStyle ? bubbleStyle.dataset.style : 'default',
                     custom_bubble_css: bubbleCSS,
-                    custom_html: customHTML,
-                    custom_css: customCSS,
                     time: Date.now()
                 });
                 
@@ -14152,10 +14222,8 @@ window.unmountUser = unmountUser;
                 for (let i = 0; i < presets.length; i++) {
                     const p = presets[i];
                     const timeStr = p.time ? new Date(p.time).toLocaleDateString() : '';
-                    const hasCSS = p.custom_bubble_css ? '气泡CSS' : '';
-                    const hasHTML = p.custom_html ? '自定义HTML' : '';
-                    const hasCSSContainer = p.custom_css ? '容器CSS' : '';
-                    const tags = [p.bubble_style !== 'default' ? `样式:${p.bubble_style}` : '', hasCSS, hasHTML, hasCSSContainer].filter(Boolean).join(' · ');
+                    const hasCSS = p.custom_bubble_css ? '有自定义CSS' : '';
+                    const tags = [p.bubble_style !== 'default' ? `样式:${p.bubble_style}` : '', hasCSS].filter(Boolean).join(' · ');
                     
                     html += `
                         <div style="display:flex; align-items:center; padding:10px 12px; background:#fff; border:1px solid #e8e8e8; border-radius:10px; margin-bottom:8px;">
@@ -14190,8 +14258,6 @@ window.unmountUser = unmountUser;
                 
                 // 回填到表单
                 document.getElementById('detail-bubble-css').value = p.custom_bubble_css || '';
-                document.getElementById('detail-custom-html').value = p.custom_html || '';
-                document.getElementById('detail-custom-css').value = p.custom_css || '';
                 
                 // 选中气泡样式
                 const style = p.bubble_style || 'default';
@@ -14256,13 +14322,13 @@ window.unmountUser = unmountUser;
             const chatContainer = document.getElementById('chat-body');
             if (!chatContainer) return;
             
+            const hasCustomCSS = char.custom_bubble_css && char.custom_bubble_css.trim();
+            
             // 🔧 如果有自定义气泡CSS，则不应用预设气泡样式，避免冲突
             chatContainer.classList.remove('bubble-style-default', 'bubble-style-wechat');
-            if (char.custom_bubble_css && char.custom_bubble_css.trim()) {
-                // 有自定义CSS时，不添加任何预设样式class
+            if (hasCustomCSS) {
                 console.log('[applyCustomStyles] 检测到自定义气泡CSS，跳过预设样式');
             } else {
-                // 没有自定义CSS时，才应用预设样式
                 if (char.bubble_style === 'wechat') {
                     chatContainer.classList.add('bubble-style-wechat');
                 } else {
@@ -14271,7 +14337,7 @@ window.unmountUser = unmountUser;
             }
             
             // 应用自定义气泡CSS
-            if (char.custom_bubble_css && char.custom_bubble_css.trim()) {
+            if (hasCustomCSS) {
                 const bubbleStyleId = 'custom-bubble-style';
                 let styleTag = document.getElementById(bubbleStyleId);
                 
@@ -14281,93 +14347,85 @@ window.unmountUser = unmountUser;
                     document.head.appendChild(styleTag);
                 }
                 
-                // 🔧 自动给每个CSS属性加上 !important，确保覆盖默认样式
-                const addImportant = (cssText) => {
-                    return cssText
-                        .split(';')
-                        .map(prop => {
-                            prop = prop.trim();
-                            if (!prop || !prop.includes(':')) return '';
-                            // 如果已经有 !important 就不重复加
-                            if (prop.toLowerCase().includes('!important')) return prop + ';';
-                            return prop + ' !important;';
-                        })
-                        .filter(p => p)
-                        .join('\n');
-                };
+                const cssText = char.custom_bubble_css.trim();
                 
-                const importantCSS = addImportant(char.custom_bubble_css);
+                // 🔧 判断用户输入的是"纯属性"还是"带选择器的完整CSS规则"
+                // 如果包含 { 和 }，说明是完整CSS规则，直接注入
+                const isFullCSS = cssText.includes('{') && cssText.includes('}');
                 
-                // 🔧 修复：使用正确的选择器（.message-content 而非 .chat-bubble）
-                // 同时应用到AI气泡和用户气泡，并重置默认样式
-                styleTag.textContent = `
-                    /* 重置默认气泡样式 */
-                    .message-row.other .message-content:not(.card-message):not(.image-only) {
-                        background: none !important;
-                        border: none !important;
-                        box-shadow: none !important;
-                        border-radius: 18px !important;
-                    }
-                    .message-row.self .message-content:not(.card-message):not(.image-only) {
-                        background: none !important;
-                        border: none !important;
-                        box-shadow: none !important;
-                        border-radius: 18px !important;
-                    }
-                    /* 移除默认的小尾巴伪元素 */
-                    .message-row.other .message-content::before,
-                    .message-row.self .message-content::after {
-                        display: none !important;
-                    }
-                    /* 应用用户自定义样式到所有消息气泡 */
-                    .message-row .message-content:not(.card-message):not(.image-only) {
-                        ${importantCSS}
-                    }
-                `;
-            }
-            
-            // 应用自定义CSS
-            if (char.custom_css) {
-                const cssStyleId = 'custom-chat-css';
-                let styleTag = document.getElementById(cssStyleId);
-                
-                if (!styleTag) {
-                    styleTag = document.createElement('style');
-                    styleTag.id = cssStyleId;
-                    document.head.appendChild(styleTag);
-                }
-                
-                styleTag.textContent = char.custom_css;
-            }
-            
-            // 添加自定义HTML容器
-            if (char.custom_html) {
-                const customContainer = document.createElement('div');
-                customContainer.id = 'custom-chat-container';
-                customContainer.innerHTML = char.custom_html;
-                
-                // 插入到聊天区域顶部
-                if (chatContainer.firstChild) {
-                    chatContainer.insertBefore(customContainer, chatContainer.firstChild);
+                if (isFullCSS) {
+                    // 完整CSS规则模式：直接注入，先重置默认样式
+                    console.log('[applyCustomStyles] 完整CSS规则模式');
+                    styleTag.textContent = `
+                        /* 重置默认气泡样式 */
+                        .message-row.other .message-content:not(.card-message):not(.image-only) {
+                            background: none !important;
+                            border: none !important;
+                            box-shadow: none !important;
+                        }
+                        .message-row.self .message-content:not(.card-message):not(.image-only) {
+                            background: none !important;
+                            border: none !important;
+                            box-shadow: none !important;
+                        }
+                        .message-row.other .message-content::before,
+                        .message-row.self .message-content::after {
+                            display: none !important;
+                        }
+                        /* 用户自定义CSS规则 */
+                        ${cssText}
+                    `;
                 } else {
-                    chatContainer.appendChild(customContainer);
+                    // 纯属性模式：自动加 !important 并包裹在气泡选择器中
+                    console.log('[applyCustomStyles] 纯属性模式');
+                    const addImportant = (text) => {
+                        return text
+                            .split(';')
+                            .map(prop => {
+                                prop = prop.trim();
+                                if (!prop || !prop.includes(':')) return '';
+                                if (prop.toLowerCase().includes('!important')) return prop + ';';
+                                return prop + ' !important;';
+                            })
+                            .filter(p => p)
+                            .join('\n');
+                    };
+                    
+                    const importantCSS = addImportant(cssText);
+                    
+                    styleTag.textContent = `
+                        /* 重置默认气泡样式 */
+                        .message-row.other .message-content:not(.card-message):not(.image-only) {
+                            background: none !important;
+                            border: none !important;
+                            box-shadow: none !important;
+                            border-radius: 18px !important;
+                        }
+                        .message-row.self .message-content:not(.card-message):not(.image-only) {
+                            background: none !important;
+                            border: none !important;
+                            box-shadow: none !important;
+                            border-radius: 18px !important;
+                        }
+                        .message-row.other .message-content::before,
+                        .message-row.self .message-content::after {
+                            display: none !important;
+                        }
+                        /* 应用用户自定义属性到所有消息气泡 */
+                        .message-row .message-content:not(.card-message):not(.image-only) {
+                            ${importantCSS}
+                        }
+                    `;
                 }
             }
+            
         }
 
         // 移除自定义样式
         function removeCustomStyles() {
-            // 移除气泡样式
+            // 移除自定义气泡CSS
             const bubbleStyle = document.getElementById('custom-bubble-style');
             if (bubbleStyle) bubbleStyle.remove();
-            
-            // 移除自定义CSS
-            const cssStyle = document.getElementById('custom-chat-css');
-            if (cssStyle) cssStyle.remove();
-            
-            // 移除自定义HTML容器
-            const customContainer = document.getElementById('custom-chat-container');
-            if (customContainer) customContainer.remove();
         }
 
         async function jumpToCharEditor() {
@@ -25076,7 +25134,7 @@ function showLorebookPage() {
                 if (wsInput) wsInput.value = dataMap.widgetSubtext;
             }
             // 恢复应用图标
-            const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity'];
+            const iconIds = ['appstore','notes','remind','facetime','photo','xianyu','cabin','icity','findphone'];
             iconIds.forEach(id => {
                 const key = `icon${id.charAt(0).toUpperCase() + id.slice(1)}`;
                 const el = document.getElementById(`icon-${id}`)?.querySelector('.icon');

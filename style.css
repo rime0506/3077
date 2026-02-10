@@ -104,6 +104,45 @@
             font-size: 12px;
             margin-top: 4px;
         }
+        /* 多页桌面容器 */
+        .desktop-pages-wrapper {
+            display: flex;
+            overflow-x: auto;
+            scroll-snap-type: x mandatory;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+            z-index: 10;
+            position: relative;
+        }
+        .desktop-pages-wrapper::-webkit-scrollbar {
+            display: none;
+        }
+        .desktop-page {
+            min-width: 100%;
+            flex-shrink: 0;
+            scroll-snap-align: start;
+        }
+        /* 页面指示点 */
+        .page-dots {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 0 0;
+            z-index: 15;
+            position: relative;
+        }
+        .page-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.35);
+            transition: all 0.3s ease;
+        }
+        .page-dot.active {
+            background: rgba(255, 255, 255, 0.9);
+            transform: scale(1.2);
+        }
         /* 应用容器 */
         .app-container {
             margin: 50px 24px 0; /* 增加上方间距，整体下移 */
