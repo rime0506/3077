@@ -9571,6 +9571,14 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     
                     await setChatHistory(char, accountId, history);
                     
+                    // 🔧 停止自动快进检查功能（角色已经接受了用户的好友申请）
+                    if (char.wait_friend_settings && char.wait_friend_settings[accountId]) {
+                        char.wait_friend_settings[accountId].enabled = false;
+                        char.wait_friend_settings[accountId].nextCheckTime = null;
+                        await db.characters.put(char);
+                        console.log(`[AutoAcceptFriend] 已停止 ${char.name} 的自动快进检查`);
+                    }
+                    
                     // 刷新列表
                     if (document.querySelector('.wechat-tab-item.active').innerText.includes('微信')) {
                         renderWechatList(document.getElementById('wechat-content'));
@@ -11273,15 +11281,36 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             request.status = 'accepted';
             await db.friend_requests.put(request);
             
-            // 自动发送"我已同意了你的好友申请"消息
+            // 🔧 添加系统消息到聊天历史，记录恢复好友关系
             let history = getChatHistory(char, accountId);
+            
+            // 添加系统消息，说明现在已经是好友了
+            const systemMessage = {
+                role: 'system',
+                content: `[${myName} 通过了你的朋友验证请求，现在你们可以开始聊天了]`,
+                time: Date.now(),
+                type: 'accept_friend_request'
+            };
+            history.push(systemMessage);
+            
+            // 添加用户消息
             const acceptMessage = {
                 role: 'user',
                 content: '我已同意了你的好友申请',
-                time: Date.now()
+                time: Date.now() + 1
             };
             history.push(acceptMessage);
+            
             await setChatHistory(char, accountId, history);
+            console.log(`[AcceptFriend] 已在聊天历史中记录恢复好友关系`);
+            
+            // 🔧 停止自动快进检查功能（已经成为好友了，不需要再检查）
+            if (char.wait_friend_settings && char.wait_friend_settings[accountId]) {
+                char.wait_friend_settings[accountId].enabled = false;
+                char.wait_friend_settings[accountId].nextCheckTime = null;
+                await db.characters.put(char);
+                console.log(`[AcceptFriend] 已停止 ${char.name} 的自动快进检查`);
+            }
             
             // 刷新页面
             await renderNewFriendsPage();
@@ -11511,6 +11540,19 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             if (!char) return;
             
             const accountId = getCurrentAccountId();
+            const myChar = accountId ? await db.characters.get(parseInt(accountId)) : null;
+            const userName = myChar ? myChar.name : '用户';
+            
+            // 🔧 添加系统消息到聊天历史，记录删除事件
+            let history = getChatHistory(char, accountId);
+            history.push({
+                role: 'system',
+                content: `[${userName} 将你删除好友]`,
+                time: Date.now(),
+                type: 'user_delete_friend'
+            });
+            await setChatHistory(char, accountId, history);
+            console.log(`[DeleteFriend] 已在聊天历史中记录删除事件`);
             
             // 将好友状态改为陌生人（不删除聊天记录）
             await setFriendStatus(char, accountId, 'deleted');
@@ -11665,6 +11707,14 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                                 });
                             }
                             await setChatHistory(targetChar, accountId, chatHistory);
+                        }
+                        
+                        // 🔧 停止自动快进检查功能（角色已经接受了用户的好友申请）
+                        if (targetChar.wait_friend_settings && targetChar.wait_friend_settings[accountId]) {
+                            targetChar.wait_friend_settings[accountId].enabled = false;
+                            targetChar.wait_friend_settings[accountId].nextCheckTime = null;
+                            await db.characters.put(targetChar);
+                            console.log(`[AIAcceptFriend] 已停止 ${targetChar.name} 的自动快进检查`);
                         }
                         
                         alert(`✅ ${targetChar.name} 接受了你的好友申请！`);
@@ -12945,6 +12995,20 @@ ${chatContext || '（没有聊天记录）'}
                         status: 'pending',
                         time: Date.now()
                     });
+                    
+                    // 🔧 添加系统消息到聊天历史，记录角色发送好友申请事件
+                    const freshCharForHistory = await db.characters.get(charId);
+                    if (freshCharForHistory) {
+                        let history = getChatHistory(freshCharForHistory, accountId);
+                        history.push({
+                            role: 'system',
+                            content: `[${char.name} 向你发送了好友申请]`,
+                            time: Date.now(),
+                            type: 'char_send_friend_request'
+                        });
+                        await setChatHistory(freshCharForHistory, accountId, history);
+                        console.log(`[FriendRequest] 已在聊天历史中记录角色发送好友申请`);
+                    }
                     
                     // 显示消息预览
                     const preview = messages.length > 1 ? 
@@ -16036,7 +16100,7 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
 
         async function sendMessage() {
             const input = document.getElementById('chat-input-box');
-            const text = input.value.trim();
+            let text = input.value.trim();
             
             // 隐藏表情推荐栏
             const suggestionBar = document.getElementById('sticker-suggestion-bar');
@@ -16059,6 +16123,59 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
             // 1. 获取当前角色
             const char = await db.characters.get(currentChatCharId);
             if (!char) return;
+            
+            // 🔥 修复：处理用户手动输入的 [sticker:] 格式，替换为图片URL
+            if (/\[sticker:[^\]]+\]/i.test(text)) {
+                const mountedStickerIds = char.mounted_sticker_categories || [];
+                let allStickers = [];
+                for (const catId of mountedStickerIds) {
+                    const cat = await db.sticker_categories.get(catId);
+                    if (cat && cat.stickers && cat.stickers.length > 0) {
+                        for (const s of cat.stickers) {
+                            if (s.description && s.url) {
+                                allStickers.push({ description: s.description, url: s.url });
+                            }
+                        }
+                    }
+                }
+                
+                if (allStickers.length > 0) {
+                    text = text.replace(/\[sticker:([^\]]+)\]/gi, (match, keyword) => {
+                        const stickerKeyword = keyword.trim();
+                        console.log(`[sendMessage] 检测到表情包指令: ${stickerKeyword}`);
+                        
+                        // 按编号匹配
+                        const numMatch = stickerKeyword.match(/^\d+$/);
+                        if (numMatch) {
+                            const idx = parseInt(numMatch[0]) - 1;
+                            if (idx >= 0 && idx < allStickers.length) {
+                                console.log(`[sendMessage] ✅ 匹配到表情包 #${idx + 1}: ${allStickers[idx].description}`);
+                                return `[img:${allStickers[idx].url}]`;
+                            } else {
+                                console.warn(`[sendMessage] ⚠️ 表情包编号 ${numMatch[0]} 超出范围 (1-${allStickers.length})`);
+                                showToast(`表情包编号超出范围，请使用 1-${allStickers.length}`);
+                                return '';
+                            }
+                        }
+                        
+                        // 如果不是纯数字，移除
+                        console.warn(`[sendMessage] ⚠️ 表情包格式错误: ${stickerKeyword}`);
+                        return '';
+                    });
+                } else {
+                    // 没有挂载表情包
+                    console.warn(`[sendMessage] ⚠️ 角色未挂载表情包`);
+                    text = text.replace(/\[sticker:[^\]]+\]/gi, '');
+                    showToast('该角色未挂载表情包');
+                }
+                
+                // 如果替换后为空，不发送
+                if (!text.trim()) {
+                    input.value = '';
+                    handleChatInputChange(input);
+                    return;
+                }
+            }
             
             const accountId = getCurrentAccountId();
             
@@ -16291,10 +16408,23 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
                             return `${myNickname}: [发送了红包]`;
                         }
                     }
-                    if (m.role === 'user') return `${myNickname}: ${m.content}`;
+                    
+                    // 🔧 修复：过滤特殊卡片消息，替换为简短描述，避免HTML导致API错误
+                    let content = m.content || '';
+                    if (content.startsWith('[couple_avatar_card]')) {
+                        content = '（发送了情头邀请卡片）';
+                    } else if (content.startsWith('[emei_order]')) {
+                        content = '（发送了外卖订单卡片）';
+                    } else if (content.startsWith('[emei_share]')) {
+                        content = '（分享了外卖订单）';
+                    } else if (content.startsWith('[payment_request]')) {
+                        content = '（发送了代付请求）';
+                    }
+                    
+                    if (m.role === 'user') return `${myNickname}: ${content}`;
                     const sender = m.senderId ? memberMap[m.senderId] : null;
                     const senderName = sender ? (sender.remark || sender.wx_nickname || sender.name) : '未知成员';
-                    return `${senderName}: ${m.content}`;
+                    return `${senderName}: ${content}`;
                 }).join('\n');
                 
                 // 计算虚拟时间
@@ -21106,6 +21236,32 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                         let content = m.content || '';
                         const role = m.role === 'char' ? 'assistant' : 'user';
                         
+                        // 🔧 修复：过滤特殊卡片消息，替换为简短描述，避免HTML导致API错误
+                        if (content.startsWith('[couple_avatar_card]')) {
+                            return {
+                                role: role,
+                                content: role === 'assistant' ? '（角色发送了情头邀请卡片）' : '（用户接受/拒绝了情头邀请）'
+                            };
+                        }
+                        if (content.startsWith('[emei_order]')) {
+                            return {
+                                role: role,
+                                content: '（发送了外卖订单卡片）'
+                            };
+                        }
+                        if (content.startsWith('[emei_share]')) {
+                            return {
+                                role: role,
+                                content: '（分享了外卖订单）'
+                            };
+                        }
+                        if (content.startsWith('[payment_request]')) {
+                            return {
+                                role: role,
+                                content: '（发送了代付请求）'
+                            };
+                        }
+                        
                         // 🖼️ 图片识别：将 [img:base64/url] 转为多模态格式，让AI能看到图片
                         if (content.startsWith('[img:') && content.endsWith(']')) {
                             const imgData = content.substring(5, content.length - 1).trim();
@@ -21484,6 +21640,90 @@ ${checkResult.checkResult}
                 // 3. 恢复标题
                 if (chatTitleEl) chatTitleEl.innerText = originalTitle;
                 
+                // 🔧 统一的表情包替换函数
+                const replaceStickerTags = (text) => {
+                    if (!text || !/\[sticker:[^\]]+\]/i.test(text)) return text;
+                    
+                    if (_mountedStickersList.length === 0) {
+                        console.warn('[replaceStickerTags] 角色没有挂载表情包，移除标签');
+                        return text.replace(/\[sticker:[^\]]+\]/gi, '');
+                    }
+                    
+                    return text.replace(/\[sticker:([^\]]+)\]/gi, (match, keyword) => {
+                        const stickerKeyword = keyword.trim();
+                        
+                        // 按编号匹配
+                        const numMatch = stickerKeyword.match(/^\d+$/);
+                        if (numMatch) {
+                            const requestedNum = parseInt(numMatch[0]);
+                            const idx = requestedNum - 1;
+                            if (idx >= 0 && idx < _mountedStickersList.length) {
+                                console.log(`[replaceStickerTags] ✅ 匹配表情包 #${idx + 1}: ${_mountedStickersList[idx].description}`);
+                                return `[img:${_mountedStickersList[idx].url}]`;
+                            } else {
+                                const randomIdx = Math.floor(Math.random() * _mountedStickersList.length);
+                                console.warn(`[replaceStickerTags] ⚠️ 编号 ${requestedNum} 超出范围，随机选择`);
+                                return `[img:${_mountedStickersList[randomIdx].url}]`;
+                            }
+                        }
+                        
+                        // 从文本提取数字
+                        const numInText = stickerKeyword.match(/(\d+)/);
+                        if (numInText) {
+                            const requestedNum = parseInt(numInText[1]);
+                            const idx = requestedNum - 1;
+                            if (idx >= 0 && idx < _mountedStickersList.length) {
+                                return `[img:${_mountedStickersList[idx].url}]`;
+                            }
+                        }
+                        
+                        // 随机选择
+                        const randomSticker = _mountedStickersList[Math.floor(Math.random() * _mountedStickersList.length)];
+                        console.log(`[replaceStickerTags] ⚠️ 随机选择表情包: ${randomSticker.description}`);
+                        return `[img:${randomSticker.url}]`;
+                    });
+                };
+                
+                // 🔧 拆分包含图片的消息（确保图片单独显示）
+                const splitMessageWithImages = (text) => {
+                    // 先替换表情包标签
+                    text = replaceStickerTags(text);
+                    
+                    // 如果没有图片标签，直接返回
+                    if (!text.includes('[img:')) {
+                        return [text];
+                    }
+                    
+                    // 拆分文字和图片
+                    const parts = [];
+                    const regex = /(\[img:[^\]]+\])/g;
+                    let lastIndex = 0;
+                    let match;
+                    
+                    while ((match = regex.exec(text)) !== null) {
+                        // 添加图片前的文字
+                        if (match.index > lastIndex) {
+                            const beforeText = text.substring(lastIndex, match.index).trim();
+                            if (beforeText) {
+                                parts.push(beforeText);
+                            }
+                        }
+                        // 添加图片
+                        parts.push(match[0]);
+                        lastIndex = regex.lastIndex;
+                    }
+                    
+                    // 添加最后剩余的文字
+                    if (lastIndex < text.length) {
+                        const afterText = text.substring(lastIndex).trim();
+                        if (afterText) {
+                            parts.push(afterText);
+                        }
+                    }
+                    
+                    return parts.length > 0 ? parts : [text];
+                };
+                
                 // 🎯 检测角色删除/拉黑用户指令 - 在拆分前先检测
                 const deleteUserMatchReply = replyText.match(/\(\(DELETE_USER\)\)/i);
                 if (deleteUserMatchReply) {
@@ -21495,12 +21735,17 @@ ${checkResult.checkResult}
                             let history = getChatHistory(freshChar, accountId);
                             const textSegments = textBeforeDelete.split('|||').map(s => s.trim()).filter(s => s.length > 0);
                             for (const seg of textSegments) {
-                                history.push({ role: 'char', content: cleanMessage(seg), time: Date.now() });
-                                await setChatHistory(freshChar, accountId, history);
-                                if (currentChatCharId === targetCharId) {
-                                    await appendMessageToUI('char', cleanMessage(seg));
+                                // 🔧 拆分包含图片的消息（确保表情包单独显示）
+                                const subParts = splitMessageWithImages(cleanMessage(seg));
+                                
+                                for (const part of subParts) {
+                                    history.push({ role: 'char', content: part, time: Date.now() });
+                                    await setChatHistory(freshChar, accountId, history);
+                                    if (currentChatCharId === targetCharId) {
+                                        await appendMessageToUI('char', part);
+                                    }
+                                    await new Promise(r => setTimeout(r, 300));
                                 }
-                                await new Promise(r => setTimeout(r, 300));
                             }
                         }
                     }
@@ -21518,12 +21763,17 @@ ${checkResult.checkResult}
                             let history = getChatHistory(freshChar, accountId);
                             const textSegments = textBeforeBlock.split('|||').map(s => s.trim()).filter(s => s.length > 0);
                             for (const seg of textSegments) {
-                                history.push({ role: 'char', content: cleanMessage(seg), time: Date.now() });
-                                await setChatHistory(freshChar, accountId, history);
-                                if (currentChatCharId === targetCharId) {
-                                    await appendMessageToUI('char', cleanMessage(seg));
+                                // 🔧 拆分包含图片的消息（确保表情包单独显示）
+                                const subParts = splitMessageWithImages(cleanMessage(seg));
+                                
+                                for (const part of subParts) {
+                                    history.push({ role: 'char', content: part, time: Date.now() });
+                                    await setChatHistory(freshChar, accountId, history);
+                                    if (currentChatCharId === targetCharId) {
+                                        await appendMessageToUI('char', part);
+                                    }
+                                    await new Promise(r => setTimeout(r, 300));
                                 }
-                                await new Promise(r => setTimeout(r, 300));
                             }
                         }
                     }
@@ -21559,6 +21809,8 @@ ${checkResult.checkResult}
                     
                     // 提取转账前面的文字内容（如果有）
                     const textBeforeTransfer = replyText.substring(0, transferMatch.index).trim();
+                    // 🔥 修复：提取转账后面的文字内容
+                    const textAfterTransfer = replyText.substring(transferMatch.index + transferMatch[0].length).trim();
                     
                     const freshChar = await db.characters.get(targetCharId);
                     if (freshChar) {
@@ -21584,24 +21836,29 @@ ${checkResult.checkResult}
                             }
                             
                             // 逐条发送文字消息
+                            let msgIndex = 0;
                             for (let i = 0; i < textSegments.length; i++) {
-                                const seg = textSegments[i];
-                                const textMsg = {
-                                    role: 'char',
-                                    content: seg,
-                                    time: Date.now() + i // 确保时间戳递增
-                                };
-                                history.push(textMsg);
-                                await setChatHistory(freshChar, accountId, history);
+                                let seg = textSegments[i];
+                                // 🔧 拆分包含图片的消息（确保表情包单独显示）
+                                const subParts = splitMessageWithImages(seg);
                                 
-                                // 渲染文字消息
-                                if (currentChatCharId === targetCharId) {
-                                    await appendMessageToUI('char', seg, freshChar.avatar);
-                                }
-                                
-                                // 每条消息之间稍微延时
-                                if (i < textSegments.length - 1) {
+                                for (const part of subParts) {
+                                    const textMsg = {
+                                        role: 'char',
+                                        content: part,
+                                        time: Date.now() + msgIndex // 确保时间戳递增
+                                    };
+                                    history.push(textMsg);
+                                    await setChatHistory(freshChar, accountId, history);
+                                    
+                                    // 渲染文字消息
+                                    if (currentChatCharId === targetCharId) {
+                                        await appendMessageToUI('char', part, freshChar.avatar);
+                                    }
+                                    
+                                    // 每条消息之间稍微延时
                                     await new Promise(r => setTimeout(r, 300));
+                                    msgIndex++;
                                 }
                             }
                             
@@ -21635,8 +21892,18 @@ ${checkResult.checkResult}
                         } else {
                             sendSystemNotification(freshChar.name, '[转账]');
                         }
+                        
+                        await new Promise(r => setTimeout(r, 500));
                     }
-                    return; // 转账处理完成，不再执行后续逻辑
+                    
+                    // 🔥 修复：如果转账后还有内容，继续处理
+                    if (textAfterTransfer) {
+                        console.log('[TriggerAI] 转账后还有内容，继续处理:', textAfterTransfer.substring(0, 50));
+                        replyText = textAfterTransfer;
+                        // 继续执行后续的普通消息处理逻辑，不要return
+                    } else {
+                        return; // 转账处理完成且没有后续内容
+                    }
                 }
                 
                 // 🎯 检测亲属卡赠送指令 ((FAMILY_CARD: 额度))
@@ -21646,6 +21913,8 @@ ${checkResult.checkResult}
                     
                     // 提取亲属卡指令前面的文字内容
                     const textBeforeFamilyCard = replyText.substring(0, familyCardMatch2.index).trim();
+                    // 🔥 修复：提取亲属卡后面的文字内容
+                    const textAfterFamilyCard = replyText.substring(familyCardMatch2.index + familyCardMatch2[0].length).trim();
                     
                     const freshChar = await db.characters.get(targetCharId);
                     if (freshChar) {
@@ -21665,15 +21934,20 @@ ${checkResult.checkResult}
                                 textSegments = [textBeforeFamilyCard];
                             }
                             
+                            let msgIndex = 0;
                             for (let i = 0; i < textSegments.length; i++) {
-                                const seg = textSegments[i];
-                                history.push({ role: 'char', content: seg, time: Date.now() + i });
-                                await setChatHistory(freshChar, accountId, history);
-                                if (currentChatCharId === targetCharId) {
-                                    await appendMessageToUI('char', seg, freshChar.avatar);
-                                }
-                                if (i < textSegments.length - 1) {
+                                let seg = textSegments[i];
+                                // 🔧 拆分包含图片的消息（确保表情包单独显示）
+                                const subParts = splitMessageWithImages(seg);
+                                
+                                for (const part of subParts) {
+                                    history.push({ role: 'char', content: part, time: Date.now() + msgIndex });
+                                    await setChatHistory(freshChar, accountId, history);
+                                    if (currentChatCharId === targetCharId) {
+                                        await appendMessageToUI('char', part, freshChar.avatar);
+                                    }
                                     await new Promise(r => setTimeout(r, 300));
+                                    msgIndex++;
                                 }
                             }
                             await new Promise(r => setTimeout(r, 500));
@@ -21729,8 +22003,18 @@ ${checkResult.checkResult}
                         }
                         
                         showToast(`${freshChar.name} 赠送了亲属卡`);
+                        
+                        await new Promise(r => setTimeout(r, 500));
                     }
-                    return;
+                    
+                    // 🔥 修复：如果亲属卡后还有内容，继续处理
+                    if (textAfterFamilyCard) {
+                        console.log('[TriggerAI] 亲属卡后还有内容，继续处理:', textAfterFamilyCard.substring(0, 50));
+                        replyText = textAfterFamilyCard;
+                        // 继续执行后续的普通消息处理逻辑，不要return
+                    } else {
+                        return; // 亲属卡处理完成且没有后续内容
+                    }
                 }
                 
                 // 🎯 检测外卖卡片指令 ((EMEI_ORDER: 店铺, 商品, 金额)) / ((EMEI_PAY: ...)) / ((EMEI_SHARE: ...))
@@ -21747,6 +22031,8 @@ ${checkResult.checkResult}
                     
                     // 提取外卖指令前面的文字内容
                     const textBeforeEmei = replyText.substring(0, emeiMatch.index).trim();
+                    // 🔥 修复：提取外卖后面的文字内容
+                    const textAfterEmei = replyText.substring(emeiMatch.index + emeiMatch[0].length).trim();
                     
                     const freshChar = await db.characters.get(targetCharId);
                     if (freshChar) {
@@ -21766,15 +22052,20 @@ ${checkResult.checkResult}
                                 textSegments = [textBeforeEmei];
                             }
                             
+                            let msgIndex = 0;
                             for (let i = 0; i < textSegments.length; i++) {
-                                const seg = textSegments[i];
-                                history.push({ role: 'char', content: seg, time: Date.now() + i });
-                                await setChatHistory(freshChar, accountId, history);
-                                if (currentChatCharId === targetCharId) {
-                                    await appendMessageToUI('char', seg, freshChar.avatar);
-                                }
-                                if (i < textSegments.length - 1) {
+                                let seg = textSegments[i];
+                                // 🔧 拆分包含图片的消息（确保表情包单独显示）
+                                const subParts = splitMessageWithImages(seg);
+                                
+                                for (const part of subParts) {
+                                    history.push({ role: 'char', content: part, time: Date.now() + msgIndex });
+                                    await setChatHistory(freshChar, accountId, history);
+                                    if (currentChatCharId === targetCharId) {
+                                        await appendMessageToUI('char', part, freshChar.avatar);
+                                    }
                                     await new Promise(r => setTimeout(r, 300));
+                                    msgIndex++;
                                 }
                             }
                             await new Promise(r => setTimeout(r, 500));
@@ -21825,8 +22116,18 @@ ${checkResult.checkResult}
                         }
                         
                         showToast(`${freshChar.name} 发送了${emeiType === 'order' ? '外卖订单' : emeiType === 'pay' ? '代付请求' : '外卖分享'}`);
+                        
+                        await new Promise(r => setTimeout(r, 500));
                     }
-                    return;
+                    
+                    // 🔥 修复：如果外卖后还有内容，继续处理
+                    if (textAfterEmei) {
+                        console.log('[TriggerAI] 外卖后还有内容，继续处理:', textAfterEmei.substring(0, 50));
+                        replyText = textAfterEmei;
+                        // 继续执行后续的普通消息处理逻辑，不要return
+                    } else {
+                        return; // 外卖处理完成且没有后续内容
+                    }
                 }
                 
                 // 🎯 检测朋友圈发布指令 [MOMENTS] - 支持多种格式
@@ -21880,6 +22181,9 @@ ${checkResult.checkResult}
                     // 清理掉 [imgcard:] 部分，不要作为聊天消息发送
                     textBeforeMoments = textBeforeMoments.replace(/\[imgcard:[^\]]+\]/gi, '').trim();
                     
+                    // 🔥 修复：提取朋友圈后面的文字内容
+                    let textAfterMoments = afterMoments.replace(/\[imgcard:[^\]]+\]/gi, '').trim();
+                    
                     const freshChar = await db.characters.get(targetCharId);
                     if (freshChar) {
                         let history = getChatHistory(freshChar, accountId);
@@ -21892,18 +22196,25 @@ ${checkResult.checkResult}
                             
                             console.log(`[TriggerAI] 朋友圈前文字按|||分割为 ${msgSegments.length} 条消息`);
                             
+                            let msgIndex = 0;
                             for (let i = 0; i < msgSegments.length; i++) {
-                                const textMsg = {
-                                    role: 'char',
-                                    content: msgSegments[i],
-                                    time: Date.now() + i
-                                };
-                                history.push(textMsg);
-                                await setChatHistory(freshChar, accountId, history);
+                                // 🔧 拆分包含图片的消息（确保表情包单独显示）
+                                const subParts = splitMessageWithImages(msgSegments[i]);
                                 
-                                // 渲染文字消息
-                                if (currentChatCharId === targetCharId) {
-                                    appendMessageToUI('char', msgSegments[i], freshChar.avatar);
+                                for (const part of subParts) {
+                                    const textMsg = {
+                                        role: 'char',
+                                        content: part,
+                                        time: Date.now() + msgIndex
+                                    };
+                                    history.push(textMsg);
+                                    await setChatHistory(freshChar, accountId, history);
+                                    
+                                    // 渲染文字消息
+                                    if (currentChatCharId === targetCharId) {
+                                        appendMessageToUI('char', part, freshChar.avatar);
+                                    }
+                                    msgIndex++;
                                 }
                                 
                                 // 消息间延时（模拟连发）
@@ -21923,8 +22234,18 @@ ${checkResult.checkResult}
                         
                         // 发送通知
                         sendSystemNotification(freshChar.name, '[朋友圈]');
+                        
+                        await new Promise(r => setTimeout(r, 500));
                     }
-                    return; // 朋友圈处理完成
+                    
+                    // 🔥 修复：如果朋友圈后还有内容，继续处理
+                    if (textAfterMoments) {
+                        console.log('[TriggerAI] 朋友圈后还有内容，继续处理:', textAfterMoments.substring(0, 50));
+                        replyText = textAfterMoments;
+                        // 继续执行后续的普通消息处理逻辑，不要return
+                    } else {
+                        return; // 朋友圈处理完成且没有后续内容
+                    }
                 }
                 
                 // 🎯 检测"幻觉"：AI说发了朋友圈但没有指令
