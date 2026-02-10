@@ -176,6 +176,22 @@ db.version(77).stores({
     avatar_categories: '++id, name, parentCategory, order, time' // 子分类标签：parentCategory=single/couple
 });
 
+// 版本78：修复chat_summaries表的复合索引
+db.version(78).stores({
+    dexiData: 'key, value',
+    lorebooks: '++id, name',
+    characters: '++id, name, type',
+    sticker_categories: '++id, name',
+    moments: '++id, userId, time, ownerUserId',
+    friend_requests: '++id, fromCharId, toAccountId, status, time',
+    group_chats: '++id, name, ownerAccountId, created_at',
+    phone_recents: '++id, accountId, charId, time, type',
+    sms_messages: '++id, accountId, charId, time, read',
+    chat_summaries: '++id, [accountId+chatType+chatId], accountId, chatType, chatId, time', // 添加复合索引用于快速查询
+    avatar_library: '++id, category, tag, time',
+    avatar_categories: '++id, name, parentCategory, order, time'
+});
+
 // 📦 数据迁移：将 localStorage 中的电话和短信记录迁移到 IndexedDB
 async function migratePhoneAndSmsToIndexedDB() {
     const migrationKey = 'phone_sms_migrated_to_indexeddb';
@@ -22291,6 +22307,10 @@ ${checkResult.checkResult}
                 }
                 
                 // 4. 普通消息：强制清洗逗号 + 拆分
+                // 🔧 修复不完整的表情包标签（缺少右括号）
+                replyText = replyText.replace(/\[sticker:(\d+)(?![\]])/g, '[sticker:$1]');
+                console.log('[TriggerAI] 🔧 修复不完整的表情包标签后:', replyText);
+                
                 let cleanText = replyText.replace(/[,，]/g, ' ');
                 let segments = [];
                 
@@ -36641,34 +36661,42 @@ function formatSummaryTime(timestamp) {
 
 // 显示总结详情
 async function showSummaryDetail(summaryId) {
+    console.log('[showSummaryDetail] 开始查看总结详情, summaryId:', summaryId);
+    
     const page = document.getElementById('summary-detail-page');
-    if (!page) return;
-    
-    currentViewingSummaryId = summaryId;
-    
-    const summary = await db.chat_summaries.get(summaryId);
-    if (!summary) {
-        alert('总结不存在');
+    if (!page) {
+        console.error('[showSummaryDetail] 找不到 summary-detail-page 元素');
+        alert('页面加载错误，请刷新页面');
         return;
     }
     
-    // 获取聊天对象信息
-    let avatarUrl = '';
-    let name = '未知';
+    currentViewingSummaryId = summaryId;
     
-    if (summary.chatType === 'private') {
-        const char = await db.characters.get(parseInt(summary.chatId));
-        if (char) {
-            avatarUrl = char.avatar || '';
-            name = char.remark || char.wx_nickname || char.name || '未知';
+    try {
+        const summary = await db.chat_summaries.get(summaryId);
+        if (!summary) {
+            alert('总结不存在');
+            return;
         }
-    } else if (summary.chatType === 'group') {
-        const group = await db.group_chats.get(parseInt(summary.chatId));
-        if (group) {
-            avatarUrl = group.avatar || '';
-            name = group.name || '群聊';
+        console.log('[showSummaryDetail] 获取到总结:', summary);
+        
+        // 获取聊天对象信息
+        let avatarUrl = '';
+        let name = '未知';
+        
+        if (summary.chatType === 'private') {
+            const char = await db.characters.get(parseInt(summary.chatId));
+            if (char) {
+                avatarUrl = char.avatar || '';
+                name = char.remark || char.wx_nickname || char.name || '未知';
+            }
+        } else if (summary.chatType === 'group') {
+            const group = await db.group_chats.get(parseInt(summary.chatId));
+            if (group) {
+                avatarUrl = group.avatar || '';
+                name = group.name || '群聊';
+            }
         }
-    }
     
     // 填充页面内容
     document.getElementById('summary-detail-title').textContent = name + ' - 聊天总结';
@@ -36687,19 +36715,25 @@ async function showSummaryDetail(summaryId) {
     document.getElementById('summary-time-range').textContent = summary.timeRange || '-';
     document.getElementById('summary-detail-content').textContent = summary.content || '暂无内容';
     
-    // 关键词标签
-    const keywordsSection = document.getElementById('summary-keywords-section');
-    const keywordsContainer = document.getElementById('summary-detail-keywords');
-    if (summary.keywords && summary.keywords.length > 0) {
-        keywordsSection.style.display = 'block';
-        keywordsContainer.innerHTML = summary.keywords.map(kw => 
-            `<span style="padding:6px 12px; background:#f0f0f5; border-radius:16px; font-size:13px; color:#666;">${kw}</span>`
-        ).join('');
-    } else {
-        keywordsSection.style.display = 'none';
+        // 关键词标签
+        const keywordsSection = document.getElementById('summary-keywords-section');
+        const keywordsContainer = document.getElementById('summary-detail-keywords');
+        if (summary.keywords && summary.keywords.length > 0) {
+            keywordsSection.style.display = 'block';
+            keywordsContainer.innerHTML = summary.keywords.map(kw => 
+                `<span style="padding:6px 12px; background:#f0f0f5; border-radius:16px; font-size:13px; color:#666;">${kw}</span>`
+            ).join('');
+        } else {
+            keywordsSection.style.display = 'none';
+        }
+        
+        console.log('[showSummaryDetail] 显示详情页面');
+        page.style.display = 'flex';
+        page.style.zIndex = '1001'; // 确保在总结列表页面之上
+    } catch (error) {
+        console.error('[showSummaryDetail] 显示总结详情时出错:', error);
+        alert('查看总结详情失败：' + (error.message || '未知错误'));
     }
-    
-    page.style.display = 'flex';
 }
 
 // 隐藏总结详情页
@@ -36850,68 +36884,103 @@ async function saveSummaryEdit() {
 
 // 显示某个聊天的总结列表
 async function showChatSummaries(chatType) {
+    console.log('[showChatSummaries] 开始查看总结记录, chatType:', chatType);
+    
     const page = document.getElementById('chat-summaries-page');
-    if (!page) return;
+    if (!page) {
+        console.error('[showChatSummaries] 找不到 chat-summaries-page 元素');
+        alert('页面加载错误，请刷新页面');
+        return;
+    }
     
     const accountId = getCurrentAccountId();
-    if (!accountId) return;
+    if (!accountId) {
+        console.error('[showChatSummaries] 没有当前账号ID');
+        alert('请先登录账号');
+        return;
+    }
+    console.log('[showChatSummaries] accountId:', accountId);
     
     let chatId, name;
     
     if (chatType === 'private') {
-        if (!currentChatCharId) return;
+        if (!currentChatCharId) {
+            console.error('[showChatSummaries] 没有当前聊天角色ID');
+            alert('请先打开一个聊天窗口');
+            return;
+        }
         chatId = currentChatCharId;
         const char = await db.characters.get(parseInt(chatId));
         name = char ? (char.remark || char.wx_nickname || char.name) : '私聊';
+        console.log('[showChatSummaries] 私聊, chatId:', chatId, 'name:', name);
     } else if (chatType === 'group') {
-        if (!window.currentGroupChatId) return;
+        if (!window.currentGroupChatId) {
+            console.error('[showChatSummaries] 没有当前群聊ID');
+            alert('请先打开一个群聊窗口');
+            return;
+        }
         chatId = window.currentGroupChatId;
         const group = await db.group_chats.get(parseInt(chatId));
         name = group ? group.name : '群聊';
+        console.log('[showChatSummaries] 群聊, chatId:', chatId, 'name:', name);
     }
     
     document.getElementById('chat-summaries-title').textContent = name + ' - 总结记录';
     
-    // 获取该聊天的所有总结
-    let summaries = await db.chat_summaries
-        .where(['accountId', 'chatType', 'chatId'])
-        .equals([accountId, chatType, String(chatId)])
-        .toArray();
-    
-    // 如果复合索引不工作，使用过滤
-    if (summaries.length === 0) {
-        summaries = await db.chat_summaries.where('accountId').equals(accountId).toArray();
-        summaries = summaries.filter(s => s.chatType === chatType && String(s.chatId) === String(chatId));
+    try {
+        // 获取该聊天的所有总结
+        console.log('[showChatSummaries] 开始查询总结, chatId:', chatId, 'chatType:', chatType);
+        let summaries = await db.chat_summaries
+            .where(['accountId', 'chatType', 'chatId'])
+            .equals([accountId, chatType, String(chatId)])
+            .toArray();
+        
+        console.log('[showChatSummaries] 复合索引查询结果:', summaries.length);
+        
+        // 如果复合索引不工作，使用过滤
+        if (summaries.length === 0) {
+            console.log('[showChatSummaries] 复合索引无结果，使用过滤方式');
+            summaries = await db.chat_summaries.where('accountId').equals(accountId).toArray();
+            summaries = summaries.filter(s => s.chatType === chatType && String(s.chatId) === String(chatId));
+            console.log('[showChatSummaries] 过滤后结果:', summaries.length);
+        }
+        
+        // 按时间倒序
+        summaries.sort((a, b) => b.time - a.time);
+        
+        const listContainer = document.getElementById('chat-summaries-list');
+        const emptyState = document.getElementById('chat-summaries-empty');
+        
+        if (summaries.length === 0) {
+            listContainer.innerHTML = '';
+            emptyState.style.display = 'block';
+        } else {
+            emptyState.style.display = 'none';
+            listContainer.innerHTML = summaries.map(summary => `
+                <div onclick="showSummaryDetail(${summary.id})" style="background:#fff; border-radius:12px; padding:16px; cursor:pointer; transition:all 0.2s; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                        <span style="font-size:14px; font-weight:600; color:#333;">第 ${summaries.indexOf(summary) + 1} 次总结</span>
+                        <span style="font-size:12px; color:#999;">${formatSummaryTime(summary.time)}</span>
+                    </div>
+                    <div style="font-size:13px; color:#666; line-height:1.5; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;">
+                        ${summary.content ? summary.content.substring(0, 120) + (summary.content.length > 120 ? '...' : '') : '暂无内容'}
+                    </div>
+                    <div style="margin-top:10px; font-size:12px; color:#999;">
+                        ${summary.messageCount || 0}条消息 · ${summary.timeRange || '-'}
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        console.log('[showChatSummaries] 显示页面，总结数量:', summaries.length);
+        page.style.display = 'flex';
+        
+        // 🔧 确保页面在最上层
+        page.style.zIndex = '1000';
+    } catch (error) {
+        console.error('[showChatSummaries] 查询或显示总结时出错:', error);
+        alert('查看总结记录失败：' + (error.message || '未知错误'));
     }
-    
-    // 按时间倒序
-    summaries.sort((a, b) => b.time - a.time);
-    
-    const listContainer = document.getElementById('chat-summaries-list');
-    const emptyState = document.getElementById('chat-summaries-empty');
-    
-    if (summaries.length === 0) {
-        listContainer.innerHTML = '';
-        emptyState.style.display = 'block';
-    } else {
-        emptyState.style.display = 'none';
-        listContainer.innerHTML = summaries.map(summary => `
-            <div onclick="showSummaryDetail(${summary.id})" style="background:#fff; border-radius:12px; padding:16px; cursor:pointer; transition:all 0.2s; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                    <span style="font-size:14px; font-weight:600; color:#333;">第 ${summaries.indexOf(summary) + 1} 次总结</span>
-                    <span style="font-size:12px; color:#999;">${formatSummaryTime(summary.time)}</span>
-                </div>
-                <div style="font-size:13px; color:#666; line-height:1.5; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;">
-                    ${summary.content ? summary.content.substring(0, 120) + (summary.content.length > 120 ? '...' : '') : '暂无内容'}
-                </div>
-                <div style="margin-top:10px; font-size:12px; color:#999;">
-                    ${summary.messageCount || 0}条消息 · ${summary.timeRange || '-'}
-                </div>
-            </div>
-        `).join('');
-    }
-    
-    page.style.display = 'flex';
 }
 
 // 隐藏聊天总结列表页
@@ -36982,26 +37051,26 @@ async function generateChatSummary(chatType, chatId, accountId, chatHistory) {
         throw new Error('聊天记录太少');
     }
     
-    // 获取微信显示名（备注 > 微信昵称 > 真名）
+    // 🔧 获取原名（不使用备注，直接使用角色的真名）
     let charName = '对方';
     let userName = '用户';
     
     if (chatType === 'private') {
-        // 私聊：获取角色的微信显示名
+        // 私聊：使用角色的原名
         const char = await db.characters.get(parseInt(chatId));
         if (char) {
-            charName = char.remark || char.wx_nickname || char.name;
-            // 优先使用挂载的用户档案的微信显示名
+            charName = char.name; // 🔧 修改：只使用原名，不使用备注或微信昵称
+            // 优先使用挂载的用户档案的原名
             if (char.linked_user_id) {
                 const user = await db.characters.get(char.linked_user_id);
                 if (user) {
-                    userName = user.remark || user.wx_nickname || user.name;
+                    userName = user.name; // 🔧 修改：只使用原名
                 }
             } else {
-                // 没挂载时尝试用当前登录账号的微信显示名
+                // 没挂载时尝试用当前登录账号的原名
                 const myChar = await db.characters.get(parseInt(accountId));
                 if (myChar) {
-                    userName = myChar.remark || myChar.wx_nickname || myChar.name;
+                    userName = myChar.name; // 🔧 修改：只使用原名
                 }
             }
         }
@@ -37011,10 +37080,10 @@ async function generateChatSummary(chatType, chatId, accountId, chatHistory) {
         if (group) {
             charName = group.name || '群聊';
         }
-        // 尝试获取用户的微信显示名
+        // 尝试获取用户的原名
         const myChar = await db.characters.get(parseInt(accountId));
         if (myChar) {
-            userName = myChar.remark || myChar.wx_nickname || myChar.name;
+            userName = myChar.name; // 🔧 修改：只使用原名
         }
     }
     
