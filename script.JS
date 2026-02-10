@@ -11248,14 +11248,26 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         }
 
         async function acceptFriendRequest(requestId) {
-            const request = await db.friend_requests.get(requestId);
-            if (!request) return;
+            // 🔧 防止重复点击
+            if (window._acceptingFriendRequest) {
+                console.log('[AcceptFriend] 正在处理中，请勿重复点击');
+                return;
+            }
+            window._acceptingFriendRequest = true;
             
-            // 检查是否是联机好友申请
+            try {
+                const request = await db.friend_requests.get(requestId);
+                if (!request) {
+                    window._acceptingFriendRequest = false;
+                    return;
+                }
+                
+                // 检查是否是联机好友申请
             if (request.isOnline && request.onlineData) {
                 // 联机好友申请 - 发送到服务器
                 if (!onlineConnected || !onlineUserData) {
                     alert('请先连接服务器并登录');
+                    window._acceptingFriendRequest = false;
                     return;
                 }
                 
@@ -11267,6 +11279,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 
                 if (!myChar || !myChar.identity?.account) {
                     alert('请先创建User角色并设置微信号');
+                    window._acceptingFriendRequest = false;
                     return;
                 }
                 
@@ -11281,6 +11294,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 await db.friend_requests.put(request);
                 
                 await renderNewFriendsPage();
+                window._acceptingFriendRequest = false;
                 return;
             }
             
@@ -11343,6 +11357,13 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             }
             
             alert(`已添加 ${char.name} 为好友`);
+            } catch (error) {
+                console.error('[AcceptFriend] 接受好友申请时出错:', error);
+                alert('接受好友申请失败：' + (error.message || '未知错误'));
+            } finally {
+                // 🔧 无论成功还是失败，都要释放锁
+                window._acceptingFriendRequest = false;
+            }
         }
 
         async function rejectFriendRequest(requestId) {
@@ -16317,10 +16338,23 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
         
         // 触发群聊成员回复（多人回复 - 一次API调用生成所有回复）
         async function triggerGroupMemberReply() {
-            if (!window.currentGroupChatId) return;
+            // 🔧 防止重复调用API
+            if (window._isGeneratingGroupReply) {
+                console.log('[triggerGroupMemberReply] 正在生成回复中，忽略重复调用');
+                return;
+            }
+            window._isGeneratingGroupReply = true;
+            
+            if (!window.currentGroupChatId) {
+                window._isGeneratingGroupReply = false;
+                return;
+            }
             
             let group = await db.group_chats.get(window.currentGroupChatId);
-            if (!group || !group.memberIds || group.memberIds.length === 0) return;
+            if (!group || !group.memberIds || group.memberIds.length === 0) {
+                window._isGeneratingGroupReply = false;
+                return;
+            }
             
             const accountId = getCurrentAccountId();
             const chatTitleEl = document.getElementById('chat-title');
@@ -17013,6 +17047,8 @@ ${groupContextStr}
             } finally {
                 // 恢复标题
                 if (chatTitleEl) chatTitleEl.innerText = originalTitle;
+                // 🔧 释放锁，允许下次调用
+                window._isGeneratingGroupReply = false;
             }
         }
         
@@ -20846,6 +20882,12 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
         async function triggerAiReply(additionalSystemInfo = null) {
             console.log('[triggerAiReply] ⚡ 触发 AI 回复');
             
+            // 🔧 防止重复调用API
+            if (window._isGeneratingReply) {
+                console.log('[triggerAiReply] 正在生成回复中，忽略重复调用');
+                return;
+            }
+            
             // 如果是群聊模式，调用群聊回复函数
             if (window.currentGroupChatId) {
                 await triggerGroupMemberReply();
@@ -20856,6 +20898,9 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
             const targetCharId = currentChatCharId; // 锁定目标ID
             const char = await db.characters.get(targetCharId);
             if (!char) return;
+            
+            // 🔧 设置标志，防止重复调用
+            window._isGeneratingReply = true;
             
             const accountId = getCurrentAccountId();
             console.log('[triggerAiReply] 当前账号 ID:', accountId);
@@ -21484,6 +21529,7 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 
                 if (checkResult) {
                     // 如果AI尝试查岗，先处理查岗逻辑
+                    const originalCleanReply = checkResult.cleanReply; // 🔧 保存原始文字消息
                     replyText = checkResult.cleanReply; // 使用清理后的回复
                     
                     console.log('[TriggerAI] 查岗处理完成，cleanReply:', replyText.substring(0, 100));
@@ -21548,14 +21594,16 @@ ${lorebookForAnalysis ? `\n【世界书/背景设定】\n${lorebookForAnalysis}`
 
 ${checkResult.checkResult}
 
-现在请你作为 ${char.name}，基于上述【真实的WeChat数据】和你的人设，生成你的回复。
+你之前说的话是：「${originalCleanReply.replace(/\|\|\|/g, '」「')}」
+现在请你作为 ${char.name}，基于上述【真实的WeChat数据】和你的人设，生成你查看完账号后的回复。
 
 要求：
 1. 提及你看到的具体信息（好友名字、聊天内容、余额等）
 2. 用你的性格和平时的聊天方式来表达
 3. 用 ${char.reply_min_count || 1}-${char.reply_max_count || 3} 条短消息回复，用|||分隔
 4. 每条消息不要太长 像真人聊天
-5. 口语化 少用标点`;
+5. 口语化 少用标点
+6. 注意：这只是查岗后的回复，你之前说的话已经发送过了，不要重复`;
 
                             // 🔥 修罗场模式：在二次分析中也加入操作指令
                             if (char.allow_shura_mode) {
@@ -21596,8 +21644,14 @@ ${checkResult.checkResult}
                                 const analysisParsed = extractAndParseJSON(analysisResponse);
                                 
                                 if (analysisParsed && analysisParsed.reply) {
-                                    // 用基于真实数据的回复替换原回复
-                                    replyText = analysisParsed.reply;
+                                    // 🔧 修复：先保留原始文字消息，再追加查岗后的回复
+                                    // 原来是完全覆盖，导致原始文字消息丢失
+                                    if (originalCleanReply && originalCleanReply.trim()) {
+                                        replyText = originalCleanReply.trim() + '|||' + analysisParsed.reply;
+                                        console.log('[AI查岗] 已拼接原始消息 + 查岗分析回复');
+                                    } else {
+                                        replyText = analysisParsed.reply;
+                                    }
                                     
                                     // 更新心声
                                     if (analysisParsed.thought) {
@@ -22791,6 +22845,9 @@ ${checkResult.checkResult}
                 
                 // 使用弹窗显示错误信息，而不是在聊天界面添加消息
                 showApiErrorToast(err.message || 'API 请求失败，请检查网络或 API 配置');
+            } finally {
+                // 🔧 无论成功还是失败，都要释放锁，允许下次调用
+                window._isGeneratingReply = false;
             }
         }
 
@@ -36154,10 +36211,12 @@ function hideOfflineContextMenu() {
 
 // 线下模式 - 复制消息
 async function handleOfflineMsgCopy() {
+    // 🔧 修复：先保存索引，再隐藏菜单（hideOfflineContextMenu会重置offlineActiveMsgIndex为-1）
+    const savedIndex = offlineActiveMsgIndex;
     hideOfflineContextMenu();
-    if (offlineActiveMsgIndex === -1) return;
+    if (savedIndex === -1) return;
     
-    const msg = offlineModeHistory[offlineActiveMsgIndex];
+    const msg = offlineModeHistory[savedIndex];
     if (!msg || !msg.content) {
         showToast('无内容可复制');
         return;
@@ -36184,14 +36243,17 @@ async function handleOfflineMsgCopy() {
 
 // 线下模式 - 编辑消息
 async function handleOfflineMsgEdit() {
+    // 🔧 修复：先保存索引和charId，再隐藏菜单（hideOfflineContextMenu会重置offlineActiveMsgIndex为-1）
+    const savedIndex = offlineActiveMsgIndex;
+    const savedCharId = offlineModeCharId;
     hideOfflineContextMenu();
-    if (offlineActiveMsgIndex === -1 || !offlineModeCharId) return;
+    if (savedIndex === -1 || !savedCharId) return;
     
-    const msg = offlineModeHistory[offlineActiveMsgIndex];
+    const msg = offlineModeHistory[savedIndex];
     if (!msg) return;
     
-    const editIndex = offlineActiveMsgIndex;
-    const editCharId = offlineModeCharId;
+    const editIndex = savedIndex;
+    const editCharId = savedCharId;
     openEditMsgModal(msg.content, async (newContent) => {
         // 更新消息
         offlineModeHistory[editIndex].content = newContent;
@@ -36209,21 +36271,24 @@ async function handleOfflineMsgEdit() {
 
 // 线下模式 - 删除消息
 async function handleOfflineMsgDelete() {
+    // 🔧 修复：先保存索引和charId，再隐藏菜单（hideOfflineContextMenu会重置offlineActiveMsgIndex为-1）
+    const savedIndex = offlineActiveMsgIndex;
+    const savedCharId = offlineModeCharId;
     hideOfflineContextMenu();
-    if (offlineActiveMsgIndex === -1 || !offlineModeCharId) return;
+    if (savedIndex === -1 || !savedCharId) return;
     
     if (!confirm('删除这条消息？')) return;
     
     // 删除消息
-    offlineModeHistory.splice(offlineActiveMsgIndex, 1);
+    offlineModeHistory.splice(savedIndex, 1);
     
     // 保存到localStorage
     const accountId = getCurrentAccountId();
-    const key = `offline_chat_${accountId}_${offlineModeCharId}`;
+    const key = `offline_chat_${accountId}_${savedCharId}`;
     localStorage.setItem(key, JSON.stringify(offlineModeHistory));
     
     // 刷新显示
-    const char = await db.characters.get(offlineModeCharId);
+    const char = await db.characters.get(savedCharId);
     if (char) renderOfflineChatBody(char);
 }
 
