@@ -2209,6 +2209,7 @@ body {
 .chat-input-bar {
     min-height: 60px;
     padding: 10px 12px;
+    padding-bottom: 10px; /* 默认状态，如果面板没开 */
     display: flex;
     align-items: center;
     gap: 10px;
@@ -2259,8 +2260,8 @@ body {
     background: #fff;
 }
 .chat-panel-container.open {
-    height: calc(320px + env(safe-area-inset-bottom)); /* 面板高度 */
-    padding-bottom: env(safe-area-inset-bottom);
+    height: 280px; /* 面板高度 */
+    padding-bottom: 34px; /* Home indicator */
 }
         
         /* 表情面板 */
