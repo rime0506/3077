@@ -45,51 +45,13 @@ function setVh() {
     let vh = height + 'px';
     document.documentElement.style.setProperty('--vh', vh);
 }
-function updateKeyboardOffset() {
-    if (!window.visualViewport) {
-        document.documentElement.style.setProperty('--keyboard-offset', `0px`);
-        return;
-    }
-    const vv = window.visualViewport;
-    const offset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
-    document.documentElement.style.setProperty('--keyboard-offset', `${offset}px`);
-}
-function resetKeyboardOffset() {
-    document.documentElement.style.setProperty('--keyboard-offset', `0px`);
-}
 // 初始化并监听 resize
 setVh();
-updateKeyboardOffset();
 window.addEventListener('resize', setVh);
 if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', () => {
-        setVh();
-        updateKeyboardOffset();
-    });
-    window.visualViewport.addEventListener('scroll', updateKeyboardOffset);
+    window.visualViewport.addEventListener('resize', setVh);
+    window.visualViewport.addEventListener('scroll', setVh);
 }
-window.addEventListener('orientationchange', () => {
-    setTimeout(() => {
-        setVh();
-        resetKeyboardOffset();
-    }, 300);
-});
-window.addEventListener('focusin', (e) => {
-    const target = e.target;
-    if (target && target.id === 'chat-input-box') {
-        setTimeout(updateKeyboardOffset, 50);
-    }
-});
-window.addEventListener('focusout', (e) => {
-    const target = e.target;
-    if (target && target.id === 'chat-input-box') {
-        setTimeout(() => {
-            if (!document.activeElement || document.activeElement.id !== 'chat-input-box') {
-                resetKeyboardOffset();
-            }
-        }, 120);
-    }
-});
 
 // 初始化DEXie数据库
 const db = new Dexie('DesktopDB');

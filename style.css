@@ -1,6 +1,5 @@
 :root {
             --vh: 100vh; /* 默认值 */
-            --keyboard-offset: 0px;
             --ins-pink: #ffb6c1;
             --ins-pink-light: #ffe4e8;
             --ins-gray: #999999;
@@ -2113,9 +2112,6 @@
     display: flex;
     flex-direction: column;
     padding-bottom: 0;
-    transform: translateY(calc(-1 * var(--keyboard-offset)));
-    transition: transform 0.2s ease;
-    will-change: transform;
 }
         
         /* 线下模式输入框区域 - 与线上私聊页面保持一致的高度 */
@@ -2266,7 +2262,7 @@
 }
 .chat-panel-container.open {
     height: 320px; /* 面板高度 */
-    padding-bottom: env(safe-area-inset-bottom, 0px); /* Home indicator */
+    padding-bottom: 0;
 }
         
         /* 表情面板 */
