@@ -1,7 +1,6 @@
 :root {
             --vh: 100vh; /* 默认值 */
             --keyboard-offset: 0px;
-            --chat-safe-bottom: env(safe-area-inset-bottom, 0px);
             --ins-pink: #ffb6c1;
             --ins-pink-light: #ffe4e8;
             --ins-gray: #999999;
@@ -2113,7 +2112,7 @@
     border-top: 1px solid var(--ins-border);
     display: flex;
     flex-direction: column;
-    padding-bottom: var(--chat-safe-bottom);
+    padding-bottom: 0;
     transform: translateY(calc(-1 * var(--keyboard-offset)));
     transition: transform 0.2s ease;
     will-change: transform;

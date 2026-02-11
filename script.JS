@@ -50,11 +50,6 @@ function updateKeyboardOffset() {
     const vv = window.visualViewport;
     const offset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
     document.documentElement.style.setProperty('--keyboard-offset', `${offset}px`);
-    if (offset > 0) {
-        document.documentElement.style.setProperty('--chat-safe-bottom', '0px');
-    } else {
-        document.documentElement.style.setProperty('--chat-safe-bottom', 'env(safe-area-inset-bottom, 0px)');
-    }
 }
 // 初始化并监听 resize
 setVh();
