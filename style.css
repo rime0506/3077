@@ -2106,13 +2106,13 @@
             gap: 20px; /* 增加消息间距 */
             background: #ffffff;
         }
-        .chat-footer {
-            background: #ffffff;
-            border-top: 1px solid var(--ins-border);
-            display: flex;
-            flex-direction: column;
-            padding-bottom: env(safe-area-inset-bottom);
-        }
+.chat-footer {
+    background: #ffffff;
+    border-top: 1px solid var(--ins-border);
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 0;
+}
         
         /* 线下模式输入框区域 - 与线上私聊页面保持一致的高度 */
         #offline-chat-footer {
@@ -2206,14 +2206,14 @@
             line-height: 1.3;
             max-width: 180px;
         }
-        .chat-input-bar {
-            min-height: 60px;
-            padding: 10px 12px;
-            padding-bottom: 10px; /* 默认状态，如果面板没开 */
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
+.chat-input-bar {
+    min-height: 60px;
+    padding: 10px 12px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
         
         .chat-input {
             flex: 1;

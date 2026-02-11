@@ -4118,6 +4118,29 @@ function getEffectiveTimeOffset(char) {
     return isVirtualTimeEnabled(char) ? (char.timeOffset || 0) : 0;
 }
 
+function markUserAvatarChanged(userChar) {
+    if (!userChar) return;
+    userChar.avatarUpdatedAt = Date.now();
+}
+
+function getUserAvatarChangeNotice(char, accountId, userChar) {
+    if (!char || !userChar) return '';
+    const changedAt = userChar.avatarUpdatedAt || 0;
+    if (!changedAt) return '';
+    
+    const key = accountId ? String(accountId) : 'default';
+    if (!char.userAvatarNoticeMap) char.userAvatarNoticeMap = {};
+    const lastNotified = char.userAvatarNoticeMap[key] || 0;
+    
+    if (changedAt > lastNotified) {
+        char.userAvatarNoticeMap[key] = changedAt;
+        const userName = userChar.nick || userChar.name || '对方';
+        return `\n\n【头像更新】\n${userName}刚刚更换了头像。你已经注意到，可以自然地提一句或问问原因。`;
+    }
+    
+    return '';
+}
+
 // 辅助函数：获取格式化的虚拟时间字符串
 function getFormattedVirtualTime(offsetOrChar) {
     const offset = (typeof offsetOrChar === 'object' && offsetOrChar !== null)
@@ -7512,7 +7535,11 @@ async function showWechatRegisterPage() {
             // 只更新昵称（网名），不修改真名(name)
             myChar.nick = newNick;
             if (newAvatar) {
+                const oldAvatar = myChar.avatar || '';
                 myChar.avatar = newAvatar;
+                if (newAvatar !== oldAvatar) {
+                    markUserAvatarChanged(myChar);
+                }
             }
             
             await db.characters.put(myChar);
@@ -14743,6 +14770,17 @@ window.unmountUser = unmountUser;
                 }
                 
                 const accountId = getCurrentAccountId();
+                // 用户头像变化提示（下一轮系统提示词）
+                let avatarChangeNotice = '';
+                if (accountId) {
+                    const myChar = await db.characters.get(parseInt(accountId));
+                    if (myChar && myChar.type === 'user') {
+                        avatarChangeNotice = getUserAvatarChangeNotice(char, accountId, myChar);
+                        if (avatarChangeNotice) {
+                            await db.characters.put(char);
+                        }
+                    }
+                }
                 let loreContext = "";
                 const lorebookIds = char.lorebookIds || (char.lorebookId ? [char.lorebookId] : []);
                 {
@@ -14776,6 +14814,7 @@ ${char.wx_signature ? `个性签名：${char.wx_signature}` : ''}
 ${char.description || ''}
 
 ${userDesc}
+${avatarChangeNotice}
 ${loreContext}
 ${summaryMemoryContext}
 
@@ -21201,6 +21240,19 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
                     console.log('[triggerAiReply] ℹ️ 未设置关联用户');
                 }
                 
+                // 用户头像变化提示（下一轮系统提示词）
+                let avatarChangeNotice = '';
+                let accountUserChar = null;
+                if (accountId) {
+                    accountUserChar = await db.characters.get(parseInt(accountId));
+                    if (accountUserChar && accountUserChar.type === 'user') {
+                        avatarChangeNotice = getUserAvatarChangeNotice(char, accountId, accountUserChar);
+                        if (avatarChangeNotice) {
+                            await db.characters.put(char);
+                        }
+                    }
+                }
+                
                 let loreContext = "";
                 const lorebookIds = char.lorebookIds || (char.lorebookId ? [char.lorebookId] : []);
                 console.log('[triggerAiReply] 📚 关联的世界书 ID:', lorebookIds);
@@ -21310,6 +21362,7 @@ ${char.type !== 'user' && char.identity.bank_password ? `- 银行卡密码：${c
 ${char.identity.balance !== undefined && char.identity.balance !== null ? `- 余额：${char.identity.balance}` : ''}
 ` : ''}
 ${userDesc}
+${avatarChangeNotice}
 ${loreContext}
 ${char.relationships && char.relationships.length > 0 ? `
 **你的关联角色/NPC**：
@@ -42844,7 +42897,11 @@ async function useAvatarAsProfile() {
         return;
     }
     
+    const oldAvatar = myChar.avatar || '';
     myChar.avatar = avatar.url;
+    if (avatar.url !== oldAvatar) {
+        markUserAvatarChanged(myChar);
+    }
     await db.characters.put(myChar);
     
     hideAvatarPreview();
@@ -43210,7 +43267,11 @@ async function acceptCoupleAvatar(btn, av1Id, av2Id, charId) {
         if (currentMyCharId) {
             const myChar = await db.characters.get(parseInt(currentMyCharId));
             if (myChar) {
+                const oldAvatar = myChar.avatar || '';
                 myChar.avatar = userAvatar;
+                if (userAvatar !== oldAvatar) {
+                    markUserAvatarChanged(myChar);
+                }
                 await db.characters.put(myChar);
             }
         }
