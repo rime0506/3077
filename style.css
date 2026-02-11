@@ -40,10 +40,10 @@
             background-position: center;
             background-repeat: no-repeat;
         }
-        .phone {
-            width: 100vw;
-            height: 100vh;
-            overflow-y: auto; /* 允许垂直滚动 */
+.phone {
+    width: 100vw;
+    height: var(--vh);
+    overflow-y: auto; /* 允许垂直滚动 */
             overflow-x: hidden; /* 禁止水平滚动 */
             position: relative;
             padding: 0 8px;
@@ -1205,13 +1205,13 @@
         }
 
         /* 微信页面样式 */
-        .wechat-page {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100vh;
-            background: #ffffff; /* 纯白背景 */
+.wechat-page {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: var(--vh);
+    background: #ffffff; /* 纯白背景 */
             z-index: 150;
             display: none;
             flex-direction: column;
@@ -2253,16 +2253,17 @@
         }
         
         /* 底部面板区域 */
-        .chat-panel-container {
-            height: 0;
-            overflow: hidden;
-            transition: height 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
-            background: #fff;
-        }
-        .chat-panel-container.open {
-            height: 280px; /* 面板高度 */
-            padding-bottom: 34px; /* Home indicator */
-        }
+.chat-panel-container {
+    height: 0;
+    overflow: hidden;
+    transition: height 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+    background: #fff;
+    box-sizing: border-box;
+}
+.chat-panel-container.open {
+    height: 320px; /* 面板高度 */
+    padding-bottom: env(safe-area-inset-bottom, 0px); /* Home indicator */
+}
         
         /* 表情面板 */
         .emoji-panel {
@@ -6930,12 +6931,38 @@
     margin: 16px 0;
 }
 
+.cal-time-mode {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 8px;
+    margin-bottom: 12px;
+}
+
+.cal-time-mode .time-mode-title {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: var(--cal-text-main);
+}
+
+.cal-time-mode .time-mode-sub {
+    font-size: 11px;
+    color: var(--cal-text-sub);
+    margin-top: 2px;
+}
+
 .time-picker {
     display: flex;
     justify-content: space-between;
     align-items: center;
     padding: 0 8px;
     margin-bottom: 20px;
+}
+
+.time-picker.disabled {
+    opacity: 0.5;
+    pointer-events: none;
 }
 
 .time-inputs { display: flex; align-items: center; }
@@ -6945,6 +6972,7 @@
     font-weight: 500; text-align: center; color: var(--cal-text-main);
     outline: none;
 }
+.time-input:disabled { color: var(--cal-text-sub); }
 .time-label { font-size: 11px; color: var(--cal-text-sub); font-weight: 700; letter-spacing: 1px;}
 .time-seperator { margin: 0 6px; color: var(--cal-accent-dark); font-size: 22px; padding-bottom: 4px; }
 

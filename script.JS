@@ -41,12 +41,17 @@ if (document.readyState === 'loading') {
 // iOS 100vh 修复：动态计算视口高度
 function setVh() {
     // 获取视口高度，不包含浏览器 UI（如 Safari 底部栏）
-    let vh = window.innerHeight + 'px';
+    const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    let vh = height + 'px';
     document.documentElement.style.setProperty('--vh', vh);
 }
 // 初始化并监听 resize
 setVh();
 window.addEventListener('resize', setVh);
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', setVh);
+    window.visualViewport.addEventListener('scroll', setVh);
+}
 
 // 初始化DEXie数据库
 const db = new Dexie('DesktopDB');
@@ -3141,7 +3146,9 @@ const calendar = {
             // Time
             hourInput: document.getElementById('cal-hourInput'),
             minuteInput: document.getElementById('cal-minuteInput'),
-            confirmBtn: document.getElementById('cal-confirmBtn')
+            confirmBtn: document.getElementById('cal-confirmBtn'),
+            timeModeToggle: document.getElementById('cal-time-mode-toggle'),
+            timePicker: document.querySelector('#calendar-page .time-picker')
         };
 
         this.bindEvents();
@@ -3290,6 +3297,21 @@ const calendar = {
         this.elements.hourInput.value = h;
         this.elements.minuteInput.value = m;
     },
+    
+    applyTimeMode(isVirtual, offsetMs = 0) {
+        const now = Date.now();
+        const baseTime = isVirtual ? new Date(now + (offsetMs || 0)) : new Date(now);
+        
+        this.selectedDate = new Date(baseTime);
+        this.date = new Date(baseTime);
+        this.updateTimeInputs();
+        this.render();
+        
+        const disabled = !isVirtual;
+        if (this.elements.hourInput) this.elements.hourInput.disabled = disabled;
+        if (this.elements.minuteInput) this.elements.minuteInput.disabled = disabled;
+        if (this.elements.timePicker) this.elements.timePicker.classList.toggle('disabled', disabled);
+    },
 
     bindEvents() {
         // 头部点击 -> 打开选择器
@@ -3328,6 +3350,17 @@ const calendar = {
                 saveCalendarTime(); // 调用全局保存函数
             }
         });
+        
+        // 时间模式开关
+        if (this.elements.timeModeToggle) {
+            this.elements.timeModeToggle.addEventListener('change', async (e) => {
+                const useVirtual = !!e.target.checked;
+                if (!currentChatCharId) return;
+                const char = await db.characters.get(currentChatCharId);
+                const offset = char ? (char.timeOffset || 0) : 0;
+                this.applyTimeMode(useVirtual, offset);
+            });
+        }
     }
 };
 
@@ -4039,16 +4072,12 @@ async function showCalendarPage() {
     
     // 获取角色时间
     const char = await db.characters.get(currentChatCharId);
-    const now = Date.now();
-    const offset = char.timeOffset || 0;
-    const virtualTime = new Date(now + offset);
+    const isVirtual = isVirtualTimeEnabled(char);
+    if (calendar.elements.timeModeToggle) {
+        calendar.elements.timeModeToggle.checked = isVirtual;
+    }
     
-    // 设置日历初始状态
-    calendar.selectedDate = new Date(virtualTime); // 复制一份
-    calendar.date = new Date(virtualTime); // 浏览视图也设为当前时间
-    
-    calendar.updateTimeInputs(); // 更新输入框
-    calendar.render(); // 渲染日历
+    calendar.applyTimeMode(isVirtual, char?.timeOffset || 0);
 }
 
 function hideCalendarPage() {
@@ -4059,23 +4088,43 @@ async function saveCalendarTime() {
     if (!currentChatCharId) return;
     
     // 从 calendar 对象获取最终时间
-    const targetTime = calendar.selectedDate.getTime();
-    const now = Date.now();
-    const offset = targetTime - now;
-    
     const char = await db.characters.get(currentChatCharId);
-    char.timeOffset = offset;
+    if (!char) return;
+    
+    const useVirtual = calendar.elements.timeModeToggle ? calendar.elements.timeModeToggle.checked : true;
+    
+    if (useVirtual) {
+        const targetTime = calendar.selectedDate.getTime();
+        const now = Date.now();
+        const offset = targetTime - now;
+        char.timeOffset = offset;
+        char.timeOffsetEnabled = true;
+    } else {
+        char.timeOffsetEnabled = false;
+    }
     
     await db.characters.put(char);
     
     hideCalendarPage();
-    alert("时间设定已更新");
+    alert(useVirtual ? "时间设定已更新" : "已切换为现实时间");
+}
+
+function isVirtualTimeEnabled(char) {
+    return char ? char.timeOffsetEnabled !== false : true;
+}
+
+function getEffectiveTimeOffset(char) {
+    if (!char) return 0;
+    return isVirtualTimeEnabled(char) ? (char.timeOffset || 0) : 0;
 }
 
 // 辅助函数：获取格式化的虚拟时间字符串
-function getFormattedVirtualTime(offset) {
+function getFormattedVirtualTime(offsetOrChar) {
+    const offset = (typeof offsetOrChar === 'object' && offsetOrChar !== null)
+        ? getEffectiveTimeOffset(offsetOrChar)
+        : (offsetOrChar || 0);
     const now = Date.now();
-    const virtualNow = new Date(now + (offset || 0));
+    const virtualNow = new Date(now + offset);
     
     const year = virtualNow.getFullYear();
     const month = virtualNow.getMonth() + 1;
@@ -6600,7 +6649,7 @@ async function acceptMessageReply() {
         console.log('[acceptMessageReply] 📱 短信聊天历史条数:', chatMessages.length);
         
         // 4. 计算虚拟时间
-        const virtualTimeStr = getFormattedVirtualTime(targetChar.timeOffset);
+        const virtualTimeStr = getFormattedVirtualTime(targetChar);
         
         // 5. 构建陌生号码提示
         const strangerPrompt = isStranger ? `
@@ -14711,7 +14760,7 @@ window.unmountUser = unmountUser;
                 }
 
                 // 计算虚拟时间
-                const virtualTimeStr = getFormattedVirtualTime(char.timeOffset);
+                const virtualTimeStr = getFormattedVirtualTime(char);
 
                 // 2. 构建 Prompt
                 let systemPrompt = `你正在进行角色扮演。
@@ -14775,7 +14824,8 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
   "thought": "角色的心声/心理活动/想法（纯文字，禁止包含任何指令标签）"
 }
 
-注意：thought字段只能写心理活动文字，禁止包含[SHURA_SEND]、[CHECK_ACCOUNT]、[sticker:]等任何指令标签！指令只能放在reply中！
+注意：reply 文本内禁止使用逗号，但 JSON 字段之间的逗号必须保留，否则会解析失败。
+注意：thought 字段必须非空（至少10字），只写心理活动文字，禁止包含[SHURA_SEND]、[CHECK_ACCOUNT]、[sticker:]等任何指令标签！指令只能放在reply中！
 
 ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必须遵守！】
 你的角色开启了外语翻译模式。
@@ -14887,6 +14937,11 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                     }
                 }
                 
+                // 解析成功但 thought 为空时，尝试从原始文本中提取
+                if (!thought) {
+                    thought = extractJsonStringValue(aiResponse, 'thought') || '';
+                }
+                
                 // 如果提取失败或没有内容，尝试原始解析或直接使用文本
                     if (!cleanReply) {
                     // 清理常见装饰字符
@@ -14903,6 +14958,11 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                     } else {
                         cleanReply = cleanResponse || "(AI 返回为空)";
                     }
+                    }
+                    
+                    // 再次尝试提取 thought
+                    if (!thought) {
+                        thought = extractJsonStringValue(aiResponse, 'thought') || '';
                     }
                     
                     // 存储心声到角色对象
@@ -16082,7 +16142,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                 }
                 
                 // 计算虚拟时间
-                const virtualTimeStr = getFormattedVirtualTime(char.timeOffset);
+                const virtualTimeStr = getFormattedVirtualTime(char);
                 
                 // 获取最近几条朋友圈避免内容重复
                 let recentMomentsText = '';
@@ -17900,7 +17960,7 @@ ${groupContextStr}
             const body = document.getElementById('chat-body');
             const accountId = getCurrentAccountId();
             const userAvatarUrl = await getUserAvatarUrl(char.linked_user_id);
-            const timeOffset = char.timeOffset || 0;
+            const timeOffset = getEffectiveTimeOffset(char);
             
             // 获取前一条消息的时间
             const history = getChatHistory(char, accountId);
@@ -18103,7 +18163,7 @@ ${groupContextStr}
             }
 
             const userAvatarUrl = await getUserAvatarUrl(char.linked_user_id);
-            const timeOffset = char.timeOffset || 0; // 获取虚拟时间偏移
+            const timeOffset = getEffectiveTimeOffset(char); // 获取虚拟时间偏移
 
             // 🚀 优化：只渲染最近的50条消息
             const renderWindow = 50;
@@ -18273,7 +18333,7 @@ ${groupContextStr}
             
             // 准备要添加的消息元素
             const userAvatarUrl = await getUserAvatarUrl(char.linked_user_id);
-            const timeOffset = char.timeOffset || 0;
+            const timeOffset = getEffectiveTimeOffset(char);
             const fragment = document.createDocumentFragment();
             
             messagesToPrepend.forEach((msg, relativeIndex) => {
@@ -18354,7 +18414,7 @@ ${groupContextStr}
             }
             
             const userAvatarUrl = await getUserAvatarUrl(char.linked_user_id);
-            const timeOffset = char.timeOffset || 0; // 获取虚拟时间偏移
+            const timeOffset = getEffectiveTimeOffset(char); // 获取虚拟时间偏移
             
             // 获取前一条消息的时间
             const prevMsgTime = index > 0 && history[index - 1] ? history[index - 1].time : null;
@@ -20258,7 +20318,7 @@ ${groupContextStr}
             }
             
             // 基准时间
-            const baseTime = Date.now() + (blockedChars[0].timeOffset || 0);
+            const baseTime = Date.now() + getEffectiveTimeOffset(blockedChars[0]);
 
             for (const char of blockedChars) {
                 try {
@@ -21158,7 +21218,7 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
                 }
 
                 // 计算虚拟时间
-                const virtualTimeStr = getFormattedVirtualTime(char.timeOffset);
+                const virtualTimeStr = getFormattedVirtualTime(char);
                 
                 // 检查是否有借款提醒
                 let loanReminderText = "";
@@ -21353,6 +21413,9 @@ ${summaryMemoryContext}
   "thought": "你此刻内心真实的想法和感受"
 }
 \`\`\`
+
+注意：reply 文本内禁止使用逗号，但 JSON 字段之间的逗号必须保留，否则会解析失败。
+注意：thought 字段必须非空（至少10字），只写心理活动文字。
 
 **thought 怎么写**：
 - 写你的真实反应（开心？烦？意外？）
@@ -21733,6 +21796,11 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                     }
                 }
                 
+                // 解析成功但 thought 为空时，尝试从原始文本中提取
+                if (!thought) {
+                    thought = extractJsonStringValue(aiResponse, 'thought') || '';
+                }
+                
                 // 如果还是没有内容，直接使用原始响应（降级处理）
                 if (!replyText) {
                     // 清理常见装饰字符
@@ -21749,8 +21817,12 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                     } else {
                         replyText = cleanResponse || aiResponse || "(AI 返回为空)";
                     }
-                    thought = "";
                     }
+                
+                // 再次尝试提取 thought
+                if (!thought) {
+                    thought = extractJsonStringValue(aiResponse, 'thought') || '';
+                }
                 
                 // ✅ 修复：清理末尾多余的 ]
                 replyText = cleanMessage(replyText);
@@ -24084,7 +24156,13 @@ ${loreContext}
                     try {
                         return JSON.parse(jsonCandidate);
                     } catch (e) {
-                        // console.warn("[extractJSON] 提取片段解析失败:", e);
+                        // 尝试修复常见 JSON 错误（尾部多余逗号）
+                        try {
+                            const fixed = jsonCandidate.replace(/,\s*([}\]])/g, '$1');
+                            return JSON.parse(fixed);
+                        } catch (e2) {
+                            // console.warn("[extractJSON] 提取片段解析失败:", e2);
+                        }
                     }
                 }
             }
@@ -24094,7 +24172,59 @@ ${loreContext}
             try {
                 return JSON.parse(cleanStr);
             } catch (e) {
-                return null;
+                // 再尝试修复尾部多余逗号
+                try {
+                    const fixed = cleanStr.replace(/,\s*([}\]])/g, '$1');
+                    return JSON.parse(fixed);
+                } catch (e2) {
+                    return null;
+                }
+            }
+        }
+
+        // 从可能损坏的 JSON 文本中，尽量提取字符串字段值（如 reply/thought）
+        function extractJsonStringValue(text, fieldName) {
+            if (!text || !fieldName) return '';
+            const key = `"${fieldName}"`;
+            const keyIdx = text.indexOf(key);
+            if (keyIdx === -1) return '';
+            const colonIdx = text.indexOf(':', keyIdx + key.length);
+            if (colonIdx === -1) return '';
+            
+            // 找到冒号后的第一个引号
+            let i = colonIdx + 1;
+            while (i < text.length && /\s/.test(text[i])) i++;
+            if (text[i] !== '"') return '';
+            i++; // 跳过起始引号
+            
+            let buf = '';
+            let escaped = false;
+            for (; i < text.length; i++) {
+                const ch = text[i];
+                if (escaped) {
+                    buf += ch;
+                    escaped = false;
+                    continue;
+                }
+                if (ch === '\\') {
+                    buf += ch;
+                    escaped = true;
+                    continue;
+                }
+                if (ch === '"') break; // 字符串结束
+                buf += ch;
+            }
+            
+            if (!buf) return '';
+            try {
+                // 通过 JSON.parse 做一次转义还原
+                return JSON.parse(`"${buf}"`);
+            } catch (e) {
+                return buf
+                    .replace(/\\n/g, '\n')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\t/g, '\t')
+                    .replace(/\\\\/g, '\\');
             }
         }
 
@@ -35642,7 +35772,7 @@ async function callVideoCallAPI(char, accountId) {
     }
     
     // 计算虚拟时间
-    const virtualTimeStr = getFormattedVirtualTime(char.timeOffset);
+    const virtualTimeStr = getFormattedVirtualTime(char);
     
     // 构建完整系统提示（包含双方人设、世界书、上下文）
     const systemPrompt = `# 视频通话请求
@@ -36052,7 +36182,7 @@ async function generateVideoCallFirstMessage(char) {
         loreContext = await getLorebookContext(lorebookIds, `${char.name} ${userName} ${recentText}`);
         
         // 计算虚拟时间
-        const virtualTimeStr = getFormattedVirtualTime(char.timeOffset);
+        const virtualTimeStr = getFormattedVirtualTime(char);
         
         // 构建系统提示（包含完整人设）
         const systemPrompt = `# 视频通话 - 接通
@@ -36195,7 +36325,7 @@ async function sendVideoMessage() {
         loreContext = await getLorebookContext(lorebookIds, `${char.name} ${userName} ${recentText}`);
         
         // 计算虚拟时间
-        const virtualTimeStr = getFormattedVirtualTime(char.timeOffset);
+        const virtualTimeStr = getFormattedVirtualTime(char);
 
         // 构建系统提示（包含完整人设、世界书、上下文）
         const systemPrompt = `# 视频通话中
@@ -36441,7 +36571,7 @@ async function renderOfflineChatBody(char) {
 
     const accountId = getCurrentAccountId();
     const userAvatarUrl = await getUserAvatarUrl(char.linked_user_id);
-    const timeOffset = char.timeOffset || 0; // 获取虚拟时间偏移
+    const timeOffset = getEffectiveTimeOffset(char); // 获取虚拟时间偏移
 
     offlineModeHistory.forEach((msg, index) => {
         const prevMsgTime = index > 0 ? offlineModeHistory[index - 1].time : null;
