@@ -60,6 +60,68 @@ window.addEventListener('focusout', () => {
     setTimeout(setVh, 50);
 });
 
+// iOS: 输入框聚焦时防止页面滚动导致输入栏被顶到顶部
+const scrollLockState = {
+    locked: false,
+    scrollY: 0,
+    phoneScroll: 0,
+    phoneOverflow: ''
+};
+function lockBackgroundScroll() {
+    if (scrollLockState.locked) return;
+    const phone = document.getElementById('home-page');
+    scrollLockState.scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+    scrollLockState.phoneScroll = phone ? phone.scrollTop : 0;
+    scrollLockState.phoneOverflow = phone ? phone.style.overflowY : '';
+    document.body.classList.add('scroll-locked');
+    document.body.style.top = `-${scrollLockState.scrollY}px`;
+    if (phone) phone.style.overflowY = 'hidden';
+    scrollLockState.locked = true;
+}
+function unlockBackgroundScroll() {
+    if (!scrollLockState.locked) return;
+    const phone = document.getElementById('home-page');
+    document.body.classList.remove('scroll-locked');
+    document.body.style.top = '';
+    window.scrollTo(0, scrollLockState.scrollY);
+    if (phone) {
+        phone.style.overflowY = scrollLockState.phoneOverflow;
+        phone.scrollTop = scrollLockState.phoneScroll;
+    }
+    scrollLockState.locked = false;
+}
+function bindChatInputFocusHandlers() {
+    const ids = ['chat-input-box', 'online-group-input', 'offline-chat-input-box'];
+    ids.forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const prelock = () => {
+            lockBackgroundScroll();
+            // 立刻把滚动拉回，避免 iOS 自动滚动把输入框顶到顶部
+            setTimeout(() => {
+                if (scrollLockState.locked) {
+                    window.scrollTo(0, scrollLockState.scrollY);
+                }
+            }, 0);
+        };
+        el.addEventListener('touchstart', prelock, { passive: true });
+        el.addEventListener('mousedown', prelock);
+        el.addEventListener('focus', () => {
+            lockBackgroundScroll();
+            setTimeout(setVh, 50);
+        });
+        el.addEventListener('blur', () => {
+            unlockBackgroundScroll();
+            setTimeout(setVh, 50);
+        });
+    });
+}
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bindChatInputFocusHandlers);
+} else {
+    bindChatInputFocusHandlers();
+}
+
 // 初始化DEXie数据库
 const db = new Dexie('DesktopDB');
 // 版本升级：增加 lorebooks 表

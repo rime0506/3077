@@ -32,14 +32,21 @@
             stroke-linejoin: round;
             transition: all 0.2s ease;
         }
-        body {
-            background: #ffffff;
-            touch-action: manipulation;
-            transition: background 0.3s ease;
-            background-size: cover;
-            background-position: center;
-            background-repeat: no-repeat;
-        }
+body {
+    background: #ffffff;
+    touch-action: manipulation;
+    transition: background 0.3s ease;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+}
+body.scroll-locked {
+    position: fixed;
+    overflow: hidden;
+    width: 100%;
+    left: 0;
+    right: 0;
+}
 .phone {
     width: 100vw;
     height: var(--vh);
