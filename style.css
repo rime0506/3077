@@ -42,7 +42,7 @@ body {
 }
 .phone {
     width: 100vw;
-    height: var(--vh);
+    height: 100vh;
     overflow-y: auto; /* 允许垂直滚动 */
             overflow-x: hidden; /* 禁止水平滚动 */
             position: relative;
@@ -1210,7 +1210,7 @@ body {
     top: 0;
     left: 0;
     width: 100%;
-    height: var(--vh);
+    height: 100vh;
     background: #ffffff; /* 纯白背景 */
             z-index: 150;
             display: none;
@@ -2111,7 +2111,7 @@ body {
     border-top: 1px solid var(--ins-border);
     display: flex;
     flex-direction: column;
-    padding-bottom: 0;
+    padding-bottom: env(safe-area-inset-bottom);
 }
         
         /* 线下模式输入框区域 - 与线上私聊页面保持一致的高度 */
@@ -2209,7 +2209,6 @@ body {
 .chat-input-bar {
     min-height: 60px;
     padding: 10px 12px;
-    padding-bottom: 10px;
     display: flex;
     align-items: center;
     gap: 10px;
@@ -2258,11 +2257,10 @@ body {
     overflow: hidden;
     transition: height 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
     background: #fff;
-    box-sizing: border-box;
 }
 .chat-panel-container.open {
-    height: 320px; /* 面板高度 */
-    padding-bottom: 0;
+    height: calc(320px + env(safe-area-inset-bottom)); /* 面板高度 */
+    padding-bottom: env(safe-area-inset-bottom);
 }
         
         /* 表情面板 */
