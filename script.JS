@@ -52,6 +52,13 @@ if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', setVh);
     window.visualViewport.addEventListener('scroll', setVh);
 }
+// iOS 键盘弹出/收起时兜底刷新视口高度，避免高度卡住
+window.addEventListener('focusin', () => {
+    setTimeout(setVh, 50);
+});
+window.addEventListener('focusout', () => {
+    setTimeout(setVh, 50);
+});
 
 // 初始化DEXie数据库
 const db = new Dexie('DesktopDB');
