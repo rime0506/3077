@@ -40,9 +40,6 @@ body {
     background-position: center;
     background-repeat: no-repeat;
 }
-body.chat-open {
-    overflow: hidden;
-}
 .phone {
     width: 100vw;
     height: var(--vh);
@@ -2056,7 +2053,6 @@ body.chat-open {
             display: none;
             flex-direction: column;
             animation: slideLeft 0.3s ease;
-            overflow: hidden;
         }
         @keyframes slideLeft {
             from { transform: translateX(100%); }

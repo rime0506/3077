@@ -52,13 +52,6 @@ if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', setVh);
     window.visualViewport.addEventListener('scroll', setVh);
 }
-// iOS 键盘弹出/收起时兜底刷新视口高度，避免高度卡住
-window.addEventListener('focusin', () => {
-    setTimeout(setVh, 50);
-});
-window.addEventListener('focusout', () => {
-    setTimeout(setVh, 50);
-});
 
 // 初始化DEXie数据库
 const db = new Dexie('DesktopDB');
@@ -10033,7 +10026,6 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             titleEl.onclick = () => showGroupDetail(groupId);
             
             document.getElementById('chat-window').style.display = 'flex';
-            document.body.classList.add('chat-open');
             
             // 显示输入框
             const chatFooter = document.getElementById('chat-footer');
@@ -13416,7 +13408,6 @@ ${chatContext || '（没有聊天记录）'}
             titleEl.onclick = showChatDetail; // 恢复为私聊详情
             
             document.getElementById('chat-window').style.display = 'flex';
-            document.body.classList.add('chat-open');
             
             // 缓存当前关联的 User ID
             currentChatUserId = char.linked_user_id || null;
@@ -17315,7 +17306,6 @@ ${groupContextStr}
                 win.style.display = 'none';
                 win.style.transform = '';
             }, 300);
-            document.body.classList.remove('chat-open');
             currentChatCharId = null;
             window.currentGroupChatId = null; // 清除群聊ID
             
