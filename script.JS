@@ -45,12 +45,27 @@ function setVh() {
     let vh = height + 'px';
     document.documentElement.style.setProperty('--vh', vh);
 }
+function updateKeyboardOffset() {
+    if (!window.visualViewport) return;
+    const vv = window.visualViewport;
+    const offset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    document.documentElement.style.setProperty('--keyboard-offset', `${offset}px`);
+    if (offset > 0) {
+        document.documentElement.style.setProperty('--chat-safe-bottom', '0px');
+    } else {
+        document.documentElement.style.setProperty('--chat-safe-bottom', 'env(safe-area-inset-bottom, 0px)');
+    }
+}
 // 初始化并监听 resize
 setVh();
+updateKeyboardOffset();
 window.addEventListener('resize', setVh);
 if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', setVh);
-    window.visualViewport.addEventListener('scroll', setVh);
+    window.visualViewport.addEventListener('resize', () => {
+        setVh();
+        updateKeyboardOffset();
+    });
+    window.visualViewport.addEventListener('scroll', updateKeyboardOffset);
 }
 
 // 初始化DEXie数据库

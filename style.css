@@ -1,5 +1,7 @@
 :root {
             --vh: 100vh; /* 默认值 */
+            --keyboard-offset: 0px;
+            --chat-safe-bottom: env(safe-area-inset-bottom, 0px);
             --ins-pink: #ffb6c1;
             --ins-pink-light: #ffe4e8;
             --ins-gray: #999999;
@@ -2111,7 +2113,10 @@
     border-top: 1px solid var(--ins-border);
     display: flex;
     flex-direction: column;
-    padding-bottom: 0;
+    padding-bottom: var(--chat-safe-bottom);
+    transform: translateY(calc(-1 * var(--keyboard-offset)));
+    transition: transform 0.2s ease;
+    will-change: transform;
 }
         
         /* 线下模式输入框区域 - 与线上私聊页面保持一致的高度 */
@@ -2209,7 +2214,7 @@
 .chat-input-bar {
     min-height: 60px;
     padding: 10px 12px;
-    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: 10px;
     display: flex;
     align-items: center;
     gap: 10px;
