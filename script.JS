@@ -1,3 +1,12 @@
+// 全局异常兜底：防止未捕获的错误导致页面假死
+window.addEventListener('error', function(e) {
+    console.error('[GlobalError]', e.message, e.filename, e.lineno);
+});
+window.addEventListener('unhandledrejection', function(e) {
+    console.error('[UnhandledPromise]', e.reason);
+    e.preventDefault(); // 阻止浏览器默认处理，避免页面卡住
+});
+
 // 动态生成 Manifest 以支持单文件 PWA
 const manifest = {
     "name": "芽芽机",
@@ -192,6 +201,23 @@ db.version(78).stores({
     avatar_categories: '++id, name, parentCategory, order, time'
 });
 
+// 版本79：添加聊天主题表
+db.version(79).stores({
+    dexiData: 'key, value',
+    lorebooks: '++id, name',
+    characters: '++id, name, type',
+    sticker_categories: '++id, name',
+    moments: '++id, userId, time, ownerUserId',
+    friend_requests: '++id, fromCharId, toAccountId, status, time',
+    group_chats: '++id, name, ownerAccountId, created_at',
+    phone_recents: '++id, accountId, charId, time, type',
+    sms_messages: '++id, accountId, charId, time, read',
+    chat_summaries: '++id, [accountId+chatType+chatId], accountId, chatType, chatId, time',
+    avatar_library: '++id, category, tag, time',
+    avatar_categories: '++id, name, parentCategory, order, time',
+    chat_themes: '++id, name, accountId, time' // 聊天主题表：accountId用于账号隔离
+});
+
 // 📦 数据迁移：将 localStorage 中的电话和短信记录迁移到 IndexedDB
 async function migratePhoneAndSmsToIndexedDB() {
     const migrationKey = 'phone_sms_migrated_to_indexeddb';
@@ -316,61 +342,32 @@ async function migratePhoneAndSmsToIndexedDB() {
             }
         }
 
-        // 页面加载初始化
-        window.onload = async function() {
+        // 页面加载初始化 — DOM就绪后立即启动，不等图片等资源
+        document.addEventListener('DOMContentLoaded', async function() {
+            // ========== 第一阶段：界面恢复（优先让用户看到内容、可以点击） ==========
             checkFirstVisitDisclaimer(); // 首次访问弹出免责声明
             checkUpdateNotice(); // 更新公告（每个版本只弹一次）
-            await restoreDesktopOrder(); // 优先恢复桌面图标顺序
-            await restoreSetting(); // 异步恢复DEXie数据
-            await migrateAccountData(); // 迁移账号隔离数据
-            await migratePhoneAndSmsToIndexedDB(); // 迁移电话和短信记录到IndexedDB
-            await loadWardrobeCharacter(); // 加载衣柜人物形象
-            initDesktopDrag(); // 初始化桌面拖拽
+            
+            // 桌面布局和设置恢复 — 并行执行加快速度
+            await Promise.all([
+                restoreDesktopOrder(),
+                restoreSetting()
+            ]);
+            
+            initDesktopDrag(); // 初始化桌面拖拽（立即可交互）
             syncPreview();
             
-            // 🔧 预加载API配置到内存缓存，防止后续读取时DB偶发返回空
-            try {
-                const [urlItem, keyItem, modelItem, tempItem] = await Promise.all([
-                    db.dexiData.get('aiBaseUrl'),
-                    db.dexiData.get('aiApiKey'),
-                    db.dexiData.get('aiCurrentModel'),
-                    db.dexiData.get('aiTemperature')
-                ]);
-                if (urlItem?.value || keyItem?.value || modelItem?.value) {
-                    _apiConfigCache = {
-                        url: urlItem?.value || '',
-                        key: keyItem?.value || '',
-                        model: modelItem?.value || '',
-                        temp: tempItem?.value || '0.7'
-                    };
-                    console.log('[API缓存] ✅ 已预加载API配置到内存');
-                }
-            } catch (e) {
-                console.warn('[API缓存] 预加载失败:', e.message);
-            }
-            
-            // 请求通知权限（就像你之前的版本）
-            if ('Notification' in window && Notification.permission === 'default') {
-                console.log('[通知] 请求通知权限...');
-                Notification.requestPermission().then(permission => {
-                    console.log('[通知] 权限结果:', permission);
-                    if (permission === 'granted') {
-                        showDebugToast('✓ 通知权限已授予', true);
-                    }
-                });
-            }
-            
-            // 初始化通知设置
+            // 读取开关状态（同步操作，很快）
             const notifEnabled = localStorage.getItem('notification_enabled') === 'true';
-            document.getElementById('notif-switch').checked = notifEnabled;
-            
-            // 初始化调试模式设置
             const debugEnabled = localStorage.getItem('debug_mode_enabled') === 'true';
-            document.getElementById('debug-switch').checked = debugEnabled;
-            
-            // 初始化强力保活设置
             const keepaliveEnabled = localStorage.getItem('keepalive_enabled') === 'true';
-            document.getElementById('keepalive-switch').checked = keepaliveEnabled;
+            
+            const notifSwitch = document.getElementById('notif-switch');
+            const debugSwitch = document.getElementById('debug-switch');
+            const keepaliveSwitch = document.getElementById('keepalive-switch');
+            if (notifSwitch) notifSwitch.checked = notifEnabled;
+            if (debugSwitch) debugSwitch.checked = debugEnabled;
+            if (keepaliveSwitch) keepaliveSwitch.checked = keepaliveEnabled;
             
             // 如果保活已开启，等待用户交互后启动
             if (keepaliveEnabled) {
@@ -381,29 +378,74 @@ async function migratePhoneAndSmsToIndexedDB() {
                 }, { once: true });
             }
             
-            // 初始化通知轮询 (15秒检查，更快响应后端触发)
-            if (notifEnabled) {
-                startNotificationLoop(15);
-            }
+            // ========== 第二阶段：后台任务（延迟执行，不阻塞界面交互） ==========
+            setTimeout(async () => {
+                // 数据迁移（只在首次运行时有实际工作量）
+                await migrateAccountData();
+                await migratePhoneAndSmsToIndexedDB();
+                
+                // 加载衣柜人物（非关键UI）
+                await loadWardrobeCharacter();
+                
+                // 预加载API配置到内存缓存
+                try {
+                    const [urlItem, keyItem, modelItem, tempItem] = await Promise.all([
+                        db.dexiData.get('aiBaseUrl'),
+                        db.dexiData.get('aiApiKey'),
+                        db.dexiData.get('aiCurrentModel'),
+                        db.dexiData.get('aiTemperature')
+                    ]);
+                    if (urlItem?.value || keyItem?.value || modelItem?.value) {
+                        _apiConfigCache = {
+                            url: urlItem?.value || '',
+                            key: keyItem?.value || '',
+                            model: modelItem?.value || '',
+                            temp: tempItem?.value || '0.7'
+                        };
+                        console.log('[API缓存] ✅ 已预加载API配置到内存');
+                    }
+                } catch (e) {
+                    console.warn('[API缓存] 预加载失败:', e.message);
+                }
+                
+                // 请求通知权限
+                if ('Notification' in window && Notification.permission === 'default') {
+                    console.log('[通知] 请求通知权限...');
+                    Notification.requestPermission().then(permission => {
+                        console.log('[通知] 权限结果:', permission);
+                        if (permission === 'granted') {
+                            showDebugToast('✓ 通知权限已授予', true);
+                        }
+                    });
+                }
+                
+                // 通知轮询
+                if (notifEnabled) {
+                    startNotificationLoop(15);
+                }
+                
+                // Service Worker 注册
+                if (location.protocol === 'https:' || location.hostname === 'localhost') {
+                    console.log('[Init] 注册 Service Worker 和订阅推送...');
+                    registerServiceWorkerAndSubscribe().catch(e => {
+                        console.warn('[SW] 注册失败:', e.message);
+                    });
+                }
+            }, 50);
             
-            // ✅ 修复：页面加载时立即注册 Service Worker 和订阅推送
-            // 不再等待 startAutoChatLoop，而是立即执行
-            if (location.protocol === 'https:' || location.hostname === 'localhost') {
-                console.log('[Init] 立即注册 Service Worker 和订阅推送...');
-                await registerServiceWorkerAndSubscribe();
-            } else {
-                console.warn('[Init] 当前环境不支持 Service Worker (需要 HTTPS 或 localhost)');
-            }
+            // ========== 第三阶段：低优先级后台服务（错开启动时间） ==========
+            setTimeout(() => {
+                startAutoChatLoop(); // 主动聊天检测
+            }, 200);
             
-            // 启动主动聊天检测 (每分钟一次)
-            startAutoChatLoop();
+            setTimeout(() => {
+                initBatteryMonitor(); // 电量监测
+            }, 400);
             
-            // 初始化电量监测
-            initBatteryMonitor();
-            
-            // ✅ 自动初始化联机系统（不需要手动打开设置）
-            initOnlineSystem();
-        }
+            setTimeout(() => {
+                initOnlineSystem(); // 联机系统
+            }, 600);
+        });
 
         // --- 纯前端模式：所有数据存储在本地 ---
         // 已移除后端依赖，通知、角色、聊天记录全部使用 IndexedDB 存储
@@ -1110,6 +1152,9 @@ async function migratePhoneAndSmsToIndexedDB() {
                     exportData.data.avatar_library = await db.avatar_library.toArray();
                     exportData.data.avatar_categories = await db.avatar_categories.toArray();
                     
+                    // 新增：导出聊天主题
+                    exportData.data.chat_themes = await db.chat_themes.toArray();
+                    
                     // 导出本地 localStorage 数据
                     exportData.localStorage = {
                         user_id: localStorage.getItem('user_id'),
@@ -1288,6 +1333,9 @@ async function migratePhoneAndSmsToIndexedDB() {
                     }
                     if (importData.data.avatar_categories && db.avatar_categories) {
                         await db.avatar_categories.bulkAdd(importData.data.avatar_categories);
+                    }
+                    if (importData.data.chat_themes && db.chat_themes) {
+                        await db.chat_themes.bulkAdd(importData.data.chat_themes);
                     }
                     
                     // 导入 localStorage 数据
@@ -1878,6 +1926,12 @@ async function migratePhoneAndSmsToIndexedDB() {
             document.getElementById('home-page').style.display = 'none';
             document.getElementById('custom-main-page').style.display = 'flex';
             syncPreview();
+            // 加载聊天主题列表
+            loadChatThemeList();
+            // 初始化主题预览
+            setTimeout(() => {
+                previewChatTheme();
+            }, 100);
         }
         function backHomePage() {
             document.getElementById('custom-main-page').style.display = 'none';
@@ -5741,7 +5795,7 @@ async function renderMessageList() {
             if (msg.charId && !charAvatarCache[msg.charId]) {
                 const char = await db.characters.get(msg.charId);
                 if (char) {
-                    charAvatarCache[msg.charId] = char.avatar;
+                    charAvatarCache[msg.charId] = getCharAvatar(char, getCurrentAccountId());
                 }
             }
             if (msg.charId && charAvatarCache[msg.charId]) {
@@ -5758,7 +5812,7 @@ async function renderMessageList() {
                 if (receivedMsg && receivedMsg.charId) {
                     if (!charAvatarCache[receivedMsg.charId]) {
                         const char = await db.characters.get(receivedMsg.charId);
-                        if (char) charAvatarCache[receivedMsg.charId] = char.avatar;
+                        if (char) charAvatarCache[receivedMsg.charId] = getCharAvatar(char, getCurrentAccountId());
                     }
                     displayAvatar = charAvatarCache[receivedMsg.charId] || displayAvatar;
                 }
@@ -5808,7 +5862,8 @@ async function renderMessageList() {
         });
     }
     
-    listContainer.innerHTML = '';
+    // 批量构建HTML后一次性插入，避免多次触发DOM回流
+    const htmlParts = [];
     chats.forEach(chat => {
         const unreadClass = chat.unread ? 'message-unread' : '';
         const unreadDot = chat.unread ? `<div class="message-unread-dot"></div>` : '';
@@ -5837,7 +5892,7 @@ async function renderMessageList() {
             ? `<img src="${chat.avatar}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none';this.parentElement.classList.add('default-avatar');">`
             : '';
         
-        const html = `
+        htmlParts.push(`
             <div class="message-chat-item ${unreadClass} ${selectedClass}" onclick="${onClickAction}">
                 ${checkbox}
                 <div class="message-avatar ${defaultAvatarClass}">
@@ -5856,9 +5911,9 @@ async function renderMessageList() {
                     </div>
                 </div>
             </div>
-        `;
-        listContainer.insertAdjacentHTML('beforeend', html);
+        `);
     });
+    listContainer.innerHTML = htmlParts.join('');
     
     // 更新删除按钮
     updateMessageDeleteButton();
@@ -5983,8 +6038,9 @@ async function openMessageChat(id) {
         if (window._smsSelectedCharId) {
             const targetChar = await db.characters.get(window._smsSelectedCharId);
             if (targetChar) {
-                const charName = targetChar.remark || targetChar.wx_nickname || targetChar.name;
-                const charAvatar = targetChar.avatar || '';
+                const _smsAid = getCurrentAccountId();
+                const charName = getCharDisplayName(targetChar, _smsAid);
+                const charAvatar = getCharAvatar(targetChar, _smsAid);
                 currentMessageChatId = id;
                 currentMessageChatName = charName;
                 
@@ -6066,11 +6122,12 @@ async function openMessageChat(id) {
         let displayName = firstMsg.sender;
         let displayAvatar = '';
         
-        // 如果有 charId，从数据库获取角色头像
+        // 如果有 charId，从数据库获取角色头像（按账号隔离）
+        const _msgAid = getCurrentAccountId();
         if (firstMsg.charId) {
             const char = await db.characters.get(firstMsg.charId);
             if (char) {
-                displayAvatar = char.avatar || displayAvatar;
+                displayAvatar = getCharAvatar(char, _msgAid) || displayAvatar;
             }
         }
         
@@ -6082,7 +6139,7 @@ async function openMessageChat(id) {
             if (receivedMsgForAvatar && receivedMsgForAvatar.charId) {
                 const char = await db.characters.get(receivedMsgForAvatar.charId);
                 if (char) {
-                    displayAvatar = char.avatar || displayAvatar;
+                    displayAvatar = getCharAvatar(char, _msgAid) || displayAvatar;
                 }
             }
         }
@@ -6311,9 +6368,10 @@ async function loadComposeCharList() {
     }
     
     container.innerHTML = friends.map(f => {
-        const displayName = f.remark || f.wx_nickname || f.name;
+        const displayName = getCharDisplayName(f, accountId);
         const phone = f.identity?.phone || '';
-        const avatarStyle = f.avatar ? `background-image:url(${f.avatar})` : 'background-color:#ddd';
+        const _compAvatar = getCharAvatar(f, accountId);
+        const avatarStyle = _compAvatar ? `background-image:url(${_compAvatar})` : 'background-color:#ddd';
         const status = getFriendStatus(f, accountId);
         // 显示状态标签
         let statusBadge = '';
@@ -6336,7 +6394,7 @@ async function loadComposeCharList() {
 async function selectComposeChar(charId) {
     composeSelectedCharId = charId;
     const char = await db.characters.get(charId);
-    const charName = char.remark || char.wx_nickname || char.name;
+    const charName = getCharDisplayName(char, getCurrentAccountId());
     
     document.getElementById('compose-step-title').textContent = `发给 ${charName}`;
     document.getElementById('compose-step-char').style.display = 'none';
@@ -6398,7 +6456,7 @@ async function confirmComposeSms(charId, userId) {
     const userChar = await db.characters.get(userId);
     if (!char || !userChar) return;
     
-    const charName = char.remark || char.wx_nickname || char.name;
+    const charName = getCharDisplayName(char, getCurrentAccountId());
     const charPhone = char.identity?.phone || generateVirtualPhoneNumber(char.id);
     
     // 设置当前短信聊天的信息
@@ -6561,9 +6619,10 @@ async function acceptMessageReply() {
     
     // 回退：通过名字查找
     if (!targetChar) {
+        const _smsAid = getCurrentAccountId();
         targetChar = allChars.find(char => 
             (char.nick || char.name) === currentMessageChatName ||
-            (char.remark || char.wx_nickname || char.name) === currentMessageChatName
+            getCharDisplayName(char, _smsAid) === currentMessageChatName
         );
     }
     
@@ -6610,7 +6669,7 @@ async function acceptMessageReply() {
     
     // 🎯 显示"对方正在输入中..."提示
     const smsNameEl = document.getElementById('message-detail-name');
-    const originalSmsName = smsNameEl ? smsNameEl.innerText : (targetChar.remark || targetChar.wx_nickname || targetChar.name);
+    const originalSmsName = smsNameEl ? smsNameEl.innerText : getCharDisplayName(targetChar, getCurrentAccountId());
     if (smsNameEl) {
         smsNameEl.innerText = "对方正在输入中...";
         smsNameEl.style.fontSize = "12px";
@@ -7135,7 +7194,9 @@ async function showWechatPage() {
     } else {
         // 已注册，显示微信主页
         console.log('[微信] 已注册，显示主页');
-        document.getElementById('wechat-page').style.display = 'flex';
+        const wechatEl = document.getElementById('wechat-page');
+        wechatEl.style.display = 'flex';
+        wechatEl.style.visibility = ''; // 确保列表页处于可见状态
         // 打开时自动切到第一个标签页并渲染
         switchWechatTab(0);
     }
@@ -7190,6 +7251,7 @@ async function showWechatRegisterPage() {
                 page.style.display = 'none';
                 page.style.transform = ''; 
                 page.style.opacity = '';
+                page.style.visibility = ''; // 清理可见性状态
             }, 200);
         }
 
@@ -8584,16 +8646,68 @@ ${loreContext}
             return currentMyCharId ? String(currentMyCharId) : null;
         }
 
+        // --- 角色属性 per-user getter/setter ---
+        // 获取角色备注（按账号隔离）
+        function getCharRemark(char, accountId) {
+            if (accountId && char.remark_by_user?.[accountId] !== undefined) return char.remark_by_user[accountId];
+            return char.remark || '';
+        }
+        // 设置角色备注（按账号隔离）
+        function setCharRemark(char, accountId, value) {
+            if (!accountId) { char.remark = value; return; }
+            if (!char.remark_by_user) char.remark_by_user = {};
+            char.remark_by_user[accountId] = value;
+        }
+
+        // 获取角色微信昵称（按账号隔离）
+        function getCharWxNickname(char, accountId) {
+            if (accountId && char.wx_nickname_by_user?.[accountId] !== undefined) return char.wx_nickname_by_user[accountId];
+            return char.wx_nickname || '';
+        }
+        // 设置角色微信昵称（按账号隔离）
+        function setCharWxNickname(char, accountId, value) {
+            if (!accountId) { char.wx_nickname = value; return; }
+            if (!char.wx_nickname_by_user) char.wx_nickname_by_user = {};
+            char.wx_nickname_by_user[accountId] = value;
+        }
+
+        // 获取角色头像（按账号隔离）
+        function getCharAvatar(char, accountId) {
+            if (accountId && char.avatar_by_user?.[accountId] !== undefined) return char.avatar_by_user[accountId];
+            return char.avatar || '';
+        }
+        // 设置角色头像（按账号隔离）
+        function setCharAvatar(char, accountId, value) {
+            if (!accountId) { char.avatar = value; return; }
+            if (!char.avatar_by_user) char.avatar_by_user = {};
+            char.avatar_by_user[accountId] = value;
+        }
+
+        // 获取角色置顶状态（按账号隔离）
+        function getCharPinned(char, accountId) {
+            if (accountId && char.is_pinned_by_user?.[accountId] !== undefined) return char.is_pinned_by_user[accountId];
+            return false;
+        }
+        // 设置角色置顶状态（按账号隔离）
+        function setCharPinned(char, accountId, value) {
+            if (!accountId) { char.is_pinned = value; return; }
+            if (!char.is_pinned_by_user) char.is_pinned_by_user = {};
+            char.is_pinned_by_user[accountId] = value;
+        }
+
+        // 获取角色显示名（按账号隔离）：备注 > 微信昵称 > 网名 > 原名
+        function getCharDisplayName(char, accountId) {
+            const remark = getCharRemark(char, accountId);
+            if (remark) return remark;
+            const wxNick = getCharWxNickname(char, accountId);
+            if (wxNick) return wxNick;
+            return char.nick || char.name;
+        }
+
         // 获取角色的好友状态（按账号隔离）
         function getFriendStatus(char, accountId) {
             if (!accountId) return char.wechat_status || 'stranger';
-            if (!char.wechat_status_by_user) {
-                // 如果新结构不存在，尝试从旧结构迁移
-                if (char.wechat_status) {
-                    if (!char.wechat_status_by_user) char.wechat_status_by_user = {};
-                    char.wechat_status_by_user[accountId] = char.wechat_status;
-                }
-            }
+            // 直接从按账号隔离的结构中读取，不再自动把旧状态复制给任意账号
             return char.wechat_status_by_user?.[accountId] || 'stranger';
         }
 
@@ -8615,13 +8729,7 @@ ${loreContext}
             if (!accountId) {
                 history = char.chat_history || [];
             } else {
-                if (!char.chat_history_by_user) {
-                    // 如果新结构不存在，尝试从旧结构迁移
-                    if (char.chat_history && char.chat_history.length > 0) {
-                        if (!char.chat_history_by_user) char.chat_history_by_user = {};
-                        char.chat_history_by_user[accountId] = [...char.chat_history];
-                    }
-                }
+                // 直接从按账号隔离的结构中读取，不再自动把旧数据复制给任意账号
                 history = char.chat_history_by_user?.[accountId] || [];
             }
             // 按时间戳排序，确保消息顺序正确（使用稳定排序：时间相同时保持原始顺序）
@@ -8658,38 +8766,55 @@ ${loreContext}
 
         // 数据迁移：将旧结构迁移到新结构（不影响现有数据）
         async function migrateAccountData() {
-            const migrationKey = 'account_isolation_migrated';
+            const migrationKey = 'account_isolation_v2';
             if (localStorage.getItem(migrationKey) === 'true') {
                 return; // 已经迁移过
             }
 
-            console.log('[Migration] 开始迁移账号隔离数据...');
+            console.log('[Migration] 开始迁移账号隔离数据(v2)...');
             const allChars = await db.characters.toArray();
             let migratedCount = 0;
+            
+            // 找到最早创建的 User 账号，旧数据只归属于这个账号
+            const allUsers = await db.characters.where('type').equals('user').toArray();
+            const primaryUser = allUsers.length > 0 ? allUsers.reduce((oldest, u) => (!oldest || u.id < oldest.id) ? u : oldest, null) : null;
+            const primaryAccountId = primaryUser ? String(primaryUser.id) : null;
 
             for (const char of allChars) {
                 let needSave = false;
 
-                // 迁移好友状态：如果有旧的好友状态，为所有User账号创建映射
+                // 迁移好友状态：旧数据只归属于主账号
                 if (char.wechat_status && !char.wechat_status_by_user) {
                     char.wechat_status_by_user = {};
-                    // 为所有User账号复制当前状态
-                    const allUsers = await db.characters.where('type').equals('user').toArray();
-                    for (const user of allUsers) {
-                        char.wechat_status_by_user[String(user.id)] = char.wechat_status;
+                    if (primaryAccountId) {
+                        char.wechat_status_by_user[primaryAccountId] = char.wechat_status;
                     }
                     needSave = true;
                 }
 
-                // 迁移聊天记录：如果有旧的聊天记录，为所有User账号创建映射
+                // 迁移聊天记录：旧数据只归属于主账号，其他账号保持空白
                 if (char.chat_history && char.chat_history.length > 0 && !char.chat_history_by_user) {
                     char.chat_history_by_user = {};
-                    // 为所有User账号复制当前聊天记录
-                    const allUsers = await db.characters.where('type').equals('user').toArray();
-                    for (const user of allUsers) {
-                        char.chat_history_by_user[String(user.id)] = [...char.chat_history];
+                    if (primaryAccountId) {
+                        char.chat_history_by_user[primaryAccountId] = [...char.chat_history];
                     }
                     needSave = true;
+                }
+                
+                // 清理已有的 chat_history_by_user 中不属于正确账号的数据
+                // 如果 chat_history_by_user 已存在，检查是否有被错误复制的数据
+                if (char.chat_history_by_user && char.chat_history && char.chat_history.length > 0) {
+                    for (const uid of Object.keys(char.chat_history_by_user)) {
+                        // 跳过主账号
+                        if (uid === primaryAccountId) continue;
+                        // 如果该账号不是好友，但有聊天记录，说明是被错误复制的
+                        const friendStatus = char.wechat_status_by_user?.[uid];
+                        if (!friendStatus || friendStatus === 'stranger') {
+                            // 不是好友却有聊天记录，清除这些泄漏的数据
+                            delete char.chat_history_by_user[uid];
+                            needSave = true;
+                        }
+                    }
                 }
 
                 if (needSave) {
@@ -8699,7 +8824,7 @@ ${loreContext}
             }
 
             localStorage.setItem(migrationKey, 'true');
-            console.log(`[Migration] 迁移完成，共处理 ${migratedCount} 个角色`);
+            console.log(`[Migration] v2迁移完成，共处理 ${migratedCount} 个角色`);
         }
 
         async function performSwitchAccount(id) {
@@ -8824,9 +8949,11 @@ ${loreContext}
             
             // 排序逻辑：置顶 > 最后消息时间 > 更新时间
             allItems.sort((a, b) => {
-                // 1. 置顶判断
-                if (a.is_pinned && !b.is_pinned) return -1;
-                if (!a.is_pinned && b.is_pinned) return 1;
+                // 1. 置顶判断（按账号隔离）
+                const aPinned = a._isGroup ? a.is_pinned : getCharPinned(a, accountId);
+                const bPinned = b._isGroup ? b.is_pinned : getCharPinned(b, accountId);
+                if (aPinned && !bPinned) return -1;
+                if (!aPinned && bPinned) return 1;
                 
                 // 2. 时间判断
                 const getLastTime = (item) => {
@@ -8963,8 +9090,9 @@ ${loreContext}
                 // 背景操作按钮
                 const actionsDiv = document.createElement('div');
                 actionsDiv.className = 'wechat-item-actions';
+                const _fPinned = getCharPinned(f, accountId);
                 actionsDiv.innerHTML = `
-                    <button class="wechat-action-btn btn-pin" onclick="togglePin(${f.id}, event)">${f.is_pinned ? '取消置顶' : '置顶'}</button>
+                    <button class="wechat-action-btn btn-pin" onclick="togglePin(${f.id}, event)">${_fPinned ? '取消置顶' : '置顶'}</button>
                     <button class="wechat-action-btn btn-delete" onclick="deleteFriend(${f.id}, event)">删除</button>
                 `;
                 
@@ -8978,7 +9106,7 @@ ${loreContext}
                 contentDiv.style.borderBottom = '0.5px solid #f0f0f0';
                 contentDiv.style.alignItems = 'center';
                 contentDiv.style.gap = '12px';
-                contentDiv.style.backgroundColor = f.is_pinned ? '#f8f8f8' : '#fff';
+                contentDiv.style.backgroundColor = _fPinned ? '#f8f8f8' : '#fff';
 
                 // 点击进入聊天
                 contentDiv.onclick = (e) => {
@@ -8990,7 +9118,8 @@ ${loreContext}
                     openChatWindow(f.id);
                 };
 
-                const avatarStyle = f.avatar ? `background-image:url(${f.avatar})` : 'background-color:#eee';
+                const _fAvatar = getCharAvatar(f, accountId);
+                const avatarStyle = _fAvatar ? `background-image:url(${_fAvatar})` : 'background-color:#eee';
                 
                 // 检查好友状态
                 const friendStatus = getFriendStatus(f, accountId);
@@ -9052,7 +9181,7 @@ ${loreContext}
                 }
                 const textColor = isAnyInactive ? '#999' : '#333';
 
-                const displayName = f.remark || f.wx_nickname || f.name;
+                const displayName = getCharDisplayName(f, accountId);
                 contentDiv.innerHTML = `
                     <div style="width:48px; height:48px; border-radius:6px; ${avatarStyle}; background-size:cover; background-position:center; flex-shrink:0; ${isAnyInactive ? 'opacity:0.6;' : ''}"></div>
                     <div style="flex:1; min-width:0;">
@@ -9136,7 +9265,8 @@ ${loreContext}
             e.stopPropagation();
             const char = await db.characters.get(id);
             if (char) {
-                char.is_pinned = !char.is_pinned;
+                const _pinAid = getCurrentAccountId();
+                setCharPinned(char, _pinAid, !getCharPinned(char, _pinAid));
                 await db.characters.put(char);
                 renderWechatList(document.getElementById('wechat-content'));
             }
@@ -9178,7 +9308,7 @@ ${loreContext}
                     // 设置隐藏标记（防止聊天列表仍显示）
                     if (!char.chat_hidden_by_user) char.chat_hidden_by_user = {};
                     char.chat_hidden_by_user[accountId] = true;
-                    char.is_pinned = false;
+                    setCharPinned(char, accountId, false);
                     
                     // 初始化等待好友申请的设置
                     if (!char.wait_friend_settings) {
@@ -9198,6 +9328,9 @@ ${loreContext}
                     if (currentChatCharId === id) {
                         document.getElementById('chat-window').style.display = 'none';
                         currentChatCharId = null;
+                        // 恢复底层微信列表的可见性
+                        const wechatEl = document.getElementById('wechat-page');
+                        if (wechatEl) wechatEl.style.visibility = '';
                     }
                     
                     renderWechatList(document.getElementById('wechat-content'));
@@ -9274,11 +9407,12 @@ ${loreContext}
                     item.style.gap = '12px';
                     item.onclick = () => openChatWindow(f.id);
 
-                    const avatarStyle = f.avatar ? `background-image:url(${f.avatar})` : 'background-color:#eee';
+                    const _cAvatar = getCharAvatar(f, accountId);
+                    const avatarStyle = _cAvatar ? `background-image:url(${_cAvatar})` : 'background-color:#eee';
                     
                     item.innerHTML = `
                         <div style="width:40px; height:40px; border-radius:4px; ${avatarStyle}; background-size:cover; background-position:center;"></div>
-                        <div style="font-size:16px; font-weight:500; color:#333;">${f.name}</div>
+                        <div style="font-size:16px; font-weight:500; color:#333;">${getCharDisplayName(f, accountId)}</div>
                     `;
                     listDiv.appendChild(item);
                 });
@@ -9722,8 +9856,8 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     // 绑定聊天用的 User ID (可选，如果以后支持多 User 切换)
                     // char.linked_user_id = userChar.id; 
                     
-                    // 获取当前账号的聊天记录
-                    let history = getChatHistory(char, accountId);
+                    // 强制为当前账号初始化全新空白聊天记录，确保不会读到其他账号的数据
+                    let history = [];
                     
                     // 1. 存入系统固定消息
                     history.push({
@@ -9819,10 +9953,8 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             if(char) {
                 const accountId = getCurrentAccountId();
                 await setFriendStatus(char, accountId, 'friend');
-                // 直接添加默认没有消息，或者可以加一条系统消息
-                let history = getChatHistory(char, accountId);
-                // history.push({ role: 'system', content: '你们已成为好友，开始聊天吧', time: Date.now() });
-                await setChatHistory(char, accountId, history);
+                // 新账号添加好友时，强制使用全新空白记录，确保账号间数据完全隔离
+                await setChatHistory(char, accountId, []);
                 closeModal('direct-add-modal');
                 alert(`已将 ${char.name} 添加到通讯录`);
                 
@@ -9866,14 +9998,15 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 item.dataset.charId = f.id;
                 item.dataset.selected = 'false';
                 
-                const avatarStyle = f.avatar ? `background-image:url(${f.avatar})` : 'background-color:#eee';
+                const _grpSelAv = getCharAvatar(f, accountId);
+                const avatarStyle = _grpSelAv ? `background-image:url(${_grpSelAv})` : 'background-color:#eee';
                 
                 item.innerHTML = `
                     <div class="group-select-checkbox" style="width:22px; height:22px; border:2px solid #ddd; border-radius:50%; margin-right:12px; display:flex; align-items:center; justify-content:center; transition:all 0.2s;">
                         <svg class="check-icon" style="width:14px; height:14px; stroke:#fff; fill:none; stroke-width:3; display:none;" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>
                     </div>
                     <div style="width:40px; height:40px; border-radius:4px; ${avatarStyle}; background-size:cover; background-position:center; margin-right:12px;"></div>
-                    <div style="font-size:16px; color:#333;">${f.remark || f.wx_nickname || f.name}</div>
+                    <div style="font-size:16px; color:#333;">${getCharDisplayName(f, accountId)}</div>
                 `;
                 
                 item.onclick = function() {
@@ -9923,7 +10056,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             if (!groupName) {
                 const memberChars = await Promise.all(memberIds.map(id => db.characters.get(id)));
                 const myChar = currentMyCharId ? await db.characters.get(parseInt(currentMyCharId)) : null;
-                const names = memberChars.map(c => c.remark || c.wx_nickname || c.name);
+                const names = memberChars.map(c => getCharDisplayName(c, accountId));
                 if (myChar) names.unshift(myChar.nick || myChar.name);
                 defaultName = names.slice(0, 4).join('、');
                 if (names.length > 4) defaultName += '...';
@@ -9970,7 +10103,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 if (!group.memberIds.includes(memberId)) {
                     group.memberIds.push(memberId);
                     const char = await db.characters.get(memberId);
-                    if (char) newMemberNames.push(char.remark || char.wx_nickname || char.name);
+                    if (char) newMemberNames.push(getCharDisplayName(char, getCurrentAccountId()));
                 }
             }
             
@@ -10022,6 +10155,17 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             
             document.getElementById('chat-window').style.display = 'flex';
             
+            // ✅ 应用群聊的聊天主题
+            if (group.chatThemeId !== undefined) {
+                await applyThemeToChat(group.chatThemeId);
+            }
+            
+            // 进入聊天后，将底层列表设为不可见，防止透明样式穿透
+            setTimeout(() => {
+                const wechatEl = document.getElementById('wechat-page');
+                if (wechatEl) wechatEl.style.visibility = 'hidden';
+            }, 320);
+            
             // 显示输入框
             const chatFooter = document.getElementById('chat-footer');
             chatFooter.style.display = 'flex';
@@ -10067,6 +10211,9 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             
             // 渲染群成员列表
             await renderGroupMemberList(group);
+            
+            // 更新群聊主题显示
+            await updateGroupChatDetailThemeDisplay();
             
             // 加载世界书列表（多选）——只显示单人世界书，全局自动生效
             const lorebooks = await db.lorebooks.toArray();
@@ -10153,14 +10300,15 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 if (!char) continue;
                 
                 const isAdmin = adminIds.includes(memberId);
-                const avatarStyle = char.avatar ? `background-image:url(${char.avatar})` : 'background-color:#eee';
+                const _mAvatar = getCharAvatar(char, accountId);
+                const avatarStyle = _mAvatar ? `background-image:url(${_mAvatar})` : 'background-color:#eee';
                 const item = document.createElement('div');
                 item.style.cssText = 'display:flex; flex-direction:column; align-items:center; width:60px;';
                 item.innerHTML = `
                     <div style="width:44px; height:44px; border-radius:6px; ${avatarStyle}; background-size:cover; background-position:center; position:relative;">
                         ${isAdmin ? '<div style="position:absolute; bottom:-2px; right:-2px; background:#ff9500; color:#fff; font-size:8px; padding:1px 3px; border-radius:2px;">管理</div>' : ''}
                     </div>
-                    <div style="font-size:11px; color:#333; margin-top:4px; text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; width:100%;">${char.remark || char.wx_nickname || char.name}</div>
+                    <div style="font-size:11px; color:#333; margin-top:4px; text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; width:100%;">${getCharDisplayName(char, accountId)}</div>
                 `;
                 listEl.appendChild(item);
             }
@@ -10261,7 +10409,8 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 noAdminEl.style.display = 'none';
                 for (const { char, memberId } of admins) {
                     const isMuted = mutedIds.includes(memberId);
-                    const avatarStyle = char.avatar ? `background-image:url(${char.avatar})` : 'background-color:#eee';
+                    const _adminAv = getCharAvatar(char, accountId);
+                    const avatarStyle = _adminAv ? `background-image:url(${_adminAv})` : 'background-color:#eee';
                     const item = document.createElement('div');
                     // 只有群主可以操作管理员
                     const canOperate = isOwner;
@@ -10269,7 +10418,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     item.innerHTML = `
                         <div style="width:44px; height:44px; border-radius:6px; ${avatarStyle}; background-size:cover; background-position:center;"></div>
                         <div style="flex:1;">
-                            <div style="font-size:16px; font-weight:500; color:#333;">${char.remark || char.wx_nickname || char.name}</div>
+                            <div style="font-size:16px; font-weight:500; color:#333;">${getCharDisplayName(char, accountId)}</div>
                             <div style="font-size:12px; color:#ff9500;">${isMuted ? '已禁言 · ' : ''}管理员</div>
                         </div>
                         ${canOperate ? '<svg style="width:20px; height:20px; stroke:#ccc;" viewBox="0 0 24 24" fill="none" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>' : ''}
@@ -10284,7 +10433,8 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             // 渲染普通成员
             for (const { char, memberId } of members) {
                 const isMuted = mutedIds.includes(memberId);
-                const avatarStyle = char.avatar ? `background-image:url(${char.avatar})` : 'background-color:#eee';
+                const _memAv = getCharAvatar(char, accountId);
+                const avatarStyle = _memAv ? `background-image:url(${_memAv})` : 'background-color:#eee';
                 const item = document.createElement('div');
                 // 群主和管理员都可以操作普通成员
                 const canOperate = hasManagePermission;
@@ -10292,7 +10442,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 item.innerHTML = `
                     <div style="width:44px; height:44px; border-radius:6px; ${avatarStyle}; background-size:cover; background-position:center;"></div>
                     <div style="flex:1;">
-                        <div style="font-size:16px; font-weight:500; color:#333;">${char.remark || char.wx_nickname || char.name}</div>
+                        <div style="font-size:16px; font-weight:500; color:#333;">${getCharDisplayName(char, accountId)}</div>
                         ${isMuted ? '<div style="font-size:12px; color:#ff3b30;">已禁言</div>' : ''}
                     </div>
                     ${canOperate ? '<svg style="width:20px; height:20px; stroke:#ccc;" viewBox="0 0 24 24" fill="none" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>' : ''}
@@ -10320,9 +10470,11 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             // 检查当前用户是否是管理员
             const currentUserIsAdmin = (group.adminIds || []).includes(parseInt(currentMyCharId));
             
-            const avatarStyle = char.avatar ? `url(${char.avatar})` : '#eee';
+            const _maAid = getCurrentAccountId();
+            const _maAvatar = getCharAvatar(char, _maAid);
+            const avatarStyle = _maAvatar ? `url(${_maAvatar})` : '#eee';
             document.getElementById('member-action-avatar').style.backgroundImage = avatarStyle;
-            document.getElementById('member-action-name').innerText = char.remark || char.wx_nickname || char.name;
+            document.getElementById('member-action-name').innerText = getCharDisplayName(char, _maAid);
             document.getElementById('member-action-role').innerText = isAdmin ? '管理员' : '群成员';
             
             // 权限控制：
@@ -10711,14 +10863,15 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 item.dataset.charId = f.id;
                 item.dataset.selected = 'false';
                 
-                const avatarStyle = f.avatar ? `background-image:url(${f.avatar})` : 'background-color:#eee';
+                const _invAv = getCharAvatar(f, accountId);
+                const avatarStyle = _invAv ? `background-image:url(${_invAv})` : 'background-color:#eee';
                 
                 item.innerHTML = `
                     <div class="group-select-checkbox" style="width:22px; height:22px; border:2px solid #ddd; border-radius:50%; margin-right:12px; display:flex; align-items:center; justify-content:center; transition:all 0.2s;">
                         <svg class="check-icon" style="width:14px; height:14px; stroke:#fff; fill:none; stroke-width:3; display:none;" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>
                     </div>
                     <div style="width:40px; height:40px; border-radius:4px; ${avatarStyle}; background-size:cover; background-position:center; margin-right:12px;"></div>
-                    <div style="font-size:16px; color:#333;">${f.remark || f.wx_nickname || f.name}</div>
+                    <div style="font-size:16px; color:#333;">${getCharDisplayName(f, accountId)}</div>
                 `;
                 
                 item.onclick = function() {
@@ -10783,7 +10936,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             // 处理图片
             else if (msg.content.startsWith('[img:')) {
                 const imgUrl = msg.content.substring(5, msg.content.length - 1).trim();
-                renderedContent = `<img src="${imgUrl}" class="chat-image" style="max-width:200px; max-height:200px; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" ${getImageErrorHandler()} />`;
+                renderedContent = `<img src="${imgUrl}" class="chat-image" style="width:150px; height:150px; object-fit:cover; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" ${getImageErrorHandler()} />`;
             }
             // 处理语音
             else if (msg.content.startsWith('[voice:')) {
@@ -10931,7 +11084,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 // 处理图片消息 [img:url]
                 if (content.startsWith('[img:')) {
                     const imgUrl = content.substring(5, content.length - 1).trim();
-                    return `<img src="${imgUrl}" class="chat-image" style="max-width:200px; max-height:200px; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" ${getImageErrorHandler()} />`;
+                    return `<img src="${imgUrl}" class="chat-image" style="width:150px; height:150px; object-fit:cover; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" ${getImageErrorHandler()} />`;
                 }
                 
                 // 处理语音消息 [voice:文字内容]
@@ -10964,9 +11117,30 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 msgDiv.dataset.msgIndex = currentIndex;
                 
                 if (msg.role === 'system') {
-                    // 系统消息（不支持长按）
+                    // 系统消息（支持长按删除和多选）
                     msgDiv.style.textAlign = 'center';
-                    msgDiv.innerHTML = `<span style="background:#fff; color:#999; font-size:12px; padding:4px 12px; border-radius:4px; border:1px solid #ddd;">${msg.content}</span>`;
+                    msgDiv.style.position = 'relative';
+                    
+                    // 复选框 (多选模式用)
+                    const checkbox = document.createElement('div');
+                    checkbox.className = 'msg-checkbox';
+                    checkbox.style.cssText = 'position:absolute; left:8px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:none; align-items:center; justify-content:center; cursor:pointer; z-index:10;';
+                    msgDiv.appendChild(checkbox);
+                    
+                    const systemSpan = document.createElement('span');
+                    systemSpan.className = 'group-system-msg-content';
+                    systemSpan.style.cssText = 'background:#fff; color:#999; font-size:12px; padding:4px 12px; border-radius:4px; border:1px solid #ddd; display:inline-block;';
+                    systemSpan.textContent = msg.content;
+                    msgDiv.appendChild(systemSpan);
+                    
+                    // 绑定长按事件，允许删除系统消息
+                    bindGroupMessageEvents(systemSpan, currentIndex, true); // true表示是系统消息
+                    // 整个行点击事件 (用于多选)
+                    msgDiv.onclick = (e) => {
+                        if (isSelectionMode) {
+                            handleGroupRowClick(currentIndex, e);
+                        }
+                    };
                     msgIndex++;
                 } else if (msg.role === 'user') {
                     // 我发的消息
@@ -11072,7 +11246,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         }
         
         // 群聊消息长按事件绑定
-        function bindGroupMessageEvents(element, index) {
+        function bindGroupMessageEvents(element, index, isSystemMsg) {
             let touchStartEvent = null;
             
             const startHandler = (e) => {
@@ -11087,7 +11261,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                             touchStartEvent.preventDefault();
                         }
                     } catch(ex) {}
-                    showGroupContextMenu(e, index, element);
+                    showGroupContextMenu(e, index, element, isSystemMsg);
                 }, 500);
             };
 
@@ -11119,15 +11293,32 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         }
         
         // 群聊消息右键菜单
-        function showGroupContextMenu(event, index, element) {
+        function showGroupContextMenu(event, index, element, isSystemMsg) {
             if (navigator.vibrate) navigator.vibrate(50);
             
             activeMsgIndex = index;
             activeGroupMsgIndex = index;
-            element.classList.add('active');
+            // 高亮：系统消息高亮整个row，普通消息高亮content
+            if (isSystemMsg) {
+                const row = element.closest('.group-message-row');
+                if (row) row.classList.add('active');
+            } else {
+                element.classList.add('active');
+            }
 
             const menu = document.getElementById('msg-context-menu');
             const overlay = document.getElementById('menu-overlay');
+            
+            // 系统消息只显示"删除"按钮，隐藏其他菜单项
+            const menuItems = menu.querySelectorAll('.context-menu-item');
+            menuItems.forEach(item => {
+                const label = item.querySelector('span')?.textContent;
+                if (isSystemMsg) {
+                    item.style.display = (label === '删除') ? 'flex' : 'none';
+                } else {
+                    item.style.display = 'flex';
+                }
+            });
             
             let clientX, clientY;
             if (event.touches && event.touches.length > 0) {
@@ -11390,12 +11581,28 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     }
                 }
                 
-                const messageText = isReceived ? (req.message || '请求添加你为好友') : `你已发送好友申请`;
+                // 解析小号昵称（如果message格式为"[小号:昵称] 原消息"）
+                let displayName = relatedChar.nick || relatedChar.name;
+                let messageText = isReceived ? (req.message || '请求添加你为好友') : `你已发送好友申请`;
+                let isAltAccount = false;
+                
+                if (req.message && req.message.startsWith('[小号:')) {
+                    // 提取小号昵称和原消息
+                    const match = req.message.match(/^\[小号:([^\]]+)\]\s*(.*)$/);
+                    if (match) {
+                        displayName = match[1]; // 小号昵称
+                        messageText = match[2] || '请求添加你为好友'; // 原消息
+                        isAltAccount = true;
+                    }
+                }
                 
                 item.innerHTML = `
                     <div style="width:48px; height:48px; border-radius:4px; ${avatarStyle}; background-size:cover; background-position:center; flex-shrink:0;"></div>
                     <div style="flex:1; min-width:0;">
-                        <div style="font-size:16px; font-weight:500; color:#333; margin-bottom:4px;">${relatedChar.name}</div>
+                        <div style="font-size:16px; font-weight:500; color:#333; margin-bottom:4px;">
+                            ${displayName}
+                            ${isAltAccount ? '<span style="font-size:11px; color:#999; background:#f0f0f0; padding:2px 6px; border-radius:4px; margin-left:6px;">小号</span>' : ''}
+                        </div>
                         <div style="font-size:12px; color:#666; line-height:1.5; white-space:pre-line; word-break:break-word;">${messageText}</div>
                     </div>
                     <div style="display:flex; align-items:center; flex-shrink:0;">
@@ -12401,7 +12608,7 @@ ${recentMessages || '（无记录）'}
             
             // 🎯 显示"对方正在输入中..."
             const chatTitleEl = document.getElementById('chat-title');
-            const originalTitle = chatTitleEl ? chatTitleEl.innerText : (char.remark || char.wx_nickname || char.name);
+            const originalTitle = chatTitleEl ? chatTitleEl.innerText : getCharDisplayName(char, getCurrentAccountId());
             if (chatTitleEl && currentChatCharId === char.id) {
                 chatTitleEl.innerText = "对方正在输入中...";
             }
@@ -12999,7 +13206,7 @@ ${smsContext ? '对方还通过短信试图联系你。' : ''}
             if (!char) return;
             
             const charPhone = char.identity?.phone || generateVirtualPhoneNumber(char.id);
-            const charName = char.remark || char.wx_nickname || char.name;
+            const charName = getCharDisplayName(char, getCurrentAccountId());
             
             // 设置短信聊天相关的全局变量
             window._smsSelectedCharId = charId;
@@ -13276,8 +13483,8 @@ ${chatContext || '（没有聊天记录）'}
             }, 60000); // 每分钟检查一次
         }
         
-        // 初始化时启动定时器
-        startWaitFriendTimer();
+        // 延迟启动定时器，避免初始化阶段卡顿
+        setTimeout(startWaitFriendTimer, 5000);
 
         // --- 低电量提醒（读取用户设备真实电量） ---
         async function initBatteryMonitor() {
@@ -13328,7 +13535,7 @@ ${chatContext || '（没有聊天记录）'}
             const char = await db.characters.get(currentChatCharId);
             if (!char || char.isOnlineFriend) return;
             
-            const charDisplayName = char.remark || char.wx_nickname || char.name;
+            const charDisplayName = getCharDisplayName(char, getCurrentAccountId());
             lowBatteryShownThisSession.add(currentChatCharId);
             showLowBatteryToast(charDisplayName, deviceBatteryLevel);
         }
@@ -13396,13 +13603,25 @@ ${chatContext || '（没有聊天记录）'}
             window.currentGroupChatId = null; // 清除群聊ID，确保是私聊模式
             const char = await db.characters.get(charId);
             
-            // 优先显示备注名，其次显示网名，最后显示原名
+            // 优先显示备注名，其次显示网名，最后显示原名（按账号隔离）
+            const _chatAid = getCurrentAccountId();
             const titleEl = document.getElementById('chat-title');
-            titleEl.innerText = char.remark || char.wx_nickname || char.name;
+            titleEl.innerText = getCharDisplayName(char, _chatAid);
             titleEl.style.cursor = 'pointer';
             titleEl.onclick = showChatDetail; // 恢复为私聊详情
             
             document.getElementById('chat-window').style.display = 'flex';
+            
+            // ✅ 应用角色的聊天主题
+            if (char.chatThemeId !== undefined) {
+                await applyThemeToChat(char.chatThemeId);
+            }
+            
+            // 进入聊天后，将底层列表设为不可见，防止透明样式穿透
+            setTimeout(() => {
+                const wechatEl = document.getElementById('wechat-page');
+                if (wechatEl) wechatEl.style.visibility = 'hidden';
+            }, 320);
             
             // 缓存当前关联的 User ID
             currentChatUserId = char.linked_user_id || null;
@@ -13584,16 +13803,18 @@ ${chatContext || '（没有聊天记录）'}
                 }
             });
             
-            // 1. 回显基本信息
-            document.getElementById('detail-char-remark').value = char.remark || '';
+            // 1. 回显基本信息（按账号隔离）
+            const _detailAid = getCurrentAccountId();
+            document.getElementById('detail-char-remark').value = getCharRemark(char, _detailAid);
             document.getElementById('detail-input-placeholder').value = char.input_placeholder || '';
             document.getElementById('detail-char-realname').innerText = `原名: ${char.name}`;
-            // 回显网名（优先用自定义网名，否则用角色名）
-            document.getElementById('detail-char-nickname').innerText = char.wx_nickname || char.name || '未设置';
+            // 回显网名（按账号隔离）
+            document.getElementById('detail-char-nickname').innerText = getCharWxNickname(char, _detailAid) || char.name || '未设置';
             // 回显个性签名
             document.getElementById('detail-char-signature').innerText = char.wx_signature || '这个人什么也没有留下';
-            if (char.avatar) {
-                document.getElementById('detail-char-avatar').style.backgroundImage = `url(${char.avatar})`;
+            const _detailAvatar = getCharAvatar(char, _detailAid);
+            if (_detailAvatar) {
+                document.getElementById('detail-char-avatar').style.backgroundImage = `url(${_detailAvatar})`;
             } else {
                 document.getElementById('detail-char-avatar').style.backgroundImage = '';
             }
@@ -13718,6 +13939,9 @@ ${chatContext || '（没有聊天记录）'}
             if (accountId) {
                 await updateSummaryCount('private', currentChatCharId, accountId);
             }
+            
+            // 11. 更新聊天主题显示
+            await updateChatDetailThemeDisplay();
         }
         
         // 选择气泡样式
@@ -13766,7 +13990,6 @@ async function saveChatDetail() {
     // 主动聊天设置
     const autoEnabled = document.getElementById('detail-auto-chat-switch').checked;
     const autoInterval = parseInt(document.getElementById('detail-auto-chat-interval').value);
-    
     // 上下文条数设置
     const contextCount = parseInt(document.getElementById('detail-context-count').value);
     
@@ -13796,7 +14019,8 @@ async function saveChatDetail() {
     const autoSummaryEnabled = document.getElementById('detail-auto-summary-switch').checked;
     const summaryInterval = parseInt(document.getElementById('detail-summary-interval').value);
 
-    char.remark = remark;
+    const accountId = getCurrentAccountId();
+    setCharRemark(char, accountId, remark);
     char.lorebookIds = lorebookIds.length > 0 ? lorebookIds : null;
     // 保留旧字段以兼容，但优先使用lorebookIds
     if (lorebookIds.length > 0) {
@@ -13828,8 +14052,8 @@ async function saveChatDetail() {
     
     await db.characters.put(char);
     
-    // 实时更新聊天标题
-    document.getElementById('chat-title').innerText = char.remark || char.wx_nickname || char.name;
+    // 实时更新聊天标题（按账号隔离）
+    document.getElementById('chat-title').innerText = getCharDisplayName(char, getCurrentAccountId());
     
     // 实时更新输入框文案
     const chatInputBox = document.getElementById('chat-input-box');
@@ -14065,7 +14289,8 @@ window.unmountUser = unmountUser;
                     document.getElementById('detail-char-avatar').style.backgroundImage = `url(${base64})`;
                     
                     const char = await db.characters.get(currentChatCharId);
-                    char.avatar = base64;
+                    const _aid = getCurrentAccountId();
+                    setCharAvatar(char, _aid, base64);
                     await db.characters.put(char);
                     
                     // 刷新聊天界面头像（如果在聊天中）
@@ -14663,15 +14888,17 @@ window.unmountUser = unmountUser;
             // 纯前端模式：不需要 WebSocket 连接
             console.log('[AutoChat] 纯前端模式：由前端定时器驱动主动消息');
             
-            // 5. 每15秒检查一次是否该发消息（立即触发，无后端轮询延迟）
-            setInterval(() => {
+            // 每15秒检查一次是否该发消息（保存timer ID防止重复叠加）
+            syncTimer = setInterval(() => {
                 checkAutoChat(); // 前端主动检查
                 checkAutoMoments(); // 朋友圈自动发布检查
             }, 15 * 1000);
             
-            // 立即检查一次
-            checkAutoChat();
-            checkAutoMoments();
+            // 延迟首次检查，避免初始化时卡顿
+            setTimeout(() => {
+                checkAutoChat();
+                checkAutoMoments();
+            }, 2000);
             
             // 6. 监听页面可见性变化，从后台切回时立即检查
             document.addEventListener('visibilitychange', function() {
@@ -14830,6 +15057,7 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 - **删除好友**：((DELETE_USER)) — 你决定删除对方。只在极度失望、想断联时使用（非常严重的操作，需符合人设）
 - **拉黑好友**：((BLOCK_USER)) — 你决定拉黑对方。只在极度愤怒、被深深伤害时使用（最严重的操作，需符合人设）
 - **让关联NPC加对方好友**：((NPC_ADD_FRIEND: NPC名字)) — 让你的朋友/家人/同事等关联角色主动加对方好友。根据剧情自然触发。
+- **打电话**：((CALL)) — 想听对方声音、有急事、情绪激动、撒娇、想对方时，真人会直接打电话
 提示：不要只发纯文字，真人聊天会穿插使用这些互动功能！可以在消息中自然地加入1-2个功能指令。
 ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库随机换一张头像（会有系统提示"XX更换了头像"）
 - **发情头邀请**：((COUPLE_AVATAR)) — 发送情头邀请给对方（亲密时刻使用，会有系统提示）
@@ -15716,6 +15944,22 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                         if (!seg) continue;
                     }
                     
+                    // 🎯 检测来电指令 ((CALL)) - 角色主动给用户打电话
+                    if (/\(\(CALL\)\)/i.test(seg)) {
+                        console.log(`[AutoChat] 📞 检测到来电指令 ((CALL))`);
+                        try {
+                            // 把 ((CALL)) 指令移除，剩余文字作为接听后的第一句话
+                            const callFirstMsg = seg.replace(/\(\(CALL\)\)/gi, '').trim();
+                            if (!_incomingCallCharId) {
+                                await showIncomingCall(char.id, callFirstMsg || '');
+                            }
+                        } catch (e) {
+                            console.error('[AutoChat] 来电处理失败:', e);
+                        }
+                        seg = seg.replace(/\(\(CALL\)\)/gi, '').trim();
+                        if (!seg) continue;
+                    }
+                    
                     // 🎯 检测戳一戳指令 ((POKE: 动作, 部位)) - 在主动聊天分段中检测
                     const pokeMatchAuto = seg.match(/\(\(POKE:\s*(.+?)\)\)/i);
                     if (pokeMatchAuto) {
@@ -15788,8 +16032,8 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                         try {
                             const newNickname = nicknameMatchAuto[1].trim();
                             const freshChar = await db.characters.get(char.id);
-                            const oldNickname = freshChar.wx_nickname || freshChar.name;
-                            freshChar.wx_nickname = newNickname;
+                            const oldNickname = getCharWxNickname(freshChar, accountId) || freshChar.name;
+                            setCharWxNickname(freshChar, accountId, newNickname);
                             await db.characters.put(freshChar);
                             
                             const nicknameText = `${oldNickname} 将网名改为 "${newNickname}"`;
@@ -16494,7 +16738,7 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
                 renderChatBody(char);
             } else {
                 // 没有引用，只追加消息，不重新渲染
-                await appendMessageToUI('user', text, char.avatar);
+                await appendMessageToUI('user', text, getCharAvatar(char, getCurrentAccountId()));
             }
             
             // ✅ 如果是联机好友，发送消息到服务器
@@ -16630,7 +16874,7 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
                     if (isAdmin) roleText += ' [管理员]';
                     if (isMuted) roleText += ' [已禁言 - 不能发言]';
                     const nicknameText = nickname ? ` (群昵称: ${nickname})` : '';
-                    return `- ${char.remark || char.wx_nickname || char.name}${nicknameText}${roleText}: ${char.description || '无特别设定'}`;
+                    return `- ${getCharDisplayName(char, getCurrentAccountId())}${nicknameText}${roleText}: ${char.description || '无特别设定'}`;
                 }).filter(Boolean).join('\n');
                 
                 // 获取世界书上下文（合并群聊的世界书和所有成员的世界书）
@@ -16943,10 +17187,11 @@ ${groupContextStr}
                             // 查找被踢者
                             let targetId = null;
                             let targetName = '';
+                            const _grpAid = getCurrentAccountId();
                             for (const [memberId, char] of Object.entries(memberMap)) {
-                                if (char.name === reply.target || char.remark === reply.target || char.nick === reply.target) {
+                                if (char.name === reply.target || getCharRemark(char, _grpAid) === reply.target || char.nick === reply.target) {
                                     targetId = parseInt(memberId);
-                                    targetName = char.remark || char.wx_nickname || char.name;
+                                    targetName = getCharDisplayName(char, _grpAid);
                                     break;
                                 }
                             }
@@ -16961,7 +17206,7 @@ ${groupContextStr}
                             
                             // 执行踢出
                             updatedGroup.memberIds = updatedGroup.memberIds.filter(id => id !== targetId);
-                            const operatorName = memberMap[senderId]?.remark || memberMap[senderId]?.name || reply.name;
+                            const operatorName = getCharDisplayName(memberMap[senderId], _grpAid) || reply.name;
                             
                             updatedGroup.chat_history.push({
                                 role: 'system',
@@ -16982,10 +17227,11 @@ ${groupContextStr}
                             // 查找被禁言者
                             let targetId = null;
                             let targetName = '';
+                            const _muteAid = getCurrentAccountId();
                             for (const [memberId, char] of Object.entries(memberMap)) {
-                                if (char.name === reply.target || char.remark === reply.target || char.nick === reply.target) {
+                                if (char.name === reply.target || getCharRemark(char, _muteAid) === reply.target || char.nick === reply.target) {
                                     targetId = parseInt(memberId);
-                                    targetName = char.remark || char.wx_nickname || char.name;
+                                    targetName = getCharDisplayName(char, _muteAid);
                                     break;
                                 }
                             }
@@ -17295,6 +17541,10 @@ ${groupContextStr}
         }
 
         function hideChatWindow() {
+            // 关闭聊天前，先让微信列表重新可见（避免滑动时看到空白）
+            const wechatEl = document.getElementById('wechat-page');
+            if (wechatEl) wechatEl.style.visibility = '';
+            
             const win = document.getElementById('chat-window');
             win.style.transform = 'translateX(100%)';
             setTimeout(() => {
@@ -17392,7 +17642,7 @@ ${groupContextStr}
             
             // 如果整个消息就是一个图片URL，直接渲染为图片
             if (isImageUrl(finalClean)) {
-                return `<img src="${finalClean}" class="chat-image" ${getImageErrorHandler()} />`;
+                return `<img src="${finalClean}" class="chat-image" style="width:150px; height:150px; object-fit:cover; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" ${getImageErrorHandler()} />`;
             }
             
             // 检查是否包含[img:...]格式的图片标记
@@ -17417,7 +17667,7 @@ ${groupContextStr}
                     let imgUrl = sanitizeMessage(match[1]);
                     // 🔥 额外保护：再次确保没有img:前缀
                     imgUrl = imgUrl.replace(/^img:/, '');
-                    html += `<img src="${imgUrl}" class="chat-image" ${getImageErrorHandler()} />`;
+                    html += `<img src="${imgUrl}" class="chat-image" style="width:150px; height:150px; object-fit:cover; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" ${getImageErrorHandler()} />`;
                     
                     lastIndex = match.index + match[0].length;
                 });
@@ -17445,7 +17695,7 @@ ${groupContextStr}
                     cleanUrl = cleanUrl.replace(/^img:/, '');
                     // 检查是否是图片URL
                     if (isImageUrl(cleanUrl)) {
-                        return `<img src="${cleanUrl}" class="chat-image" ${getImageErrorHandler()} />`;
+                        return `<img src="${cleanUrl}" class="chat-image" style="width:150px; height:150px; object-fit:cover; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" ${getImageErrorHandler()} />`;
                     } else {
                         // 普通链接
                         return `<a href="${cleanUrl}" target="_blank" style="color:#007aff; word-break:break-all;">${escapeHtml(cleanUrl)}</a>`;
@@ -17585,9 +17835,26 @@ ${groupContextStr}
             // 🎯 特殊处理：系统消息（如戳一戳）
             if (msg.role === 'system') {
                 row.className = 'message-system';
-                row.style.cssText = 'text-align:center; padding:8px 16px; margin:8px 0;';
-                row.innerHTML = `<span style="background:#fff; color:#999; font-size:12px; padding:4px 12px; border-radius:4px; border:1px solid #ddd;">${msg.content}</span>`;
+                row.style.cssText = 'text-align:center; padding:8px 16px; margin:8px 0; position:relative;';
                 row.dataset.index = index;
+                
+                // 复选框 (多选模式用)
+                const checkbox = document.createElement('div');
+                checkbox.className = 'msg-checkbox';
+                checkbox.style.cssText = 'position:absolute; left:8px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:none; align-items:center; justify-content:center; cursor:pointer; z-index:10;';
+                row.appendChild(checkbox);
+                
+                const systemSpan = document.createElement('span');
+                systemSpan.className = 'system-msg-content';
+                systemSpan.style.cssText = 'background:#fff; color:#999; font-size:12px; padding:4px 12px; border-radius:4px; border:1px solid #ddd; display:inline-block;';
+                systemSpan.textContent = msg.content;
+                row.appendChild(systemSpan);
+                
+                // 绑定长按事件，允许删除系统消息
+                bindMessageEvents(systemSpan, index, true); // true表示是系统消息
+                // 整个行点击事件 (用于多选)
+                row.onclick = (e) => handleRowClick(index, e);
+                
                 return row;
             }
             
@@ -17842,7 +18109,7 @@ ${groupContextStr}
                 
                 // 如果包含图片，在语音气泡下方添加图片（使用chat-image类）
                 if (hasImage) {
-                    voiceHtml += `<div style="margin-top:8px;"><img src="${imgUrl}" class="chat-image" ${getImageErrorHandler()} /></div>`;
+                    voiceHtml += `<div style="margin-top:8px;"><img src="${imgUrl}" class="chat-image" style="width:150px; height:150px; object-fit:cover; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" ${getImageErrorHandler()} /></div>`;
                 }
                 
                 content.innerHTML = voiceHtml;
@@ -17917,7 +18184,7 @@ ${groupContextStr}
             else if (msg.content.startsWith('[img:')) {
                 // 直接提取URL，不要用 sanitizeMessage
                 const imgUrl = msg.content.substring(5, msg.content.length - 1).trim();
-                content.innerHTML = `<img src="${imgUrl}" class="chat-image" onerror="this.onerror=null; this.style.cssText='width:80px; height:80px; display:flex; align-items:center; justify-content:center; background:#f5f5f5; border-radius:8px;'; this.outerHTML='<div style=\\'width:80px; height:80px; display:flex; align-items:center; justify-content:center; background:#f5f5f5; border-radius:8px; color:#999; font-size:12px;\\'>图片加载失败</div>';" />`;
+                content.innerHTML = `<img src="${imgUrl}" class="chat-image" style="width:150px; height:150px; object-fit:cover; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" onerror="this.onerror=null; this.style.cssText='width:150px; height:150px; display:flex; align-items:center; justify-content:center; background:#f5f5f5; border-radius:8px;'; this.outerHTML='<div style=\\'width:150px; height:150px; display:flex; align-items:center; justify-content:center; background:#f5f5f5; border-radius:8px; color:#999; font-size:12px;\\'>图片加载失败</div>';" />`;
                 // 🔧 添加 image-only 类，移除气泡样式
                 content.classList.add('image-only');
             }
@@ -18008,7 +18275,7 @@ ${groupContextStr}
                 body.appendChild(timeStamp);
             }
             
-            const row = createMessageElement(msg, msgIndex, char.avatar, userAvatarUrl, prevMsgTime, char.name);
+            const row = createMessageElement(msg, msgIndex, getCharAvatar(char, getCurrentAccountId()), userAvatarUrl, prevMsgTime, getCharDisplayName(char, getCurrentAccountId()));
             body.appendChild(row);
             
             // 更新缓存计数
@@ -18027,6 +18294,9 @@ ${groupContextStr}
             const body = document.getElementById('chat-body');
             const accountId = getCurrentAccountId();
             const history = getChatHistory(char, accountId);
+            // 按账号隔离的显示属性
+            const _dAvatar = getCharAvatar(char, accountId);
+            const _dName = getCharDisplayName(char, accountId);
             
             // 🎯 优化：如果是同一个角色且消息没有变化，跳过渲染
             if (!forceRender && 
@@ -18071,8 +18341,8 @@ ${groupContextStr}
                 body.innerHTML = `
                     <div style="display:flex; flex-direction:column; height:100%; padding:20px;">
                         <div style="text-align:center; padding:20px 0; border-bottom:1px solid #f0f0f0;">
-                            <div style="width:60px; height:60px; border-radius:8px; background-image:url(${char.avatar}); background-size:cover; background-position:center; margin:0 auto 12px;"></div>
-                            <div style="font-size:16px; font-weight:600; margin-bottom:6px; color:#333;">${char.name}</div>
+                            <div style="width:60px; height:60px; border-radius:8px; background-image:url(${_dAvatar}); background-size:cover; background-position:center; margin:0 auto 12px;"></div>
+                            <div style="font-size:16px; font-weight:600; margin-bottom:6px; color:#333;">${_dName}</div>
                             <div style="font-size:13px; color:#999;">你已拉黑该好友</div>
                         </div>
                         
@@ -18117,8 +18387,8 @@ ${groupContextStr}
                 body.innerHTML = `
                     <div style="display:flex; flex-direction:column; height:100%; padding:20px;">
                         <div style="text-align:center; padding:20px 0; border-bottom:1px solid #f0f0f0;">
-                            <div style="width:60px; height:60px; border-radius:8px; background-image:url(${char.avatar}); background-size:cover; background-position:center; margin:0 auto 12px;"></div>
-                            <div style="font-size:16px; font-weight:600; margin-bottom:6px; color:#333;">${char.name}</div>
+                            <div style="width:60px; height:60px; border-radius:8px; background-image:url(${_dAvatar}); background-size:cover; background-position:center; margin:0 auto 12px;"></div>
+                            <div style="font-size:16px; font-weight:600; margin-bottom:6px; color:#333;">${_dName}</div>
                             <div style="font-size:13px; color:#999;">你已删除该好友</div>
                         </div>
                         
@@ -18169,8 +18439,8 @@ ${groupContextStr}
                 // 陌生人，显示发送好友申请界面
                 body.innerHTML = `
                     <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; padding:40px 20px; text-align:center;">
-                        <div style="width:80px; height:80px; border-radius:8px; background-image:url(${char.avatar}); background-size:cover; background-position:center; margin-bottom:20px;"></div>
-                        <div style="font-size:18px; font-weight:600; margin-bottom:10px; color:#333;">${char.name}</div>
+                        <div style="width:80px; height:80px; border-radius:8px; background-image:url(${getCharAvatar(char, getCurrentAccountId())}); background-size:cover; background-position:center; margin-bottom:20px;"></div>
+                        <div style="font-size:18px; font-weight:600; margin-bottom:10px; color:#333;">${getCharDisplayName(char, getCurrentAccountId())}</div>
                         <div style="font-size:14px; color:#999; margin-bottom:30px;">你还不是对方的好友，无法发送消息</div>
                         <button onclick="showAddFriendToCurrentChat()" style="background:var(--ins-pink); color:#fff; border:none; padding:12px 40px; border-radius:8px; font-size:16px; font-weight:600;">发送好友申请</button>
                     </div>
@@ -18227,13 +18497,23 @@ ${groupContextStr}
                     body.appendChild(timeStamp);
                 }
                 
-                const row = createMessageElement(msg, absoluteIndex, char.avatar, userAvatarUrl, prevMsgTime, char.name);
+                const row = createMessageElement(msg, absoluteIndex, _dAvatar, userAvatarUrl, prevMsgTime, _dName);
                 
-                // 如果在多选模式，恢复选中状态（系统消息除外）
-                if (isSelectionMode && msg.role !== 'system') {
+                // 如果在多选模式，恢复选中状态（包括系统消息）
+                if (isSelectionMode) {
                     const cb = row.querySelector('.msg-checkbox');
-                    if (cb && selectedIndices.has(absoluteIndex)) {
-                        cb.classList.add('checked');
+                    if (cb) {
+                        cb.style.display = 'flex';
+                        if (selectedIndices.has(absoluteIndex)) {
+                            cb.classList.add('checked');
+                            cb.style.background = 'var(--ins-pink)';
+                            cb.style.borderColor = 'var(--ins-pink)';
+                            cb.innerHTML = '<svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:#fff;stroke-width:3;fill:none;"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+                        }
+                        // 系统消息需要添加padding
+                        if (msg.role === 'system') {
+                            row.style.paddingLeft = '40px';
+                        }
                     }
                 }
                 
@@ -18382,7 +18662,9 @@ ${groupContextStr}
                     fragment.appendChild(timeStamp);
                 }
                 
-                const row = createMessageElement(msg, absoluteIndex, char.avatar, userAvatarUrl, prevMsgTime, char.name);
+                const _ldAvatar = getCharAvatar(char, accountId);
+                const _ldName = getCharDisplayName(char, accountId);
+                const row = createMessageElement(msg, absoluteIndex, _ldAvatar, userAvatarUrl, prevMsgTime, _ldName);
                 fragment.appendChild(row);
             });
             
@@ -18469,7 +18751,7 @@ ${groupContextStr}
         }
 
         // --- 核心交互：长按与菜单 ---
-        function bindMessageEvents(element, index) {
+        function bindMessageEvents(element, index, isSystemMsg) {
             let touchMoved = false;
             let touchStartEvent = null;
             
@@ -18486,7 +18768,7 @@ ${groupContextStr}
                             touchStartEvent.preventDefault();
                         }
                     } catch(ex) {}
-                    showContextMenu(e, index, element);
+                    showContextMenu(e, index, element, isSystemMsg);
                 }, 500); // 500ms 长按触发
             };
 
@@ -18566,15 +18848,32 @@ ${groupContextStr}
             }
         }
 
-        function showContextMenu(event, index, element) {
+        function showContextMenu(event, index, element, isSystemMsg) {
             // 震动反馈 (Android)
             if (navigator.vibrate) navigator.vibrate(50);
             
             activeMsgIndex = index;
-            element.classList.add('active'); // 高亮
+            // 高亮：系统消息高亮整个row，普通消息高亮content
+            if (isSystemMsg) {
+                const row = element.closest('.message-system') || element.closest('.message-row');
+                if (row) row.classList.add('active');
+            } else {
+                element.classList.add('active');
+            }
 
             const menu = document.getElementById('msg-context-menu');
             const overlay = document.getElementById('menu-overlay');
+            
+            // 系统消息只显示"删除"按钮，隐藏其他菜单项
+            const menuItems = menu.querySelectorAll('.context-menu-item');
+            menuItems.forEach(item => {
+                const label = item.querySelector('span')?.textContent;
+                if (isSystemMsg) {
+                    item.style.display = (label === '删除') ? 'flex' : 'none';
+                } else {
+                    item.style.display = 'flex';
+                }
+            });
             
             // 计算坐标
             let clientX, clientY;
@@ -18633,8 +18932,8 @@ ${groupContextStr}
             menu.style.display = 'none';
             overlay.style.display = 'none';
             
-            // 移除高亮
-            document.querySelectorAll('.message-content.active').forEach(el => el.classList.remove('active'));
+            // 移除高亮（包括系统消息和普通消息）
+            document.querySelectorAll('.message-content.active, .message-system.active, .message-row.active').forEach(el => el.classList.remove('active'));
         }
 
         // --- 菜单功能实现 ---
@@ -18930,7 +19229,7 @@ ${groupContextStr}
             let displayContent = content;
             if (content.startsWith('[img:')) {
                 const imgUrl = content.substring(5, content.length - 1).trim();
-                displayContent = `<img src="${imgUrl}" style="max-width:100%; border-radius:8px;">`;
+                displayContent = `<img src="${imgUrl}" style="width:150px; height:150px; object-fit:cover; border-radius:8px;">`;
             } else if (content.startsWith('[voice:')) {
                 displayContent = `🎤 语音消息: ${content.substring(7, content.length - 1)}`;
             }
@@ -19002,7 +19301,7 @@ ${groupContextStr}
                     const myChar = currentMyCharId ? await db.characters.get(parseInt(currentMyCharId)) : null;
                     quoteName = myChar?.name || '我';
                 } else {
-                    quoteName = char.remark || char.wx_nickname || char.name;
+                    quoteName = getCharDisplayName(char, accountId);
                 }
                 
                 quoteContent = getQuoteDisplayContent(msg.content, msg.type);
@@ -19112,18 +19411,45 @@ ${groupContextStr}
             document.getElementById('selection-bar').style.display = 'flex';
             document.getElementById('chat-footer').style.display = 'none';
             
-            // 为群聊消息添加checkbox
+            // 为私聊消息添加checkbox（包括系统消息）
+            if (currentChatCharId) {
+                document.querySelectorAll('.message-row, .message-system').forEach((row) => {
+                    const idx = parseInt(row.dataset.index);
+                    if (isNaN(idx)) return;
+                    
+                    row.classList.add('selection-mode');
+                    if (row.classList.contains('message-system')) {
+                        row.style.paddingLeft = '40px';
+                    }
+                    
+                    let cb = row.querySelector('.msg-checkbox');
+                    if (!cb) {
+                        cb = document.createElement('div');
+                        cb.className = 'msg-checkbox';
+                        cb.style.cssText = 'position:absolute; left:8px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:10;';
+                        row.style.position = 'relative';
+                        row.insertBefore(cb, row.firstChild);
+                    }
+                    cb.style.display = 'flex';
+                });
+            }
+            
+            // 为群聊消息添加checkbox（包括系统消息）
             if (window.currentGroupChatId) {
                 document.querySelectorAll('.group-message-row').forEach((row) => {
                     const idx = parseInt(row.dataset.msgIndex);
-                    if (row.querySelector('.group-msg-content')) {
+                    if (isNaN(idx)) return;
+                    
+                    // 检查是否是系统消息或普通消息
+                    const hasContent = row.querySelector('.group-msg-content') || row.querySelector('.group-system-msg-content');
+                    if (hasContent) {
                         row.classList.add('selection-mode');
                         row.style.paddingLeft = '40px';
                         let cb = row.querySelector('.msg-checkbox');
                         if (!cb) {
                             cb = document.createElement('div');
                             cb.className = 'msg-checkbox';
-                            cb.style.cssText = 'position:absolute; left:8px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer;';
+                            cb.style.cssText = 'position:absolute; left:8px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:10;';
                             cb.onclick = (e) => {
                                 e.stopPropagation();
                                 if (selectedIndices.has(idx)) {
@@ -19160,9 +19486,12 @@ ${groupContextStr}
             document.getElementById('selection-bar').style.display = 'none';
             document.getElementById('chat-footer').style.display = 'flex';
             
-            // 私聊消息
-            document.querySelectorAll('.message-row').forEach(row => {
+            // 私聊消息（包括系统消息）
+            document.querySelectorAll('.message-row, .message-system').forEach(row => {
                 row.classList.remove('selection-mode', 'selected');
+                if (row.classList.contains('message-system')) {
+                    row.style.paddingLeft = '';
+                }
             });
             // 群聊消息
             document.querySelectorAll('.group-message-row').forEach(row => {
@@ -19182,15 +19511,47 @@ ${groupContextStr}
             if (!isSelectionMode) return;
             
             // 切换选中状态
-            const row = e.currentTarget; // .message-row
+            const row = e.currentTarget; // .message-row 或 .message-system
             const checkbox = row.querySelector('.msg-checkbox');
+            if (!checkbox) return;
             
             if (selectedIndices.has(index)) {
                 selectedIndices.delete(index);
                 checkbox.classList.remove('checked');
+                checkbox.style.background = '';
+                checkbox.style.borderColor = '#ccc';
+                checkbox.innerHTML = '';
             } else {
                 selectedIndices.add(index);
                 checkbox.classList.add('checked');
+                checkbox.style.background = 'var(--ins-pink)';
+                checkbox.style.borderColor = 'var(--ins-pink)';
+                checkbox.innerHTML = '<svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:#fff;stroke-width:3;fill:none;"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+            }
+            
+            updateDeleteBtn();
+        }
+        
+        function handleGroupRowClick(index, e) {
+            if (!isSelectionMode) return;
+            
+            // 切换选中状态
+            const row = e.currentTarget; // .group-message-row
+            const checkbox = row.querySelector('.msg-checkbox');
+            if (!checkbox) return;
+            
+            if (selectedIndices.has(index)) {
+                selectedIndices.delete(index);
+                checkbox.classList.remove('checked');
+                checkbox.style.background = '';
+                checkbox.style.borderColor = '#ccc';
+                checkbox.innerHTML = '';
+            } else {
+                selectedIndices.add(index);
+                checkbox.classList.add('checked');
+                checkbox.style.background = 'var(--ins-pink)';
+                checkbox.style.borderColor = 'var(--ins-pink)';
+                checkbox.innerHTML = '<svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:#fff;stroke-width:3;fill:none;"><polyline points="20 6 9 17 4 12"></polyline></svg>';
             }
             
             updateDeleteBtn();
@@ -19494,7 +19855,7 @@ ${groupContextStr}
             await setChatHistory(char, accountId, history);
             
             // ✅ 优化：只追加新消息，不重新渲染整个聊天
-            await appendMessageToUI('user', msgContent, char.avatar);
+            await appendMessageToUI('user', msgContent, getCharAvatar(char, getCurrentAccountId()));
         }
 
         // 发送真实图片消息
@@ -19550,7 +19911,7 @@ ${groupContextStr}
                 await setChatHistory(char, accountId, history);
                 
                 // ✅ 优化：只追加新消息，不重新渲染整个聊天
-                await appendMessageToUI('user', msgContent, char.avatar);
+                await appendMessageToUI('user', msgContent, getCharAvatar(char, getCurrentAccountId()));
                 
                 // ✅ 如果是联机好友，发送图片到服务器
                 if (char.isOnlineFriend && char.onlineData?.wx_account) {
@@ -20027,7 +20388,7 @@ ${groupContextStr}
                     await setChatHistory(char, accountId, history);
                     
                     // ✅ 优化：只追加新消息，不重新渲染整个聊天
-                    await appendMessageToUI('user', msgContent, char.avatar);
+                    await appendMessageToUI('user', msgContent, getCharAvatar(char, getCurrentAccountId()));
                     
                     // ✅ 不再自动触发 AI 回复，需要用户点击"接受回复"按钮
                     // triggerAiReply();
@@ -20159,7 +20520,7 @@ ${groupContextStr}
             await setChatHistory(char, accountId, history);
             
             // ✅ 优化：只追加新消息，不重新渲染整个聊天
-            await appendMessageToUI('user', msgContent, char.avatar);
+            await appendMessageToUI('user', msgContent, getCharAvatar(char, getCurrentAccountId()));
             
             // ✅ 移除自动触发AI回复
             // triggerAiReply();
@@ -20430,6 +20791,20 @@ ${groupContextStr}
                             for (let i = 0; i < smsTimes.length; i++) {
                                 showBlockedSmsNotification(char, smsTimes[i].content, smsTimes[i].time);
                             }
+                        } else if (action.type === 'FRIEND_REQUEST') {
+                            const message = action.params.message || '';
+                            console.log(`[BlockedContact] 生成小号好友申请`);
+                            
+                            // 在时间段内随机选择一个时间点
+                            const requestTime = actionBaseTime + Math.random() * elapsedMs;
+                            
+                            // 创建好友申请记录（返回小号昵称）
+                            const altNickname = await createBlockedFriendRequest(char, myChar, accountId, requestTime, message);
+                            
+                            // 显示好友申请通知（传入小号昵称）
+                            if (altNickname) {
+                                showBlockedFriendRequestNotification(char, requestTime, message, altNickname);
+                            }
                         }
                     }
                     
@@ -20572,7 +20947,7 @@ ${recentSms.length > 0 ? `在之前的时间里，你已经尝试联系过对方
 4. 随着时间推移和对方的持续不回应，你的情绪应该有明显的变化和层次（比如从愤怒到悲伤，从质问到哀求，从不甘到释然，或者从哀求到愤怒...）
 
 【输出要求】
-根据你的性格和与对方的关系，决定是否会通过电话/短信联系对方。
+根据你的性格和与对方的关系，决定是否会通过电话/短信联系对方，或者用小号加对方好友。
 
 如果你会联系，按以下格式输出：
 
@@ -20587,6 +20962,9 @@ messages:
 - 第3条短信（继续推进情绪）
 ...（共${suggestedSmsCount}条）
 
+[FRIEND_REQUEST]
+message: 好友申请附言（可选，如果不写则使用默认附言）
+
 【短信内容要求】
 - 每条短信要简短有力，像真实短信一样（5-20字最佳）
 - 情绪要有层次和变化，不要一成不变
@@ -20595,6 +20973,12 @@ messages:
 - 可以有错别字、语气词、表情符号，更真实
 - 如果关系亲密，可以更激烈；如果关系一般，可以更克制
 ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已经发送过的内容！要基于之前的短信继续推进情绪和对话，展现情绪的变化和发展` : ''}
+
+【小号加好友说明】
+- 如果你决定用小号加对方好友，可以添加[FRIEND_REQUEST]指令
+- 这表示你会创建一个新的微信号（小号）来尝试加对方为好友
+- 小号的昵称和头像会和你本人不同，但性格和目的是一致的
+- 如果选择用小号加好友，可以添加message参数作为申请附言
 
 如果你决定不联系（比如你很骄傲/无所谓/已经释然/或者已经说完想说的话），直接返回：不联系`;
 
@@ -20607,7 +20991,7 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
             return response.trim();
         }
 
-        // 解析指令文本（新版本，支持多条短信）
+        // 解析指令文本（新版本，支持多条短信和好友申请）
         function parseContactInstructionsV2(text) {
             const lines = text.split('\n');
             const actions = [];
@@ -20636,6 +21020,16 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
                         actions.push(currentAction);
                     }
                     currentAction = { type: 'SMS', params: {} };
+                    collectingMessages = false;
+                    messages.length = 0;
+                } else if (line === '[FRIEND_REQUEST]') {
+                    if (currentAction) {
+                        if (collectingMessages && messages.length > 0) {
+                            currentAction.params.messages = messages.slice();
+                        }
+                        actions.push(currentAction);
+                    }
+                    currentAction = { type: 'FRIEND_REQUEST', params: {} };
                     collectingMessages = false;
                     messages.length = 0;
                 } else if (currentAction) {
@@ -20763,6 +21157,59 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
                 console.error('[BlockedMessage] Error generating message:', error);
             }
         }
+
+        // 生成小号昵称（统一函数，确保一致性）
+        function generateAltNickname(char) {
+            const altNames = [
+                `${char.name}的小号`,
+                `${char.nick || char.name}的另一个号`,
+                `小${char.name}`,
+                `${char.name}2`,
+                `${char.nick || char.name}的备用号`
+            ];
+            return altNames[Math.floor(Math.random() * altNames.length)];
+        }
+
+        // 创建被拉黑角色的小号好友申请记录
+        async function createBlockedFriendRequest(char, myChar, accountId, requestTime, message = '') {
+            try {
+                // 生成小号的昵称
+                const altNickname = generateAltNickname(char);
+                
+                // 如果没有附言，生成一个默认的
+                let requestMessage = message;
+                if (!requestMessage) {
+                    const defaultMessages = [
+                        '你好，可以加个好友吗？',
+                        '通过一下',
+                        '加个好友',
+                        '你好',
+                        '认识一下'
+                    ];
+                    requestMessage = defaultMessages[Math.floor(Math.random() * defaultMessages.length)];
+                }
+                
+                // 创建好友申请记录（将小号昵称附加到message中，格式："[小号:昵称] 原消息"）
+                const fullMessage = `[小号:${altNickname}] ${requestMessage}`;
+                
+                await db.friend_requests.add({
+                    fromCharId: char.id,
+                    toAccountId: accountId,
+                    status: 'pending',
+                    time: requestTime,
+                    message: fullMessage
+                });
+                
+                console.log(`[BlockedFriendRequest] 创建小号好友申请: ${altNickname} -> ${myChar.name}`);
+                
+                // 返回小号昵称，供通知使用
+                return altNickname;
+                
+            } catch (error) {
+                console.error('[BlockedFriendRequest] Error creating friend request:', error);
+                return null;
+            }
+        }
         
         // 辅助函数：生成虚拟电话号码（已在全局作用域定义，这里不再重复定义）
 
@@ -20782,37 +21229,40 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
             const timeStr = formatCallTimeDetailed(callTime);
             const charName = char.nick || char.name;
             
-            // 创建通知元素 - 新样式：宽90%，高40px，无阴影
+            // 创建通知元素 - 放大样式：宽95%，高60px
             const notification = document.createElement('div');
             notification.style.cssText = `
                 position: fixed;
                 top: 20px;
                 left: 50%;
                 transform: translateX(-50%) translateY(-100px);
-                width: 90%;
-                height: 40px;
+                width: 95%;
+                max-width: 500px;
+                height: 60px;
                 background: rgba(255, 255, 255, 0.95);
                 backdrop-filter: blur(10px);
                 border-radius: 12px;
                 display: flex;
                 align-items: center;
-                padding: 0 12px;
-                gap: 10px;
+                padding: 0 16px;
+                gap: 12px;
                 z-index: 99999;
                 transition: transform 0.3s ease;
                 border: 1px solid rgba(0,0,0,0.1);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             `;
             
+            const _notifAvatar = getCharAvatar(char, getCurrentAccountId());
             notification.innerHTML = `
-                <div style="width:32px;height:32px;border-radius:50%;background-image:url(${char.avatar || ''});background-size:cover;background-position:center;background-color:#ddd;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px;font-weight:600;color:#666;">
-                    ${!char.avatar ? charName.charAt(0).toUpperCase() : ''}
+                <div style="width:40px;height:40px;border-radius:50%;background-image:url(${_notifAvatar || ''});background-size:cover;background-position:center;background-color:#ddd;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:16px;font-weight:600;color:#666;">
+                    ${!_notifAvatar ? charName.charAt(0).toUpperCase() : ''}
                 </div>
-                <div style="flex:1;min-width:0;display:flex;align-items:center;gap:8px;">
-                    <span style="font-size:14px;font-weight:600;color:#333;">${charName}</span>
-                    <span style="font-size:12px;color:#666;">${timeStr}</span>
-                    <span style="font-size:12px;color:#ff3b30;">未接电话</span>
+                <div style="flex:1;min-width:0;display:flex;align-items:center;gap:10px;">
+                    <span style="font-size:16px;font-weight:600;color:#333;">${charName}</span>
+                    <span style="font-size:13px;color:#666;">${timeStr}</span>
+                    <span style="font-size:13px;color:#ff3b30;font-weight:500;">未接电话</span>
                 </div>
-                <svg viewBox="0 0 24 24" style="width:20px;height:20px;stroke:#ff3b30;fill:none;flex-shrink:0;"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                <svg viewBox="0 0 24 24" style="width:24px;height:24px;stroke:#ff3b30;fill:none;flex-shrink:0;"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
             `;
             
             document.body.appendChild(notification);
@@ -20861,39 +21311,42 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
             const timeStr = formatCallTimeDetailed(smsTime);
             const charName = char.nick || char.name;
             
-            // 创建通知元素 - 新样式：宽90%，高40px，无阴影
+            // 创建通知元素 - 放大样式：宽95%，高60px
             const notification = document.createElement('div');
             notification.style.cssText = `
                 position: fixed;
                 top: 20px;
                 left: 50%;
                 transform: translateX(-50%) translateY(-100px);
-                width: 90%;
-                height: 40px;
+                width: 95%;
+                max-width: 500px;
+                height: 60px;
                 background: rgba(255, 255, 255, 0.95);
                 backdrop-filter: blur(10px);
                 border-radius: 12px;
                 display: flex;
                 align-items: center;
-                padding: 0 12px;
-                gap: 10px;
+                padding: 0 16px;
+                gap: 12px;
                 z-index: 99999;
                 transition: transform 0.3s ease;
                 border: 1px solid rgba(0,0,0,0.1);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             `;
             
+            const _notifAv2 = getCharAvatar(char, getCurrentAccountId());
             notification.innerHTML = `
-                <div style="width:32px;height:32px;border-radius:50%;background-image:url(${char.avatar || ''});background-size:cover;background-position:center;background-color:#ddd;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px;font-weight:600;color:#666;">
-                    ${!char.avatar ? charName.charAt(0).toUpperCase() : ''}
+                <div style="width:40px;height:40px;border-radius:50%;background-image:url(${_notifAv2 || ''});background-size:cover;background-position:center;background-color:#ddd;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:16px;font-weight:600;color:#666;">
+                    ${!_notifAv2 ? charName.charAt(0).toUpperCase() : ''}
                 </div>
                 <div style="flex:1;min-width:0;overflow:hidden;">
-                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
-                        <span style="font-size:14px;font-weight:600;color:#333;">${charName}</span>
-                        <span style="font-size:12px;color:#666;">${timeStr}</span>
+                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+                        <span style="font-size:16px;font-weight:600;color:#333;">${charName}</span>
+                        <span style="font-size:13px;color:#666;">${timeStr}</span>
                     </div>
-                    <div style="font-size:12px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${content}</div>
+                    <div style="font-size:13px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${content}</div>
                 </div>
-                <svg viewBox="0 0 24 24" style="width:20px;height:20px;stroke:#007AFF;fill:none;flex-shrink:0;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                <svg viewBox="0 0 24 24" style="width:24px;height:24px;stroke:#007AFF;fill:none;flex-shrink:0;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
             `;
             
             document.body.appendChild(notification);
@@ -20914,6 +21367,73 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
                     processSmsNotificationQueue();
                 }, 300);
             }, 1000);
+        }
+
+        // 显示被拉黑角色的小号好友申请通知
+        function showBlockedFriendRequestNotification(char, requestTime, message = '', altNickname = null) {
+            const timeStr = formatCallTimeDetailed(requestTime);
+            const charName = char.nick || char.name;
+            
+            // 如果没有传入小号昵称，生成一个（但应该总是传入）
+            if (!altNickname) {
+                altNickname = generateAltNickname(char);
+            }
+            
+            // 创建通知元素 - 放大样式：宽95%，高60px
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                left: 50%;
+                transform: translateX(-50%) translateY(-100px);
+                width: 95%;
+                max-width: 500px;
+                height: 60px;
+                background: rgba(255, 255, 255, 0.95);
+                backdrop-filter: blur(10px);
+                border-radius: 12px;
+                display: flex;
+                align-items: center;
+                padding: 0 16px;
+                gap: 12px;
+                z-index: 99999;
+                transition: transform 0.3s ease;
+                border: 1px solid rgba(0,0,0,0.1);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            `;
+            
+            const _notifAv3 = getCharAvatar(char, getCurrentAccountId());
+            notification.innerHTML = `
+                <div style="width:40px;height:40px;border-radius:50%;background-image:url(${_notifAv3 || ''});background-size:cover;background-position:center;background-color:#ddd;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:16px;font-weight:600;color:#666;">
+                    ${!_notifAv3 ? altNickname.charAt(0).toUpperCase() : ''}
+                </div>
+                <div style="flex:1;min-width:0;overflow:hidden;">
+                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+                        <span style="font-size:16px;font-weight:600;color:#333;">${altNickname}</span>
+                        <span style="font-size:13px;color:#666;">${timeStr}</span>
+                        <span style="font-size:12px;color:#999;background:#f0f0f0;padding:2px 6px;border-radius:4px;">小号</span>
+                    </div>
+                    <div style="font-size:13px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${message || '请求添加你为好友'}</div>
+                </div>
+                <svg viewBox="0 0 24 24" style="width:24px;height:24px;stroke:#34C759;fill:none;flex-shrink:0;"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><path d="M20 8v6M23 11h-6"></path></svg>
+            `;
+            
+            document.body.appendChild(notification);
+            
+            // 显示动画
+            setTimeout(() => {
+                notification.style.transform = 'translateX(-50%) translateY(0)';
+            }, 10);
+            
+            // 3秒后自动消失
+            setTimeout(() => {
+                notification.style.transform = 'translateX(-50%) translateY(-100px)';
+                setTimeout(() => {
+                    if (document.body.contains(notification)) {
+                        document.body.removeChild(notification);
+                    }
+                }, 300);
+            }, 3000);
         }
 
         // 格式化电话时间（简洁版，只显示时:分）
@@ -21207,7 +21727,7 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
             // 修改标题为正在输入
             const chatTitleEl = document.getElementById('chat-title');
             // 防止重复获取"正在输入"作为标题
-            let originalTitle = char.remark || char.wx_nickname || char.name;
+            let originalTitle = getCharDisplayName(char, getCurrentAccountId());
             if (chatTitleEl && chatTitleEl.innerText !== "对方正在输入中...") {
                 originalTitle = chatTitleEl.innerText;
             }
@@ -21320,10 +21840,27 @@ ${offlineLines}
                 }
 
                 // 2. 准备 Context
+                // 🔧 视频通话回顾（已结束，当前回到文字聊天）
+                let videoCallContextText = "";
+                try {
+                    const videoMsgs = fullHistory.filter(m => m.isVideoCall && m.role !== 'system');
+                    if (videoMsgs.length > 0) {
+                        const recentVideo = videoMsgs.slice(-10).map(m => {
+                            const speaker = m.role === 'user' ? (userName || '用户') : char.name;
+                            let content = m.content || '';
+                            content = content.replace(/^\[视频通话\]\s*/i, '');
+                            return `${speaker}: ${content}`;
+                        });
+                        videoCallContextText = `\n\n【视频通话回顾】\n你们刚刚结束了一次视频通话，以下是通话内容片段（仅用于记忆参考，当前已回到文字聊天）：\n${recentVideo.join('\n')}`;
+                    }
+                } catch (e) {
+                    console.warn('[triggerAiReply] 视频通话回顾构建失败:', e);
+                }
+
                  let systemPrompt = `# 角色扮演任务
 
 【当前时间】
-${virtualTimeStr}${loanReminderText}${offlineContextText}`;
+${virtualTimeStr}${loanReminderText}${offlineContextText}${videoCallContextText}`;
 
                 // 如果有额外系统信息（如时间流逝），插入到 Prompt
                 if (additionalSystemInfo) {
@@ -21423,6 +21960,7 @@ ${summaryMemoryContext}
 - **删除好友（你删对方）**：\`((DELETE_USER))\`（你决定删除对方好友关系。当你对对方非常失望、想断联、冷战到极致、受到严重伤害时使用。删除后对方需要重新申请好友或等你主动加回。这是一个严重的操作，只有在角色人设和剧情发展到真正需要时才使用！）
 - **拉黑好友（你拉黑对方）**：\`((BLOCK_USER))\`（你决定将对方拉黑。当你对对方极度愤怒、被深深伤害、完全不想联系时使用。拉黑后对方无法发送好友申请，只能通过短信联系你。这是最严重的操作，只有在极端情况下才使用！）
 - **让关联NPC加对方好友**：\`((NPC_ADD_FRIEND: NPC名字))\`（你可以让你的朋友/家人/同事等关联角色主动加对方好友。根据剧情自然触发，例如你提到某个朋友、或者觉得他们应该认识一下时使用。NPC名字必须是你的关联角色中存在的名字。）
+- **打电话**：\`((CALL))\`（想听对方声音、有急事、情绪激动、撒娇、想对方时，真人会直接打电话）
 
 **使用原则**：真人在微信上不仅仅打字，他们会戳一戳对方、转账发红包、分享外卖、打开各种APP、撤回消息……这些互动才是真实的聊天！请像真人一样自然地穿插使用这些功能，而不是只发纯文字。每次对话中可以适当使用1-2个互动功能，让聊天更有生活气息。
 
@@ -21642,7 +22180,10 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 
                 // ❌ BUG 发现：这里使用的是 char.chat_history，而不是前面获取的 getChatHistory(char, accountId)
                 // 应该使用 fullHistory 而不是 char.chat_history
-                const recentHistoryRaw = fullHistory.slice(-contextCount)
+                // 🔧 过滤视频通话内容，避免通话结束后对话仍停留在视频场景
+                const recentHistoryRaw = fullHistory
+                    .filter(m => !m.isVideoCall)
+                    .slice(-contextCount)
                     .filter(m => m.role !== 'system') // 🔧 过滤掉 system 消息（如时间戳），不发送给 AI
                     .map(m => {
                         let content = m.content || '';
@@ -22966,6 +23507,21 @@ ${checkResult.checkResult}
                         if (!seg) continue;
                     }
                     
+                    // 🎯 检测来电指令 ((CALL)) - 角色主动给用户打电话
+                    if (/\(\(CALL\)\)/i.test(seg)) {
+                        console.log(`[AiReply] 📞 检测到来电指令 ((CALL))`);
+                        try {
+                            const callFirstMsg = seg.replace(/\(\(CALL\)\)/gi, '').trim();
+                            if (!_incomingCallCharId) {
+                                await showIncomingCall(targetCharId, callFirstMsg || '');
+                            }
+                        } catch (e) {
+                            console.error('[AiReply] 来电处理失败:', e);
+                        }
+                        seg = seg.replace(/\(\(CALL\)\)/gi, '').trim();
+                        if (!seg) continue;
+                    }
+                    
                     // 🎯 检测戳一戳指令 ((POKE: 动作, 部位)) - 在分段中检测
                     const pokeMatchReply = seg.match(/\(\(POKE:\s*(.+?)\)\)/i);
                     if (pokeMatchReply) {
@@ -23038,8 +23594,8 @@ ${checkResult.checkResult}
                         try {
                             const newNickname = nicknameMatchReply[1].trim();
                             const freshChar = await db.characters.get(targetCharId);
-                            const oldNickname = freshChar.wx_nickname || freshChar.name;
-                            freshChar.wx_nickname = newNickname;
+                            const oldNickname = getCharWxNickname(freshChar, accountId) || freshChar.name;
+                            setCharWxNickname(freshChar, accountId, newNickname);
                             await db.characters.put(freshChar);
                             
                             const nicknameText = `${oldNickname} 将网名改为 "${newNickname}"`;
@@ -23518,10 +24074,11 @@ function showCharacterPage() {
                 div.className = 'char-card';
                 div.onclick = () => editCharacter(char.id);
                 
-                // 默认头像
+                // 默认头像（按账号隔离）
+                const _cardAv = getCharAvatar(char, getCurrentAccountId());
                 let bgStyle = 'background-color: #eee;';
-                if (char.avatar) {
-                    bgStyle = `background-image: url(${char.avatar});`;
+                if (_cardAv) {
+                    bgStyle = `background-image: url(${_cardAv});`;
                 }
                 
                 div.innerHTML = `
@@ -23599,8 +24156,9 @@ function showCharacterPage() {
             document.getElementById('char-identity-bank').value = idData.bank_card || '';
             document.getElementById('char-identity-bank-pass').value = idData.bank_password || '';
 
-            if (char.avatar) {
-                document.getElementById('char-avatar-preview').style.backgroundImage = `url(${char.avatar})`;
+            const _editAv = getCharAvatar(char, getCurrentAccountId());
+            if (_editAv) {
+                document.getElementById('char-avatar-preview').style.backgroundImage = `url(${_editAv})`;
                 document.getElementById('char-avatar-placeholder').style.display = 'none';
             } else {
                 document.getElementById('char-avatar-preview').style.backgroundImage = '';
@@ -24735,6 +25293,245 @@ ${loreContext}
             }
         }
 
+        // ✅ 流式AI调用函数（三阶段处理模型）
+        async function callAIStream(messages, options = {}) {
+            let urlValue = '';
+            let apiKeyValue = '';
+            let modelValue = '';
+            let temperature = 0.7;
+            
+            try {
+                const url = await db.dexiData.get('aiBaseUrl');
+                const key = await db.dexiData.get('aiApiKey');
+                const model = await db.dexiData.get('aiCurrentModel');
+                
+                urlValue = url?.value?.trim() || '';
+                apiKeyValue = key?.value?.trim() || '';
+                modelValue = model?.value?.trim() || '';
+                
+                const tempItem = await db.dexiData.get('aiTemperature');
+                temperature = tempItem ? parseFloat(tempItem.value) : 0.7;
+            } catch (dbErr) {
+                console.warn('[callAIStream] 数据库读取失败:', dbErr.message);
+            }
+            
+            if (!urlValue || !apiKeyValue || !modelValue) {
+                throw new Error("请先在设置中配置 API 地址、密钥和模型");
+            }
+            
+            const requestUrl = getSmartUrl(urlValue, '/chat/completions');
+            
+            // 清洗 messages（复用 callAI 的逻辑）
+            const cleanMessages = messages.map(m => {
+                let role = m.role;
+                if (!role || !['system', 'user', 'assistant'].includes(role)) {
+                    role = 'user';
+                }
+                
+                let content = m.content;
+                if (Array.isArray(content)) {
+                    const validParts = content.filter(part => {
+                        if (part.type === 'text') return part.text && part.text.trim().length > 0;
+                        if (part.type === 'image_url') return part.image_url && part.image_url.url;
+                        return false;
+                    });
+                    if (validParts.length === 0) return { role, content: '' };
+                    return { role, content: validParts };
+                }
+                
+                if (content === null || content === undefined) content = "";
+                if (typeof content !== 'string') content = String(content);
+                
+                return {
+                    role: role,
+                    content: content.trim()
+                };
+            }).filter(m => {
+                if (Array.isArray(m.content)) return m.content.length > 0;
+                return m.content.length > 0;
+            });
+            
+            if (cleanMessages.length === 0) {
+                throw new Error("请求中止：没有有效的消息内容");
+            }
+            
+            // 🎯 第一阶段：流式层 - 只做字符串拼接
+            let rawText = '';
+            let buffer = '';
+            const decoder = new TextDecoder();
+            
+            try {
+                const res = await fetch(requestUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiKeyValue}`
+                    },
+                    body: JSON.stringify({
+                        model: modelValue,
+                        messages: cleanMessages,
+                        temperature: temperature,
+                        stream: true  // 启用流式响应
+                    })
+                });
+                
+                if (!res.ok) {
+                    const errText = await res.text();
+                    throw new Error(`API 请求失败: ${res.status} - ${errText.substring(0, 200)}`);
+                }
+                
+                const reader = res.body.getReader();
+                
+                // ✅ 正确的 SSE 解析方式：使用 \n\n 作为边界
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    buffer += decoder.decode(value, { stream: true });
+                    
+                    let boundary;
+                    while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+                        const chunk = buffer.slice(0, boundary);
+                        buffer = buffer.slice(boundary + 2);
+                        
+                        if (!chunk.startsWith('data:')) continue;
+                        
+                        const jsonStr = chunk.replace(/^data:\s*/, '').trim();
+                        
+                        if (!jsonStr) continue;
+                        
+                        // ✅ 严格过滤 [DONE]
+                        if (jsonStr === '[DONE]' || jsonStr === '[done]') {
+                            continue;
+                        }
+                        
+                        let data;
+                        try {
+                            data = JSON.parse(jsonStr);
+                        } catch (e) {
+                            console.warn('[callAIStream] Stream JSON parse error:', jsonStr);
+                            continue;
+                        }
+                        
+                        const delta = data?.choices?.[0]?.delta?.content;
+                        if (!delta) continue;
+                        
+                        // ✅ 流式阶段：只做字符串拼接，不做任何解析
+                        rawText += delta;
+                        
+                        // ✅ 流式阶段：只更新纯文本显示，不做任何 split / 正则 / markdown
+                        // 这里只传递原始文本，让 UI 层只做 textContent 更新
+                        if (options.onStreamUpdate) {
+                            // 直接传递 rawText，不做任何处理
+                            options.onStreamUpdate(rawText);
+                        }
+                    }
+                }
+                
+                // 处理剩余的 buffer
+                if (buffer.trim()) {
+                    const jsonStr = buffer.replace(/^data:\s*/, '').trim();
+                    if (jsonStr && jsonStr !== '[DONE]' && jsonStr !== '[done]') {
+                        try {
+                            const data = JSON.parse(jsonStr);
+                            const delta = data?.choices?.[0]?.delta?.content;
+                            if (delta) {
+                                rawText += delta;
+                                // 流式阶段：只更新纯文本
+                                if (options.onStreamUpdate) {
+                                    options.onStreamUpdate(rawText);
+                                }
+                            }
+                        } catch (e) {
+                            // 忽略解析错误
+                        }
+                    }
+                }
+                
+            } catch (err) {
+                console.error("[callAIStream] 错误详情:", err);
+                throw err;
+            }
+            
+            // ✅ 流结束后，才做处理
+            // 🎯 第二阶段：完成层 - 统一做翻译/结构解析
+            const finalText = rawText;
+            const processed = processTranslationAndStructure(finalText);
+            
+            // 🎯 第三阶段：渲染层 - 最后一次性渲染 markdown
+            if (options.onComplete) {
+                options.onComplete(processed);
+            } else {
+                // 如果没有提供 onComplete 回调，使用默认的 renderMarkdown
+                renderMarkdown(processed);
+            }
+            
+            return processed;
+        }
+        
+        // ✅ 处理翻译和结构拆分（不在流式阶段执行）
+        // ⚠️ 重要：这个函数只在流结束后调用，处理完整的文本
+        function processTranslationAndStructure(text) {
+            if (!text || !text.trim()) return text;
+            
+            // 🎯 第二阶段：完成层处理
+            // 在这里做 split / 正则 / 翻译拆分
+            // 流式阶段已经结束，文本是完整的
+            
+            let processed = text;
+            
+            // 1. 处理翻译格式（外语（中文翻译））
+            // 如果文本包含翻译格式，在这里解析
+            // 例如：parseForeignWithTranslation(processed)
+            // 但不要在流式阶段拆分，等完整文本后再处理
+            
+            // 2. 处理结构拆分（如 ||| 分隔符）
+            // 如果需要按分隔符拆分，在这里处理
+            // 例如：processed.split('|||').map(...)
+            
+            // 3. 清理和格式化
+            // 移除多余的装饰字符、修复格式等
+            // processed = processed.replace(/[◇◆★☆●○■□▲△]/g, '');
+            
+            // 返回处理后的文本
+            return processed;
+        }
+        
+        // ✅ 更新流式文本显示（纯文本，不渲染markdown）
+        // ⚠️ 重要：这个函数只做纯文本显示，不做任何解析
+        // 不做翻译识别、不做正则拆分、不做 markdown 渲染
+        function updateStreamingText(text) {
+            // ✅ 流式阶段：只更新 textContent，不做任何解析
+            // 不做 split、不做正则、不做 markdown、不做翻译识别
+            
+            // 示例实现：直接更新 DOM 的 textContent（纯文本）
+            // const element = document.getElementById('streaming-text');
+            // if (element) {
+            //     element.textContent = text;  // 只做纯文本更新
+            // }
+            
+            // 调试日志
+            console.log('[updateStreamingText] 纯文本更新，长度:', text.length);
+        }
+        
+        // ✅ 渲染最终markdown（在流结束后一次性渲染）
+        // ⚠️ 重要：这个函数只在流结束后调用，一次性渲染完整内容
+        function renderMarkdown(processedText) {
+            // 🎯 第三阶段：渲染层
+            // 在流结束后，一次性渲染 markdown
+            // 不做流式更新，只做最终渲染
+            
+            // 示例实现：渲染 markdown 到 DOM
+            // const element = document.getElementById('streaming-text');
+            // if (element) {
+            //     // 使用 markdown 渲染库（如 marked、markdown-it）
+            //     element.innerHTML = marked.parse(processedText);
+            // }
+            
+            // 调试日志
+            console.log('[renderMarkdown] 最终渲染，长度:', processedText.length);
+        }
+
         // 生成虚拟身份
         async function generateIdentity() {
             const name = document.getElementById('char-name').value;
@@ -25693,6 +26490,112 @@ function showLorebookPage() {
         applyCustomCSS();
         if (typeof showToast === 'function') showToast('已清空自定义CSS');
     }
+
+    // 预览自定义CSS效果（聊天页面）
+    function previewCustomCSS() {
+        const cssCode = document.getElementById('custom-css-input').value;
+        const modal = document.getElementById('css-preview-modal');
+        if (!modal) return;
+        
+        // 显示模态框
+        modal.style.display = 'flex';
+        
+        // 创建预览专用的style标签（只作用于预览区域）
+        let previewStyleEl = document.getElementById('css-preview-style');
+        if (!previewStyleEl) {
+            previewStyleEl = document.createElement('style');
+            previewStyleEl.id = 'css-preview-style';
+            document.head.appendChild(previewStyleEl);
+        }
+        
+        // 刷新预览
+        refreshCSSPreview();
+    }
+    
+    // 将CSS作用域限制在预览模态框内
+    function scopeCSSForPreview(cssCode) {
+        if (!cssCode) return '';
+        
+        // 简单的CSS作用域处理：在每个选择器前添加 #css-preview-modal
+        // 处理 @规则（如 @media）和注释
+        let scoped = cssCode;
+        
+        // 移除注释
+        scoped = scoped.replace(/\/\*[\s\S]*?\*\//g, '');
+        
+        // 处理 @规则（保留原样，但内容需要作用域）
+        const atRules = [];
+        scoped = scoped.replace(/@[^{]+{[\s\S]*?}/g, (match) => {
+            const id = `__AT_RULE_${atRules.length}__`;
+            atRules.push({ id, content: match });
+            return id;
+        });
+        
+        // 为主要规则添加作用域
+        scoped = scoped.replace(/([^{}]+){([^{}]+)}/g, (match, selector, rules) => {
+            const trimmedSelector = selector.trim();
+            // 跳过 @规则占位符
+            if (trimmedSelector.startsWith('__AT_RULE_')) {
+                return match;
+            }
+            // 为选择器添加作用域
+            return `#css-preview-modal ${trimmedSelector}{${rules}}`;
+        });
+        
+        // 恢复 @规则
+        atRules.forEach(rule => {
+            scoped = scoped.replace(rule.id, rule.content);
+        });
+        
+        return scoped;
+    }
+
+    // 关闭CSS预览
+    function closeCSSPreview() {
+        const modal = document.getElementById('css-preview-modal');
+        if (modal) {
+            modal.style.display = 'none';
+        }
+        // 移除预览样式（可选，如果想保留预览效果可以注释掉）
+        // const previewStyleEl = document.getElementById('css-preview-style');
+        // if (previewStyleEl) {
+        //     previewStyleEl.textContent = '';
+        // }
+    }
+
+    // 刷新CSS预览
+    function refreshCSSPreview() {
+        const cssCode = document.getElementById('custom-css-input').value;
+        const previewStyleEl = document.getElementById('css-preview-style');
+        if (previewStyleEl) {
+            // 直接应用CSS，因为预览区域已经有正确的类名结构
+            // 不需要添加作用域，让CSS直接应用到预览元素上
+            previewStyleEl.textContent = cssCode || '';
+        }
+    }
+
+    // 从预览应用CSS
+    function applyCSSFromPreview() {
+        applyCustomCSS();
+        closeCSSPreview();
+        if (typeof showToast === 'function') showToast('CSS已应用');
+    }
+
+    // 实时更新CSS预览（当预览窗口打开时）
+    function updateCSSPreview() {
+        const modal = document.getElementById('css-preview-modal');
+        if (modal && modal.style.display === 'flex') {
+            refreshCSSPreview();
+        }
+    }
+
+    // 点击模态框外部关闭
+    document.addEventListener('click', function(e) {
+        const modal = document.getElementById('css-preview-modal');
+        if (modal && e.target === modal) {
+            closeCSSPreview();
+        }
+    });
 
 // --- 全局表情包管理逻辑 ---
 function showStickerPage() {
@@ -27720,11 +28623,12 @@ function startLoanReminderSystem() {
 
 // 页面加载时启动
 if (typeof window !== 'undefined') {
-    // 等待DOM加载完成后启动
+    // 延迟启动借款提醒，避免与主初始化同时争抢主线程
+    const _startLoanDelay = () => setTimeout(startLoanReminderSystem, 3000);
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', startLoanReminderSystem);
+        document.addEventListener('DOMContentLoaded', _startLoanDelay);
     } else {
-        startLoanReminderSystem();
+        _startLoanDelay();
     }
 }
 
@@ -28557,7 +29461,7 @@ async function renderMomentsList() {
         const hasComments = m.comments && m.comments.length > 0;
         
         div.innerHTML = `
-            <div class="moment-avatar" style="background-image:url(${char.avatar})"></div>
+            <div class="moment-avatar" style="background-image:url(${getCharAvatar(char, getCurrentAccountId())})"></div>
             <div class="moment-content">
                 <div class="moment-name">${char.name}${pinnedBadge}</div>
                 <div class="moment-text">${escapeHtml(m.content || '')}</div>
@@ -28909,9 +29813,10 @@ async function generateFriendInteractions(momentId, privacy, privacyList) {
         const commenters = [...friends].sort(() => Math.random() - 0.5);
         
         // 生成点赞（使用微信显示名）
+        const _likeAid = getCurrentAccountId();
         const likes = likers.map(f => ({
             userId: f.id,
-            name: f.remark || f.wx_nickname || f.name
+            name: getCharDisplayName(f, _likeAid)
         }));
         
         // ✅ 调用AI生成评论
@@ -28929,8 +29834,9 @@ async function generateFriendInteractions(momentId, privacy, privacyList) {
                 for (const batch of batches) {
                     try {
                         // 构建角色信息（使用微信显示名）
+                        const _cmtAid = getCurrentAccountId();
                         const commenterInfos = batch.map(c => {
-                            const displayName = c.remark || c.wx_nickname || c.name;
+                            const displayName = getCharDisplayName(c, _cmtAid);
                             return `- ${displayName}：${c.description || c.personality || '普通朋友'}`;
                         }).join('\n');
                         
@@ -28969,9 +29875,10 @@ ${commenterInfos}
                         }
                         
                         // 将AI生成的评论添加到列表（匹配显示名）
+                        const _matchAid = getCurrentAccountId();
                         for (const aiComment of aiComments) {
                             const commenter = batch.find(c => {
-                                const displayName = c.remark || c.wx_nickname || c.name;
+                                const displayName = getCharDisplayName(c, _matchAid);
                                 return displayName === aiComment.name || c.name === aiComment.name;
                             });
                             if (commenter && aiComment.content) {
@@ -29259,7 +30166,7 @@ async function generateReplyToUserComment(momentId, charName, userComment) {
         // 找到这个角色
         const allChars = await db.characters.toArray();
         const targetChar = allChars.find(c => {
-            const displayName = c.remark || c.wx_nickname || c.name;
+            const displayName = getCharDisplayName(c, accountId);
             return displayName === charName || c.name === charName;
         });
         
@@ -30170,11 +31077,12 @@ async function renderFamilyCardList() {
         if (char) {
             const usedThisMonth = card.usedThisMonth || 0;
             const limitText = card.monthlyLimit > 0 ? `已用 ¥${usedThisMonth.toFixed(2)} / ¥${card.monthlyLimit}` : `已用 ¥${usedThisMonth.toFixed(2)} (不限额)`;
+            const _fcAid = getCurrentAccountId();
             givenHtml += `
                 <div class="family-card-item">
-                    <div class="family-card-avatar" style="background-image:url(${char.avatar})"></div>
+                    <div class="family-card-avatar" style="background-image:url(${getCharAvatar(char, _fcAid)})"></div>
                     <div class="family-card-info">
-                        <div class="family-card-name">${char.name}</div>
+                        <div class="family-card-name">${getCharDisplayName(char, _fcAid)}</div>
                         <div class="family-card-detail">${limitText}</div>
                     </div>
                     <div class="family-card-actions">
@@ -30240,9 +31148,10 @@ async function renderFamilyCardList() {
             const usedThisMonth = card.usedThisMonth || 0;
             const monthlyLimit = card.monthlyLimit || 0;
             const limitText = monthlyLimit > 0 ? `本月可用 ¥${(monthlyLimit - usedThisMonth).toFixed(2)}` : '不限额';
+            const _rcAid = getCurrentAccountId();
             receivedHtml += `
                 <div class="family-card-item">
-                    <div class="family-card-avatar" style="background-image:url(${char.avatar})"></div>
+                    <div class="family-card-avatar" style="background-image:url(${getCharAvatar(char, _rcAid)})"></div>
                     <div class="family-card-info">
                         <div class="family-card-name">${char.name} 的亲属卡</div>
                         <div class="family-card-detail">${limitText}</div>
@@ -31038,9 +31947,11 @@ async function showExclusiveTransferPage() {
         const char = await db.characters.get(memberId);
         if (!char) continue;
         
-        const avatarStyle = char.avatar ? `background-image:url(${char.avatar})` : 'background:#ccc';
+        const _exAid = getCurrentAccountId();
+        const _exAvatar = getCharAvatar(char, _exAid);
+        const avatarStyle = _exAvatar ? `background-image:url(${_exAvatar})` : 'background:#ccc';
         const memberNicknames = group.memberNicknames || {};
-        const displayName = memberNicknames[memberId] || char.remark || char.wx_nickname || char.name;
+        const displayName = memberNicknames[memberId] || getCharDisplayName(char, _exAid);
         
         const item = document.createElement('div');
         item.style.cssText = 'display:flex; align-items:center; padding:12px 16px; cursor:pointer; transition:background 0.2s;';
@@ -31073,7 +31984,8 @@ async function selectExclusiveTarget(memberId, char, displayName) {
     
     // 打开转账页面
     document.getElementById('t-target-name').innerText = displayName;
-    document.getElementById('t-target-avatar').style.backgroundImage = char.avatar ? `url(${char.avatar})` : '';
+    const _tAvatar = getCharAvatar(char, getCurrentAccountId());
+    document.getElementById('t-target-avatar').style.backgroundImage = _tAvatar ? `url(${_tAvatar})` : '';
     
     // 重置输入
     document.getElementById('t-amount-input').value = '';
@@ -31128,9 +32040,10 @@ async function showRedPacketDetail(redPacketId) {
         const charId = msg.senderId || data.senderId;
         const char = await db.characters.get(typeof charId === 'number' ? charId : parseInt(charId));
         if (char) {
-            senderAvatar = char.avatar || '';
+            const _rpAid = getCurrentAccountId();
+            senderAvatar = getCharAvatar(char, _rpAid) || '';
             const memberNicknames = group.memberNicknames || {};
-            senderName = memberNicknames[charId] || char.remark || char.name || data.senderName || '红包发送者';
+            senderName = memberNicknames[charId] || getCharDisplayName(char, _rpAid) || data.senderName || '红包发送者';
         }
     }
     
@@ -35039,9 +35952,9 @@ async function exportWechatStateForAI(myChar) {
         
         return {
             id: f.id,
-            name: f.name,
-            remark: f.remark || '',
-            avatar: f.avatar || '',
+            name: getCharDisplayName(f, accountId),
+            remark: getCharRemark(f, accountId) || '',
+            avatar: getCharAvatar(f, accountId) || '',
             // 最近10条消息
             recentMessages: history.slice(-10).map(m => ({
                 role: m.role,
@@ -35056,7 +35969,7 @@ async function exportWechatStateForAI(myChar) {
             } : null,
             messageCount: history.length,
             unreadCount: unreadCount,
-            isPinned: f.is_pinned || false
+            isPinned: f.is_pinned_by_user?.[accountId] || false
         };
     });
     
@@ -35727,8 +36640,173 @@ if (!document.getElementById('couple-space-animations')) {
             0%, 100% { opacity: 0.8; }
             50% { opacity: 0.3; }
         }
+        /* 来电横幅滑入动画 */
+        @keyframes incomingSlideDown {
+            0% { transform: translateX(-50%) translateY(-100%); opacity: 0; }
+            100% { transform: translateX(-50%) translateY(0); opacity: 1; }
+        }
     `;
     document.head.appendChild(style);
+}
+
+// ==================== 角色主动来电功能 ====================
+let _incomingCallCharId = null;     // 当前来电角色ID
+let _incomingCallRingtone = null;   // 来电铃声音频
+let _incomingCallTimeout = null;    // 来电超时自动挂断
+let _incomingCallFirstMsg = null;   // AI生成的第一句话（接听后使用）
+
+// 显示来电弹窗
+async function showIncomingCall(charId, firstMessage) {
+    if (_incomingCallCharId) return; // 已有来电，不叠加
+    
+    const char = await db.characters.get(charId);
+    if (!char) return;
+    
+    const accountId = getCurrentAccountId();
+    const displayName = getCharDisplayName(char, accountId);
+    const avatar = getCharAvatar(char, accountId);
+    
+    _incomingCallCharId = charId;
+    _incomingCallFirstMsg = firstMessage || null;
+    
+    // 填充来电信息
+    const nameEl = document.getElementById('incoming-call-name');
+    const avatarEl = document.getElementById('incoming-call-avatar');
+    if (nameEl) nameEl.textContent = displayName;
+    if (avatarEl) avatarEl.style.backgroundImage = avatar ? `url(${avatar})` : '';
+    
+    // 显示弹窗
+    const overlay = document.getElementById('incoming-call-overlay');
+    if (overlay) overlay.style.display = 'block';
+    
+    // 尝试播放铃声（静音环境下可能被浏览器拦截）
+    try {
+        _incomingCallRingtone = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQ==');
+        _incomingCallRingtone.loop = true;
+        _incomingCallRingtone.volume = 0.3;
+        _incomingCallRingtone.play().catch(() => {});
+    } catch (e) { /* 忽略音频失败 */ }
+    
+    // 震动反馈（移动端）
+    if (navigator.vibrate) {
+        navigator.vibrate([300, 200, 300, 200, 300]);
+    }
+    
+    // 30秒无操作自动未接
+    _incomingCallTimeout = setTimeout(() => {
+        missIncomingCall('timeout');
+    }, 30000);
+    
+    console.log(`[IncomingCall] 📞 ${displayName} 来电中...`);
+}
+
+// 接听来电
+async function acceptIncomingCall() {
+    if (!_incomingCallCharId) return;
+    
+    const charId = _incomingCallCharId;
+    const firstMsg = _incomingCallFirstMsg;
+    cleanupIncomingCall();
+    
+    const char = await db.characters.get(charId);
+    if (!char) return;
+    
+    const accountId = getCurrentAccountId();
+    
+    // 记录系统消息：通话已接听
+    let history = getChatHistory(char, accountId);
+    history.push({
+        role: 'system',
+        content: `📞 ${getCharDisplayName(char, accountId)} 发起了语音通话，你已接听`,
+        time: Date.now()
+    });
+    await setChatHistory(char, accountId, history);
+    await db.characters.put(char);
+    
+    // 设置视频通话角色ID，直接进入视频通话页面
+    videoCallCharId = charId;
+    await showVideoCallPage(char, firstMsg || '');
+    
+    console.log(`[IncomingCall] ✅ 已接听 ${char.name} 的来电，进入通话页面`);
+}
+
+// 挂断来电
+async function declineIncomingCall() {
+    if (!_incomingCallCharId) return;
+    
+    const charId = _incomingCallCharId;
+    cleanupIncomingCall();
+    
+    await recordMissedCall(charId, 'declined');
+    console.log(`[IncomingCall] ❌ 已挂断来电`);
+}
+
+// 来电超时未接
+async function missIncomingCall(reason) {
+    if (!_incomingCallCharId) return;
+    
+    const charId = _incomingCallCharId;
+    cleanupIncomingCall();
+    
+    await recordMissedCall(charId, reason);
+    console.log(`[IncomingCall] ⏰ 来电未接 (${reason})`);
+}
+
+// 记录未接来电到聊天记录
+async function recordMissedCall(charId, reason) {
+    const char = await db.characters.get(charId);
+    if (!char) return;
+    
+    const accountId = getCurrentAccountId();
+    const displayName = getCharDisplayName(char, accountId);
+    let history = getChatHistory(char, accountId);
+    
+    const reasonText = reason === 'declined' ? '你已挂断' : '未接听';
+    history.push({
+        role: 'system',
+        content: `📞 ${displayName} 发起了语音通话，${reasonText}`,
+        time: Date.now()
+    });
+    await setChatHistory(char, accountId, history);
+    await db.characters.put(char);
+    
+    // 发送系统通知
+    sendSystemNotification(`未接来电`, `${displayName} 给你打了个电话`);
+    
+    // 如果当前正在该聊天页面，刷新显示
+    if (currentChatCharId === charId) {
+        const freshChar = await db.characters.get(charId);
+        if (freshChar) await renderChatBody(freshChar, true);
+    }
+    
+    // 刷新微信列表
+    const wechatList = document.getElementById('wechat-chat-list');
+    if (wechatList) await renderWechatList(wechatList);
+}
+
+// 清理来电状态
+function cleanupIncomingCall() {
+    _incomingCallCharId = null;
+    _incomingCallFirstMsg = null;
+    
+    // 隐藏弹窗
+    const overlay = document.getElementById('incoming-call-overlay');
+    if (overlay) overlay.style.display = 'none';
+    
+    // 停止铃声
+    if (_incomingCallRingtone) {
+        _incomingCallRingtone.pause();
+        _incomingCallRingtone = null;
+    }
+    
+    // 停止震动
+    if (navigator.vibrate) navigator.vibrate(0);
+    
+    // 清除超时
+    if (_incomingCallTimeout) {
+        clearTimeout(_incomingCallTimeout);
+        _incomingCallTimeout = null;
+    }
 }
 
 // ==================== 视频通话功能 ====================
@@ -36589,7 +37667,7 @@ async function showOfflineMode() {
 
     // 设置标题
     const title = document.getElementById('offline-chat-title');
-    title.textContent = `线下模式 - ${char.remark || char.wx_nickname || char.name}`;
+    title.textContent = `线下模式 - ${getCharDisplayName(char, getCurrentAccountId())}`;
 
     // 显示页面
     const offlinePage = document.getElementById('offline-chat-window');
@@ -37264,6 +38342,7 @@ async function renderFavoritesList(type) {
     emptyState.style.display = 'none';
     
     // 生成列表HTML
+    const _slAid = getCurrentAccountId();
     let html = '';
     for (const summary of summaries) {
         let avatarUrl = '';
@@ -37273,8 +38352,8 @@ async function renderFavoritesList(type) {
         if (summary.chatType === 'private') {
             const char = await db.characters.get(parseInt(summary.chatId));
             if (char) {
-                avatarUrl = char.avatar || '';
-                name = char.remark || char.wx_nickname || char.name || '未知';
+                avatarUrl = getCharAvatar(char, _slAid) || '';
+                name = getCharDisplayName(char, _slAid) || '未知';
             }
             chatTypeLabel = '私聊';
         } else if (summary.chatType === 'group') {
@@ -37387,12 +38466,13 @@ async function showSummaryDetail(summaryId) {
         // 获取聊天对象信息
         let avatarUrl = '';
         let name = '未知';
+        const _sdAid = getCurrentAccountId();
         
         if (summary.chatType === 'private') {
             const char = await db.characters.get(parseInt(summary.chatId));
             if (char) {
-                avatarUrl = char.avatar || '';
-                name = char.remark || char.wx_nickname || char.name || '未知';
+                avatarUrl = getCharAvatar(char, _sdAid) || '';
+                name = getCharDisplayName(char, _sdAid) || '未知';
             }
         } else if (summary.chatType === 'group') {
             const group = await db.group_chats.get(parseInt(summary.chatId));
@@ -38859,10 +39939,12 @@ async function handleOnlineIncomingMessage(data) {
         return;
     }
     
-    // ✅ 更新好友的头像（如果服务器发送了新头像）
-    if (data.from_avatar && data.from_avatar !== targetChar.avatar) {
+    // ✅ 更新好友的头像（按账号隔离）
+    const _onlineAid = getCurrentAccountId();
+    const _curOnlineAvatar = getCharAvatar(targetChar, _onlineAid);
+    if (data.from_avatar && data.from_avatar !== _curOnlineAvatar) {
         console.log('[Online] 更新好友头像:', data.from_wx_account);
-        targetChar.avatar = data.from_avatar;
+        setCharAvatar(targetChar, _onlineAid, data.from_avatar);
         await db.characters.put(targetChar);
         targetChar = await db.characters.get(targetChar.id);
     }
@@ -43116,14 +44198,14 @@ async function executeChangeAvatar(charId, accountId) {
         const freshChar = await db.characters.get(charId);
         if (!freshChar) return;
         
-        const oldAvatar = freshChar.avatar;
-        freshChar.avatar = selectedAvatar.url;
+        const currentAccountId = accountId || getCurrentAccountId();
+        const oldAvatar = getCharAvatar(freshChar, currentAccountId);
+        setCharAvatar(freshChar, currentAccountId, selectedAvatar.url);
         await db.characters.put(freshChar);
         
         console.log(`[换头像] ${freshChar.name} 换了新头像 (旧: ${oldAvatar?.substring(0, 50)}... → 新: ${selectedAvatar.url.substring(0, 50)}...)`);
         
         // 添加系统消息到聊天记录
-        const currentAccountId = accountId || getCurrentAccountId();
         let history = getChatHistory(freshChar, currentAccountId);
         history.push({
             role: 'system',
@@ -43251,10 +44333,11 @@ async function acceptCoupleAvatar(btn, av1Id, av2Id, charId) {
         const charAvatar = useFirst ? av1.url : av2.url;
         const userAvatar = useFirst ? av2.url : av1.url;
         
-        // 更新角色头像
+        // 更新角色头像（按账号隔离）
         const char = await db.characters.get(charId);
+        const _coupleAid = getCurrentAccountId();
         if (char) {
-            char.avatar = charAvatar;
+            setCharAvatar(char, _coupleAid, charAvatar);
             await db.characters.put(char);
         }
         
@@ -43322,11 +44405,12 @@ async function executeRevertCoupleAvatar(charId, accountId) {
         const randomIndex = Math.floor(Math.random() * singleAvatars.length);
         const selectedAvatar = singleAvatars[randomIndex];
         
-        // 更新角色头像
+        // 更新角色头像（按账号隔离）
         const char = await db.characters.get(charId);
         if (!char) return;
         
-        char.avatar = selectedAvatar.url;
+        const _revertAid = getCurrentAccountId();
+        setCharAvatar(char, _revertAid, selectedAvatar.url);
         await db.characters.put(char);
         
         console.log(`[换回单人头像] ${char.name} 换回了单人头像`);
@@ -43390,8 +44474,9 @@ async function executeUseImageAsAvatar(charId, accountId, imageIndex) {
         
         console.log(`[使用图片头像] 用户共发送 ${userImages.length} 张图片，选择第 ${targetIdx + 1} 张${selectedImage.desc ? `（描述: ${selectedImage.desc}）` : ''}`);
         
-        // 更新角色头像
-        char.avatar = selectedImage.url;
+        // 更新角色头像（按账号隔离）
+        const _imgAid = getCurrentAccountId();
+        setCharAvatar(char, _imgAid, selectedImage.url);
         await db.characters.put(char);
         
         console.log(`[使用图片头像] ${char.name} 使用了用户发送的图片作为头像`);
@@ -48177,3 +49262,996 @@ window.closeIcityEditProfileModal = closeIcityEditProfileModal;
 window.saveIcityProfile = saveIcityProfile;
 window.closeAnnotationPopup = closeAnnotationPopup;
 window.saveIcityAnnotation = saveIcityAnnotation;
+
+// ================== 聊天主题管理功能 ==================
+
+// 全局变量：当前选中的主题ID（用于主题选择器）
+let selectedThemeIdForApply = null;
+
+// 保存聊天主题
+async function saveChatTheme() {
+    try {
+        const themeName = document.getElementById('chat-theme-name').value.trim();
+        if (!themeName) {
+            showToast('❌ 请输入主题名称');
+            return;
+        }
+
+        const accountId = getCurrentAccountId() || 'offline';
+
+        const themeData = {
+            name: themeName,
+            accountId: accountId,
+            time: Date.now(),
+            // 背景
+            chatBackground: document.getElementById('chat-theme-bg').value.trim(),
+            headerBg: document.getElementById('chat-theme-header-bg').value.trim(),
+            headerColor: document.getElementById('chat-theme-header-color').value,
+            titleColor: document.getElementById('chat-theme-title-color').value,
+            footerBg: document.getElementById('chat-theme-footer-bg').value.trim(),
+            footerColor: document.getElementById('chat-theme-footer-color').value,
+            // 顶栏按钮图标
+            iconBack: document.getElementById('chat-theme-icon-back').value.trim(),
+            iconOffline: document.getElementById('chat-theme-icon-offline').value.trim(),
+            iconDetail: document.getElementById('chat-theme-icon-detail').value.trim(),
+            // 底栏按钮图标
+            iconAi: document.getElementById('chat-theme-icon-ai').value.trim(),
+            iconEmoji: document.getElementById('chat-theme-icon-emoji').value.trim(),
+            iconMore: document.getElementById('chat-theme-icon-more').value.trim(),
+            iconSend: document.getElementById('chat-theme-icon-send').value.trim(),
+            // 图标大小
+            iconBackSize: parseInt(document.getElementById('chat-theme-icon-back-size')?.value) || 24,
+            iconOfflineSize: parseInt(document.getElementById('chat-theme-icon-offline-size')?.value) || 20,
+            iconDetailSize: parseInt(document.getElementById('chat-theme-icon-detail-size')?.value) || 20,
+            iconAiSize: parseInt(document.getElementById('chat-theme-icon-ai-size')?.value) || 22,
+            iconEmojiSize: parseInt(document.getElementById('chat-theme-icon-emoji-size')?.value) || 22,
+            iconMoreSize: parseInt(document.getElementById('chat-theme-icon-more-size')?.value) || 22,
+            iconSendSize: parseInt(document.getElementById('chat-theme-icon-send-size')?.value) || 18
+        };
+
+        const themeId = await db.chat_themes.add(themeData);
+        console.log('[ChatTheme] ✓ 主题已保存:', themeData);
+
+        showToast('✅ 主题保存成功');
+
+        // 清空表单
+        document.getElementById('chat-theme-name').value = '';
+        document.getElementById('chat-theme-bg').value = '';
+        document.getElementById('chat-theme-header-bg').value = '';
+        document.getElementById('chat-theme-title-color').value = '#333333';
+        document.getElementById('chat-theme-footer-bg').value = '';
+        document.getElementById('chat-theme-icon-back').value = '';
+        document.getElementById('chat-theme-icon-offline').value = '';
+        document.getElementById('chat-theme-icon-detail').value = '';
+        document.getElementById('chat-theme-icon-ai').value = '';
+        document.getElementById('chat-theme-icon-emoji').value = '';
+        document.getElementById('chat-theme-icon-more').value = '';
+        document.getElementById('chat-theme-icon-send').value = '';
+        // 重置图标大小滑块
+        const defaultSizes = [
+            { id: 'chat-theme-icon-back-size', val: 'chat-theme-icon-back-size-val', v: 24 },
+            { id: 'chat-theme-icon-offline-size', val: 'chat-theme-icon-offline-size-val', v: 20 },
+            { id: 'chat-theme-icon-detail-size', val: 'chat-theme-icon-detail-size-val', v: 20 },
+            { id: 'chat-theme-icon-ai-size', val: 'chat-theme-icon-ai-size-val', v: 22 },
+            { id: 'chat-theme-icon-emoji-size', val: 'chat-theme-icon-emoji-size-val', v: 22 },
+            { id: 'chat-theme-icon-more-size', val: 'chat-theme-icon-more-size-val', v: 22 },
+            { id: 'chat-theme-icon-send-size', val: 'chat-theme-icon-send-size-val', v: 18 }
+        ];
+        defaultSizes.forEach(f => {
+            const slider = document.getElementById(f.id);
+            const label = document.getElementById(f.val);
+            if (slider) slider.value = f.v;
+            if (label) label.textContent = f.v + 'px';
+        });
+
+        // 刷新预览
+        previewChatTheme();
+
+        // 刷新主题列表
+        await loadChatThemeList();
+    } catch (error) {
+        console.error('[ChatTheme] ✗ 保存失败:', error);
+        showToast('❌ 保存失败: ' + error.message);
+    }
+}
+
+// 加载聊天主题列表
+async function loadChatThemeList() {
+    try {
+        const accountId = getCurrentAccountId() || 'offline';
+        const themes = await db.chat_themes.where('accountId').equals(accountId).reverse().sortBy('time');
+
+        const listContainer = document.getElementById('chat-theme-list');
+        if (!listContainer) return;
+
+        if (themes.length === 0) {
+            listContainer.innerHTML = '<div style="padding:20px; text-align:center; color:#999; font-size:13px;">暂无保存的主题<br>创建你的第一个主题吧</div>';
+            return;
+        }
+
+        listContainer.innerHTML = themes.map(theme => {
+            const iconCount = [theme.iconBack, theme.iconOffline, theme.iconDetail, theme.iconAi, theme.iconEmoji, theme.iconMore, theme.iconSend].filter(Boolean).length;
+            return `
+            <div style="padding:12px; background:#f8f8f8; border-radius:8px; border:1px solid #e8e8e8;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                    <div style="font-size:15px; font-weight:600; color:#333;">${theme.name}</div>
+                    <div style="display:flex; gap:6px;">
+                        <div onclick="exportSingleChatTheme(${theme.id})" style="padding:4px 10px; background:#fff; border:1px solid #ddd; border-radius:6px; font-size:12px; color:#007aff; cursor:pointer;">导出</div>
+                        <div onclick="editChatTheme(${theme.id})" style="padding:4px 10px; background:#fff; border:1px solid #ddd; border-radius:6px; font-size:12px; color:#666; cursor:pointer;">编辑</div>
+                        <div onclick="deleteChatTheme(${theme.id})" style="padding:4px 10px; background:#fff; border:1px solid #ddd; border-radius:6px; font-size:12px; color:#ff3b30; cursor:pointer;">删除</div>
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
+                    ${theme.chatBackground ? `<div style="width:60px; height:40px; border-radius:6px; background-image:url(${theme.chatBackground}); background-size:cover; background-position:center; border:1px solid #ddd;"></div>` : ''}
+                    <div style="display:flex; gap:4px; flex-wrap:wrap; align-items:center;">
+                        <div style="width:24px; height:24px; border-radius:4px; background:${theme.headerColor || '#ededed'}; border:1px solid #ddd;" title="顶栏色"></div>
+                        <div style="width:24px; height:24px; border-radius:4px; background:${theme.footerColor || '#ffffff'}; border:1px solid #ddd;" title="底栏色"></div>
+                    </div>
+                    ${iconCount > 0 ? `<div style="font-size:11px; color:#999; margin-left:auto;">🎨 ${iconCount}个自定义图标</div>` : ''}
+                </div>
+                <div style="font-size:11px; color:#999;">${new Date(theme.time).toLocaleString('zh-CN')}</div>
+            </div>
+        `}).join('');
+    } catch (error) {
+        console.error('[ChatTheme] ✗ 加载主题列表失败:', error);
+    }
+}
+
+// 编辑聊天主题
+async function editChatTheme(themeId) {
+    try {
+        const theme = await db.chat_themes.get(themeId);
+        if (!theme) {
+            showToast('❌ 主题不存在');
+            return;
+        }
+
+        // 填充表单 - 背景
+        document.getElementById('chat-theme-name').value = theme.name;
+        document.getElementById('chat-theme-bg').value = theme.chatBackground || '';
+        document.getElementById('chat-theme-header-bg').value = theme.headerBg || '';
+        document.getElementById('chat-theme-header-color').value = theme.headerColor || '#ededed';
+        document.getElementById('chat-theme-title-color').value = theme.titleColor || '#333333';
+        document.getElementById('chat-theme-footer-bg').value = theme.footerBg || '';
+        document.getElementById('chat-theme-footer-color').value = theme.footerColor || '#ffffff';
+        // 填充表单 - 图标
+        document.getElementById('chat-theme-icon-back').value = theme.iconBack || '';
+        document.getElementById('chat-theme-icon-offline').value = theme.iconOffline || '';
+        document.getElementById('chat-theme-icon-detail').value = theme.iconDetail || '';
+        document.getElementById('chat-theme-icon-ai').value = theme.iconAi || '';
+        document.getElementById('chat-theme-icon-emoji').value = theme.iconEmoji || '';
+        document.getElementById('chat-theme-icon-more').value = theme.iconMore || '';
+        document.getElementById('chat-theme-icon-send').value = theme.iconSend || '';
+        // 填充表单 - 图标大小
+        const sizeFields = [
+            { id: 'chat-theme-icon-back-size', val: 'chat-theme-icon-back-size-val', v: theme.iconBackSize || 24 },
+            { id: 'chat-theme-icon-offline-size', val: 'chat-theme-icon-offline-size-val', v: theme.iconOfflineSize || 20 },
+            { id: 'chat-theme-icon-detail-size', val: 'chat-theme-icon-detail-size-val', v: theme.iconDetailSize || 20 },
+            { id: 'chat-theme-icon-ai-size', val: 'chat-theme-icon-ai-size-val', v: theme.iconAiSize || 22 },
+            { id: 'chat-theme-icon-emoji-size', val: 'chat-theme-icon-emoji-size-val', v: theme.iconEmojiSize || 22 },
+            { id: 'chat-theme-icon-more-size', val: 'chat-theme-icon-more-size-val', v: theme.iconMoreSize || 22 },
+            { id: 'chat-theme-icon-send-size', val: 'chat-theme-icon-send-size-val', v: theme.iconSendSize || 18 }
+        ];
+        sizeFields.forEach(f => {
+            const slider = document.getElementById(f.id);
+            const label = document.getElementById(f.val);
+            if (slider) slider.value = f.v;
+            if (label) label.textContent = f.v + 'px';
+        });
+
+        // 更新预览
+        previewChatTheme();
+
+        // 滚动到表单顶部
+        const expandEl = document.querySelector('#expand4') || document.querySelector('#expand5');
+        if (expandEl) expandEl.scrollIntoView({ behavior: 'smooth' });
+
+        // 删除旧主题
+        await db.chat_themes.delete(themeId);
+        await loadChatThemeList();
+
+        showToast('📝 主题已加载到编辑器，修改后点击保存');
+    } catch (error) {
+        console.error('[ChatTheme] ✗ 编辑主题失败:', error);
+        showToast('❌ 编辑失败: ' + error.message);
+    }
+}
+
+// 删除聊天主题
+async function deleteChatTheme(themeId) {
+    if (!confirm('确定要删除这个主题吗？')) return;
+
+    try {
+        await db.chat_themes.delete(themeId);
+        showToast('✅ 主题已删除');
+        await loadChatThemeList();
+    } catch (error) {
+        console.error('[ChatTheme] ✗ 删除主题失败:', error);
+        showToast('❌ 删除失败: ' + error.message);
+    }
+}
+
+// 预览聊天主题 - 完全按照实际聊天页面结构
+function previewChatTheme() {
+    const chatBg = document.getElementById('chat-theme-bg')?.value?.trim() || '';
+    const headerBg = document.getElementById('chat-theme-header-bg')?.value?.trim() || '';
+    const headerColor = document.getElementById('chat-theme-header-color')?.value || '#ededed';
+    const titleColor = document.getElementById('chat-theme-title-color')?.value || '#333333';
+    const footerBg = document.getElementById('chat-theme-footer-bg')?.value?.trim() || '';
+    const footerColor = document.getElementById('chat-theme-footer-color')?.value || '#ffffff';
+    
+    // 按钮图标URL
+    const iconBack = document.getElementById('chat-theme-icon-back')?.value?.trim() || '';
+    const iconOffline = document.getElementById('chat-theme-icon-offline')?.value?.trim() || '';
+    const iconDetail = document.getElementById('chat-theme-icon-detail')?.value?.trim() || '';
+    const iconAi = document.getElementById('chat-theme-icon-ai')?.value?.trim() || '';
+    const iconEmoji = document.getElementById('chat-theme-icon-emoji')?.value?.trim() || '';
+    const iconMore = document.getElementById('chat-theme-icon-more')?.value?.trim() || '';
+    const iconSend = document.getElementById('chat-theme-icon-send')?.value?.trim() || '';
+    
+    // 按钮图标大小
+    const sizeBack = parseInt(document.getElementById('chat-theme-icon-back-size')?.value) || 24;
+    const sizeOffline = parseInt(document.getElementById('chat-theme-icon-offline-size')?.value) || 20;
+    const sizeDetail = parseInt(document.getElementById('chat-theme-icon-detail-size')?.value) || 20;
+    const sizeAi = parseInt(document.getElementById('chat-theme-icon-ai-size')?.value) || 22;
+    const sizeEmoji = parseInt(document.getElementById('chat-theme-icon-emoji-size')?.value) || 22;
+    const sizeMore = parseInt(document.getElementById('chat-theme-icon-more-size')?.value) || 22;
+    const sizeSend = parseInt(document.getElementById('chat-theme-icon-send-size')?.value) || 18;
+
+    const previewContainer = document.getElementById('chat-theme-preview-container');
+    if (!previewContainer) return;
+
+    const headerBgStyle = headerBg ? `background-image: url(${headerBg}); background-size: cover; background-position: center;` : '';
+    const footerBgStyle = footerBg ? `background-image: url(${footerBg}); background-size: cover; background-position: center;` : '';
+    const chatBgStyle = chatBg ? `background-image: url(${chatBg}); background-size: cover; background-position: center;` : '';
+
+    // 图标渲染：有URL用图片，没有用默认SVG（使用自定义大小）
+    const backIcon = iconBack
+        ? `<img src="${iconBack}" style="width:${sizeBack}px; height:${sizeBack}px; object-fit:contain;">`
+        : `<svg class="svg-icon" viewBox="0 0 24 24" style="width:${sizeBack}px; height:${sizeBack}px;"><polyline points="15 18 9 12 15 6"></polyline></svg>`;
+    
+    const offlineIcon = iconOffline
+        ? `<img src="${iconOffline}" style="width:${sizeOffline}px; height:${sizeOffline}px; object-fit:contain;">`
+        : `<svg class="svg-icon" viewBox="0 0 24 24" style="width:${sizeOffline}px; height:${sizeOffline}px;"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>`;
+    
+    const detailIcon = iconDetail
+        ? `<img src="${iconDetail}" style="width:${sizeDetail}px; height:${sizeDetail}px; object-fit:contain;">`
+        : `<svg class="svg-icon" viewBox="0 0 24 24" style="width:${sizeDetail}px; height:${sizeDetail}px;"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>`;
+    
+    const aiIcon = iconAi
+        ? `<img src="${iconAi}" style="width:${sizeAi}px; height:${sizeAi}px; object-fit:contain;">`
+        : `<svg class="svg-icon" viewBox="0 0 24 24" style="width:${sizeAi}px; height:${sizeAi}px;"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/><path d="M5 3v4"/><path d="M9 5H1"/></svg>`;
+    
+    const emojiIcon = iconEmoji
+        ? `<img src="${iconEmoji}" style="width:${sizeEmoji}px; height:${sizeEmoji}px; object-fit:contain;">`
+        : `<svg class="svg-icon" viewBox="0 0 24 24" style="width:${sizeEmoji}px; height:${sizeEmoji}px;"><circle cx="12" cy="12" r="10"></circle><path d="M8 14s1.5 2 4 2 4-2 4-2"></path><line x1="9" y1="9" x2="9.01" y2="9"></line><line x1="15" y1="9" x2="15.01" y2="9"></line></svg>`;
+    
+    const moreIcon = iconMore
+        ? `<img src="${iconMore}" style="width:${sizeMore}px; height:${sizeMore}px; object-fit:contain;">`
+        : `<svg class="svg-icon" viewBox="0 0 24 24" style="width:${sizeMore}px; height:${sizeMore}px;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>`;
+    
+    const sendIcon = iconSend
+        ? `<img src="${iconSend}" style="width:${sizeSend}px; height:${sizeSend}px; object-fit:contain;">`
+        : `<svg class="svg-icon" viewBox="0 0 24 24" style="width:${sizeSend}px; height:${sizeSend}px; stroke-width:3; transform:rotate(90deg) translateX(-2px);"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>`;
+
+    previewContainer.innerHTML = `
+        <div style="width:100%; height:100%; display:flex; flex-direction:column; overflow:hidden;">
+            <!-- ===== 顶栏 chat-header ===== -->
+            <div class="chat-header" style="height:54px; ${headerBgStyle} background-color:${headerColor}; backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); padding:0 10px 0 10px; display:flex; align-items:center; border-bottom:1px solid rgba(0,0,0,0.05); flex-shrink:0; position:relative; z-index:10; box-sizing:border-box;">
+                <!-- 返回按钮 -->
+                <div class="chat-back" style="display:flex; align-items:center; justify-content:center; width:40px; height:40px; cursor:pointer; color:#333;">
+                    ${backIcon}
+                </div>
+                <!-- 标题 -->
+                <div class="chat-title" style="font-size:17px; font-weight:600; color:${titleColor}; flex:1; text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; position:static; top:auto; height:auto; line-height:normal; transform:none; max-width:none; z-index:auto;">聊天对象</div>
+                <!-- 线下模式按钮 -->
+                <div class="chat-more" style="display:flex; align-items:center; justify-content:center; width:40px; height:40px; color:#333; cursor:pointer;">
+                    ${offlineIcon}
+                </div>
+                <!-- 聊天详情按钮 -->
+                <div class="chat-more" style="display:flex; align-items:center; justify-content:center; width:40px; height:40px; color:#333; cursor:pointer;">
+                    ${detailIcon}
+                </div>
+            </div>
+            
+            <!-- ===== 聊天内容区 chat-body ===== -->
+            <div class="chat-body" style="flex:1; overflow-y:auto; background:#ffffff; ${chatBgStyle}">
+            </div>
+            
+            <!-- ===== 底栏 chat-footer ===== -->
+            <div class="chat-footer" style="${footerBgStyle} background-color:${footerColor}; border-top:1px solid rgba(0,0,0,0.05); display:flex; flex-direction:column; flex-shrink:0;">
+                <div class="chat-input-bar" style="min-height:54px; padding:8px 12px; display:flex; align-items:center; gap:10px;">
+                    <!-- AI接收回复按钮 -->
+                    <div class="chat-icon-btn" style="width:32px; height:32px; color:#999; cursor:pointer; display:flex; align-items:center; justify-content:center; border-radius:50%; flex-shrink:0;">
+                        ${aiIcon}
+                    </div>
+                    
+                    <!-- 输入框 -->
+                    <div style="flex:1; background:#f5f5f5; border:1px solid #e8e8e8; border-radius:20px; padding:8px 16px; font-size:15px; color:#999; min-height:20px;">
+                        发送消息...
+                    </div>
+                    
+                    <!-- 表情按钮 -->
+                    <div class="chat-icon-btn" style="width:32px; height:32px; color:#999; cursor:pointer; display:flex; align-items:center; justify-content:center; border-radius:50%; flex-shrink:0;">
+                        ${emojiIcon}
+                    </div>
+                    
+                    <!-- 更多菜单按钮 -->
+                    <div class="chat-icon-btn" style="width:32px; height:32px; color:#999; cursor:pointer; display:flex; align-items:center; justify-content:center; border-radius:50%; flex-shrink:0;">
+                        ${moreIcon}
+                    </div>
+                    
+                    <!-- 发送按钮 -->
+                    <div class="chat-send-btn" style="display:flex; background:var(--ins-pink,#FF6B9D); color:#fff; border-radius:50%; width:32px; height:32px; align-items:center; justify-content:center; flex-shrink:0;">
+                        ${sendIcon}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// 显示聊天主题选择器
+async function showChatThemeSelector() {
+    try {
+        const accountId = getCurrentAccountId() || 'offline';
+        const themes = await db.chat_themes.where('accountId').equals(accountId).reverse().sortBy('time');
+
+        const listContainer = document.getElementById('theme-selector-list');
+        if (!listContainer) return;
+
+        // 获取当前角色的主题ID
+        const char = await db.characters.get(currentChatCharId);
+        const currentThemeId = char?.chatThemeId || null;
+        selectedThemeIdForApply = currentThemeId;
+
+        // 更新默认主题的选中状态
+        const defaultThemeOption = document.querySelector('#chat-theme-selector-modal .theme-option');
+        if (currentThemeId === null) {
+            defaultThemeOption.style.borderColor = 'var(--ins-pink)';
+            defaultThemeOption.querySelector('.theme-selected-icon').style.display = 'block';
+        } else {
+            defaultThemeOption.style.borderColor = '#e0e0e0';
+            defaultThemeOption.querySelector('.theme-selected-icon').style.display = 'none';
+        }
+
+        // 生成主题列表
+        listContainer.innerHTML = themes.map(theme => {
+            const bgStyle = theme.chatBackground ? `background-image:url(${theme.chatBackground}); background-size:cover; background-position:center;` : `background:linear-gradient(135deg, ${theme.headerColor || '#ededed'} 0%, ${theme.footerColor || '#ffffff'} 100%);`;
+            const iconCount = [theme.iconBack, theme.iconOffline, theme.iconDetail, theme.iconAi, theme.iconEmoji, theme.iconMore, theme.iconSend].filter(Boolean).length;
+            return `
+            <div class="theme-option" onclick="selectChatTheme(${theme.id})" style="padding:16px; background:#fff; border:1px solid ${currentThemeId === theme.id ? 'var(--ins-pink)' : '#e0e0e0'}; border-radius:12px; cursor:pointer; transition:all 0.2s;">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div style="width:60px; height:60px; border-radius:8px; ${bgStyle} border:1px solid #ddd; flex-shrink:0;"></div>
+                    <div style="flex:1;">
+                        <div style="font-size:16px; font-weight:600; margin-bottom:4px;">${theme.name}</div>
+                        <div style="display:flex; gap:4px; margin-bottom:4px; align-items:center;">
+                            <div style="width:16px; height:16px; border-radius:3px; background:${theme.headerColor || '#ededed'}; border:1px solid #ddd;" title="顶栏色"></div>
+                            <div style="width:16px; height:16px; border-radius:3px; background:${theme.footerColor || '#ffffff'}; border:1px solid #ddd;" title="底栏色"></div>
+                            ${iconCount > 0 ? `<span style="font-size:11px; color:#999; margin-left:4px;">🎨 ${iconCount}图标</span>` : ''}
+                        </div>
+                        <div style="font-size:11px; color:#999;">${new Date(theme.time).toLocaleDateString('zh-CN')}</div>
+                    </div>
+                    <div class="theme-selected-icon" style="display:${currentThemeId === theme.id ? 'block' : 'none'}; color:var(--ins-pink); font-size:20px;">✓</div>
+                </div>
+            </div>
+        `;
+        }).join('');
+
+        // 显示弹窗
+        document.getElementById('chat-theme-selector-modal').style.display = 'flex';
+    } catch (error) {
+        console.error('[ChatTheme] ✗ 显示主题选择器失败:', error);
+        showToast('❌ 加载主题失败');
+    }
+}
+
+// 隐藏聊天主题选择器
+function hideChatThemeSelector() {
+    document.getElementById('chat-theme-selector-modal').style.display = 'none';
+    selectedThemeIdForApply = null;
+}
+
+// 选择聊天主题（仅标记选中状态）
+function selectChatTheme(themeId) {
+    selectedThemeIdForApply = themeId;
+
+    // 更新所有主题选项的选中状态
+    const modal = document.getElementById('chat-theme-selector-modal');
+    const themeOptions = modal.querySelectorAll('.theme-option');
+    
+    themeOptions.forEach((option, index) => {
+        const icon = option.querySelector('.theme-selected-icon');
+        if (index === 0 && themeId === null) {
+            // 默认主题被选中
+            option.style.borderColor = 'var(--ins-pink)';
+            if (icon) icon.style.display = 'block';
+        } else if (index === 0) {
+            // 默认主题未被选中
+            option.style.borderColor = '#e0e0e0';
+            if (icon) icon.style.display = 'none';
+        } else {
+            // 判断自定义主题是否被选中（需要从HTML中提取themeId）
+            const onclickAttr = option.getAttribute('onclick');
+            const match = onclickAttr && onclickAttr.match(/selectChatTheme\((\d+)\)/);
+            const optionThemeId = match ? parseInt(match[1]) : null;
+            
+            if (optionThemeId === themeId) {
+                option.style.borderColor = 'var(--ins-pink)';
+                if (icon) icon.style.display = 'block';
+            } else {
+                option.style.borderColor = '#e0e0e0';
+                if (icon) icon.style.display = 'none';
+            }
+        }
+    });
+}
+
+// 应用聊天主题
+async function applyChatTheme() {
+    if (!currentChatCharId) {
+        showToast('❌ 未打开聊天窗口');
+        return;
+    }
+
+    try {
+        const char = await db.characters.get(currentChatCharId);
+        if (!char) {
+            showToast('❌ 角色不存在');
+            return;
+        }
+
+        // 更新角色的主题ID
+        char.chatThemeId = selectedThemeIdForApply;
+        await db.characters.put(char);
+
+        // 应用主题样式
+        await applyThemeToChat(selectedThemeIdForApply);
+
+        // 更新聊天详情页的主题显示
+        await updateChatDetailThemeDisplay();
+
+        // 关闭弹窗
+        hideChatThemeSelector();
+
+        showToast('✅ 主题已应用');
+        console.log('[ChatTheme] ✓ 主题已应用:', selectedThemeIdForApply);
+    } catch (error) {
+        console.error('[ChatTheme] ✗ 应用主题失败:', error);
+        showToast('❌ 应用失败: ' + error.message);
+    }
+}
+
+// 应用主题样式到聊天窗口 - 完全匹配实际聊天页面
+async function applyThemeToChat(themeId) {
+    const chatWindow = document.getElementById('chat-window');
+    const chatHeader = chatWindow?.querySelector('.chat-header');
+    const chatBody = document.getElementById('chat-body');
+    const chatFooter = chatWindow?.querySelector('.chat-footer');
+
+    if (!chatWindow || !chatHeader || !chatBody || !chatFooter) {
+        console.log('[ChatTheme] ⚠️ 聊天窗口元素未找到');
+        return;
+    }
+
+    // 移除现有的主题样式
+    chatWindow.removeAttribute('data-theme-id');
+    const oldThemeStyle = document.getElementById('chat-theme-style');
+    if (oldThemeStyle) oldThemeStyle.remove();
+
+    // 恢复所有被替换的图标
+    _restoreDefaultIcons(chatHeader, chatFooter);
+
+    if (themeId === null || themeId === undefined) {
+        // 恢复默认主题
+        chatBody.style.backgroundImage = '';
+        chatHeader.style.backgroundImage = '';
+        chatHeader.style.backgroundColor = '';
+        chatFooter.style.backgroundImage = '';
+        chatFooter.style.backgroundColor = '';
+        // 恢复标题颜色
+        const chatTitle = chatHeader.querySelector('.chat-title');
+        if (chatTitle) chatTitle.style.color = '';
+        console.log('[ChatTheme] ✓ 已恢复默认主题');
+        return;
+    }
+
+    try {
+        const theme = await db.chat_themes.get(themeId);
+        if (!theme) {
+            console.log('[ChatTheme] ⚠️ 主题不存在:', themeId);
+            return;
+        }
+
+        // ===== 背景 =====
+        if (theme.chatBackground) {
+            chatBody.style.backgroundImage = `url(${theme.chatBackground})`;
+            chatBody.style.backgroundSize = 'cover';
+            chatBody.style.backgroundPosition = 'center';
+        } else {
+            chatBody.style.backgroundImage = '';
+        }
+
+        // ===== 顶栏背景 =====
+        if (theme.headerBg) {
+            chatHeader.style.backgroundImage = `url(${theme.headerBg})`;
+            chatHeader.style.backgroundSize = 'cover';
+            chatHeader.style.backgroundPosition = 'center';
+        } else {
+            chatHeader.style.backgroundImage = '';
+        }
+        if (theme.headerColor) chatHeader.style.backgroundColor = theme.headerColor;
+
+        // ===== 标题文字颜色 =====
+        const chatTitle = chatHeader.querySelector('.chat-title');
+        if (chatTitle) {
+            chatTitle.style.color = theme.titleColor || '';
+        }
+
+        // ===== 底栏背景 =====
+        if (theme.footerBg) {
+            chatFooter.style.backgroundImage = `url(${theme.footerBg})`;
+            chatFooter.style.backgroundSize = 'cover';
+            chatFooter.style.backgroundPosition = 'center';
+        } else {
+            chatFooter.style.backgroundImage = '';
+        }
+        if (theme.footerColor) chatFooter.style.backgroundColor = theme.footerColor;
+
+        // ===== 顶栏按钮图标替换 =====
+        // 返回按钮
+        if (theme.iconBack) {
+            const backBtn = chatHeader.querySelector('.chat-back');
+            if (backBtn) _replaceWithImg(backBtn, theme.iconBack, theme.iconBackSize || 24);
+        }
+        // 线下模式按钮（第一个 chat-more）
+        const chatMores = chatHeader.querySelectorAll('.chat-more');
+        if (theme.iconOffline && chatMores[0]) {
+            _replaceWithImg(chatMores[0], theme.iconOffline, theme.iconOfflineSize || 20);
+        }
+        // 聊天详情按钮（第二个 chat-more，即三个点）
+        if (theme.iconDetail && chatMores[1]) {
+            _replaceWithImg(chatMores[1], theme.iconDetail, theme.iconDetailSize || 20);
+        }
+
+        // ===== 底栏按钮图标替换 =====
+        const inputBar = chatFooter.querySelector('.chat-input-bar');
+        if (inputBar) {
+            const iconBtns = inputBar.querySelectorAll('.chat-icon-btn');
+            // 第一个 chat-icon-btn = AI魔法棒
+            if (theme.iconAi && iconBtns[0]) {
+                _replaceWithImg(iconBtns[0], theme.iconAi, theme.iconAiSize || 22);
+            }
+            // 第二个 chat-icon-btn = 表情
+            if (theme.iconEmoji && iconBtns[1]) {
+                _replaceWithImg(iconBtns[1], theme.iconEmoji, theme.iconEmojiSize || 22);
+            }
+            // 第三个 chat-icon-btn = 更多(+号)
+            if (theme.iconMore && iconBtns[2]) {
+                _replaceWithImg(iconBtns[2], theme.iconMore, theme.iconMoreSize || 22);
+            }
+            // 发送按钮
+            if (theme.iconSend) {
+                const sendBtn = inputBar.querySelector('.chat-send-btn');
+                if (sendBtn) _replaceWithImg(sendBtn, theme.iconSend, theme.iconSendSize || 18);
+            }
+        }
+
+        chatWindow.setAttribute('data-theme-id', themeId);
+        console.log('[ChatTheme] ✓ 主题样式已应用:', theme.name);
+    } catch (error) {
+        console.error('[ChatTheme] ✗ 应用主题样式失败:', error);
+    }
+}
+
+// 辅助：替换元素内的SVG为图片
+function _replaceWithImg(container, imgUrl, size) {
+    if (!container || !imgUrl) return;
+    const svg = container.querySelector('svg');
+    if (svg) {
+        // 保存原始SVG以便恢复
+        if (!container.getAttribute('data-original-svg')) {
+            container.setAttribute('data-original-svg', svg.outerHTML);
+        }
+        svg.style.display = 'none';
+    }
+    // 移除已有的主题图标
+    const oldImg = container.querySelector('.theme-icon-img');
+    if (oldImg) oldImg.remove();
+    const img = document.createElement('img');
+    img.src = imgUrl;
+    img.className = 'theme-icon-img';
+    img.style.cssText = `width:${size}px; height:${size}px; object-fit:contain;`;
+    container.appendChild(img);
+}
+
+// 辅助：恢复所有被替换的图标为默认SVG
+function _restoreDefaultIcons(chatHeader, chatFooter) {
+    const allContainers = [
+        ...chatHeader.querySelectorAll('.chat-back, .chat-more'),
+        ...chatFooter.querySelectorAll('.chat-icon-btn, .chat-send-btn')
+    ];
+    allContainers.forEach(container => {
+        // 移除主题图标
+        const themeImg = container.querySelector('.theme-icon-img');
+        if (themeImg) themeImg.remove();
+        // 恢复SVG显示
+        const svg = container.querySelector('svg');
+        if (svg) svg.style.display = '';
+    });
+}
+
+// 更新聊天详情页的主题显示
+async function updateChatDetailThemeDisplay() {
+    if (!currentChatCharId) return;
+
+    try {
+        const char = await db.characters.get(currentChatCharId);
+        const themeId = char?.chatThemeId;
+        
+        const themeDisplay = document.getElementById('detail-current-theme');
+        if (!themeDisplay) return;
+
+        if (themeId === null || themeId === undefined) {
+            themeDisplay.textContent = '默认主题';
+        } else {
+            const theme = await db.chat_themes.get(themeId);
+            themeDisplay.textContent = theme ? theme.name : '默认主题';
+        }
+    } catch (error) {
+        console.error('[ChatTheme] ✗ 更新主题显示失败:', error);
+    }
+}
+
+// 显示群聊主题选择器
+async function showGroupChatThemeSelector() {
+    try {
+        const accountId = getCurrentAccountId() || 'offline';
+        const themes = await db.chat_themes.where('accountId').equals(accountId).reverse().sortBy('time');
+
+        const listContainer = document.getElementById('theme-selector-list');
+        if (!listContainer) return;
+
+        // 获取当前群聊的主题ID
+        const group = await db.group_chats.get(window.currentGroupChatId);
+        const currentThemeId = group?.chatThemeId || null;
+        selectedThemeIdForApply = currentThemeId;
+
+        // 更新默认主题的选中状态
+        const defaultThemeOption = document.querySelector('#chat-theme-selector-modal .theme-option');
+        if (currentThemeId === null) {
+            defaultThemeOption.style.borderColor = 'var(--ins-pink)';
+            defaultThemeOption.querySelector('.theme-selected-icon').style.display = 'block';
+        } else {
+            defaultThemeOption.style.borderColor = '#e0e0e0';
+            defaultThemeOption.querySelector('.theme-selected-icon').style.display = 'none';
+        }
+
+        // 生成主题列表（群聊）
+        listContainer.innerHTML = themes.map(theme => {
+            const bgStyle = theme.chatBackground ? `background-image:url(${theme.chatBackground}); background-size:cover; background-position:center;` : `background:linear-gradient(135deg, ${theme.headerColor || '#ededed'} 0%, ${theme.footerColor || '#ffffff'} 100%);`;
+            const iconCount = [theme.iconBack, theme.iconOffline, theme.iconDetail, theme.iconAi, theme.iconEmoji, theme.iconMore, theme.iconSend].filter(Boolean).length;
+            return `
+            <div class="theme-option" onclick="selectChatTheme(${theme.id})" style="padding:16px; background:#fff; border:1px solid ${currentThemeId === theme.id ? 'var(--ins-pink)' : '#e0e0e0'}; border-radius:12px; cursor:pointer; transition:all 0.2s;">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div style="width:60px; height:60px; border-radius:8px; ${bgStyle} border:1px solid #ddd; flex-shrink:0;"></div>
+                    <div style="flex:1;">
+                        <div style="font-size:16px; font-weight:600; margin-bottom:4px;">${theme.name}</div>
+                        <div style="display:flex; gap:4px; margin-bottom:4px; align-items:center;">
+                            <div style="width:16px; height:16px; border-radius:3px; background:${theme.headerColor || '#ededed'}; border:1px solid #ddd;" title="顶栏色"></div>
+                            <div style="width:16px; height:16px; border-radius:3px; background:${theme.footerColor || '#ffffff'}; border:1px solid #ddd;" title="底栏色"></div>
+                            ${iconCount > 0 ? `<span style="font-size:11px; color:#999; margin-left:4px;">🎨 ${iconCount}图标</span>` : ''}
+                        </div>
+                        <div style="font-size:11px; color:#999;">${new Date(theme.time).toLocaleDateString('zh-CN')}</div>
+                    </div>
+                    <div class="theme-selected-icon" style="display:${currentThemeId === theme.id ? 'block' : 'none'}; color:var(--ins-pink); font-size:20px;">✓</div>
+                </div>
+            </div>
+        `;
+        }).join('');
+
+        // 显示弹窗（使用群聊应用函数）
+        const modal = document.getElementById('chat-theme-selector-modal');
+        modal.style.display = 'flex';
+        
+        // 替换应用按钮的onclick事件为群聊版本
+        const applyBtn = modal.querySelector('button[onclick="applyChatTheme()"]');
+        if (applyBtn) {
+            applyBtn.setAttribute('onclick', 'applyGroupChatTheme()');
+        }
+    } catch (error) {
+        console.error('[GroupChatTheme] ✗ 显示主题选择器失败:', error);
+        showToast('❌ 加载主题失败');
+    }
+}
+
+// 应用群聊主题
+async function applyGroupChatTheme() {
+    if (!window.currentGroupChatId) {
+        showToast('❌ 未打开群聊窗口');
+        return;
+    }
+
+    try {
+        const group = await db.group_chats.get(window.currentGroupChatId);
+        if (!group) {
+            showToast('❌ 群聊不存在');
+            return;
+        }
+
+        // 更新群聊的主题ID
+        group.chatThemeId = selectedThemeIdForApply;
+        await db.group_chats.put(group);
+
+        // 应用主题样式
+        await applyThemeToChat(selectedThemeIdForApply);
+
+        // 更新群聊详情页的主题显示
+        await updateGroupChatDetailThemeDisplay();
+
+        // 关闭弹窗并恢复按钮
+        const modal = document.getElementById('chat-theme-selector-modal');
+        modal.style.display = 'none';
+        const applyBtn = modal.querySelector('button[onclick="applyGroupChatTheme()"]');
+        if (applyBtn) {
+            applyBtn.setAttribute('onclick', 'applyChatTheme()');
+        }
+
+        showToast('✅ 主题已应用');
+        console.log('[GroupChatTheme] ✓ 主题已应用:', selectedThemeIdForApply);
+    } catch (error) {
+        console.error('[GroupChatTheme] ✗ 应用主题失败:', error);
+        showToast('❌ 应用失败: ' + error.message);
+    }
+}
+
+// 更新群聊详情页的主题显示
+async function updateGroupChatDetailThemeDisplay() {
+    if (!window.currentGroupChatId) return;
+
+    try {
+        const group = await db.group_chats.get(window.currentGroupChatId);
+        const themeId = group?.chatThemeId;
+        
+        const themeDisplay = document.getElementById('group-detail-current-theme');
+        if (!themeDisplay) return;
+
+        if (themeId === null || themeId === undefined) {
+            themeDisplay.textContent = '默认主题';
+        } else {
+            const theme = await db.chat_themes.get(themeId);
+            themeDisplay.textContent = theme ? theme.name : '默认主题';
+        }
+    } catch (error) {
+        console.error('[GroupChatTheme] ✗ 更新主题显示失败:', error);
+    }
+}
+
+// 暴露聊天主题相关函数到全局
+window.saveChatTheme = saveChatTheme;
+window.loadChatThemeList = loadChatThemeList;
+window.editChatTheme = editChatTheme;
+window.deleteChatTheme = deleteChatTheme;
+window.previewChatTheme = previewChatTheme;
+window.showChatThemeSelector = showChatThemeSelector;
+window.hideChatThemeSelector = hideChatThemeSelector;
+window.selectChatTheme = selectChatTheme;
+window.applyChatTheme = applyChatTheme;
+window.applyThemeToChat = applyThemeToChat;
+window.updateChatDetailThemeDisplay = updateChatDetailThemeDisplay;
+window.showGroupChatThemeSelector = showGroupChatThemeSelector;
+window.applyGroupChatTheme = applyGroupChatTheme;
+window.updateGroupChatDetailThemeDisplay = updateGroupChatDetailThemeDisplay;
+
+// ========== 主题导出/导入 ==========
+
+// ===== 主题加密/解密工具 =====
+const _THEME_KEY = 'MxTheme@2026!Enc';
+
+function _themeEncrypt(plainText) {
+    // 1. 将明文转为UTF-8字节数组
+    const encoder = new TextEncoder();
+    const data = encoder.encode(plainText);
+    const key = encoder.encode(_THEME_KEY);
+    // 2. XOR混淆
+    const encrypted = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i++) {
+        encrypted[i] = data[i] ^ key[i % key.length] ^ ((i * 7 + 13) & 0xFF);
+    }
+    // 3. 转Base64
+    let binary = '';
+    for (let i = 0; i < encrypted.length; i++) {
+        binary += String.fromCharCode(encrypted[i]);
+    }
+    return btoa(binary);
+}
+
+function _themeDecrypt(cipherBase64) {
+    // 1. Base64解码
+    const binary = atob(cipherBase64);
+    const encrypted = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        encrypted[i] = binary.charCodeAt(i);
+    }
+    // 2. XOR还原
+    const encoder = new TextEncoder();
+    const key = encoder.encode(_THEME_KEY);
+    const decrypted = new Uint8Array(encrypted.length);
+    for (let i = 0; i < encrypted.length; i++) {
+        decrypted[i] = encrypted[i] ^ key[i % key.length] ^ ((i * 7 + 13) & 0xFF);
+    }
+    // 3. UTF-8字节还原为字符串
+    const decoder = new TextDecoder();
+    return decoder.decode(decrypted);
+}
+
+// 导出单个主题为加密文件
+async function exportSingleChatTheme(themeId) {
+    try {
+        const theme = await db.chat_themes.get(themeId);
+        if (!theme) {
+            showToast('❌ 主题不存在');
+            return;
+        }
+
+        // 移除数据库自增ID和accountId
+        const { id, accountId: _aid, ...rest } = theme;
+
+        // 加密
+        const themesJson = JSON.stringify([rest]);
+        const encryptedPayload = _themeEncrypt(themesJson);
+
+        const jsonData = {
+            type: 'chat_themes_export',
+            version: 2,
+            exportTime: new Date().toISOString(),
+            count: 1,
+            payload: encryptedPayload
+        };
+
+        const jsonStr = JSON.stringify(jsonData);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+
+        const safeName = (theme.name || 'theme').replace(/[^a-zA-Z0-9\u4e00-\u9fff_-]/g, '_');
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `theme_${safeName}_${new Date().toISOString().slice(0,10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        showToast(`✅ 已导出主题「${theme.name}」（已加密）`);
+        console.log('[ChatTheme] ✓ 单个主题导出成功(加密):', theme.name);
+    } catch (error) {
+        console.error('[ChatTheme] ✗ 导出失败:', error);
+        showToast('❌ 导出失败: ' + error.message);
+    }
+}
+
+// 导出全部主题为加密文件
+async function exportChatThemes() {
+    try {
+        const accountId = getCurrentAccountId() || 'offline';
+        const themes = await db.chat_themes.where('accountId').equals(accountId).toArray();
+
+        if (themes.length === 0) {
+            showToast('❌ 暂无可导出的主题');
+            return;
+        }
+
+        // 移除数据库自增ID和accountId，导入时重新生成
+        const exportData = themes.map(theme => {
+            const { id, accountId: _aid, ...rest } = theme;
+            return rest;
+        });
+
+        // 将主题数据加密
+        const themesJson = JSON.stringify(exportData);
+        const encryptedPayload = _themeEncrypt(themesJson);
+
+        const jsonData = {
+            type: 'chat_themes_export',
+            version: 2,
+            exportTime: new Date().toISOString(),
+            count: exportData.length,
+            payload: encryptedPayload
+        };
+
+        const jsonStr = JSON.stringify(jsonData);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `chat_themes_${new Date().toISOString().slice(0,10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        showToast(`✅ 已导出 ${themes.length} 个主题（已加密）`);
+        console.log('[ChatTheme] ✓ 主题导出成功(加密):', themes.length, '个');
+    } catch (error) {
+        console.error('[ChatTheme] ✗ 导出失败:', error);
+        showToast('❌ 导出失败: ' + error.message);
+    }
+}
+
+// 导入主题文件（兼容加密v2和旧版v1明文）
+async function importChatThemes(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    // 重置input以便下次可以选同一文件
+    event.target.value = '';
+
+    try {
+        const text = await file.text();
+        const jsonData = JSON.parse(text);
+
+        // 校验格式
+        if (jsonData.type !== 'chat_themes_export') {
+            showToast('❌ 文件格式不正确，请选择主题导出文件');
+            return;
+        }
+
+        let themesArr;
+
+        if (jsonData.version >= 2 && jsonData.payload) {
+            // v2加密格式：解密payload
+            try {
+                const decryptedJson = _themeDecrypt(jsonData.payload);
+                themesArr = JSON.parse(decryptedJson);
+            } catch (e) {
+                showToast('❌ 主题解密失败，文件可能已损坏');
+                console.error('[ChatTheme] 解密失败:', e);
+                return;
+            }
+        } else if (Array.isArray(jsonData.themes)) {
+            // v1旧版明文格式：直接读取
+            themesArr = jsonData.themes;
+        } else {
+            showToast('❌ 文件格式不正确');
+            return;
+        }
+
+        if (!Array.isArray(themesArr) || themesArr.length === 0) {
+            showToast('❌ 没有找到可导入的主题数据');
+            return;
+        }
+
+        const accountId = getCurrentAccountId() || 'offline';
+        let importCount = 0;
+
+        for (const theme of themesArr) {
+            // 给每个主题绑定当前账号
+            const themeData = {
+                ...theme,
+                accountId: accountId
+            };
+            // 移除可能携带的旧id
+            delete themeData.id;
+            await db.chat_themes.add(themeData);
+            importCount++;
+        }
+
+        showToast(`✅ 成功导入 ${importCount} 个主题`);
+        console.log('[ChatTheme] ✓ 主题导入成功:', importCount, '个');
+
+        // 刷新主题列表
+        await loadChatThemeList();
+    } catch (error) {
+        console.error('[ChatTheme] ✗ 导入失败:', error);
+        if (error instanceof SyntaxError) {
+            showToast('❌ 文件解析失败，请确认是有效的主题文件');
+        } else {
+            showToast('❌ 导入失败: ' + error.message);
+        }
+    }
+}
+
+window.exportSingleChatTheme = exportSingleChatTheme;
+window.exportChatThemes = exportChatThemes;
+window.importChatThemes = importChatThemes;

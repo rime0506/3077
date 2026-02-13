@@ -48,6 +48,8 @@ body {
             position: relative;
             padding: 0 8px;
             -webkit-overflow-scrolling: touch; /* iOS 流畅滚动 */
+            will-change: scroll-position; /* 提示浏览器预分配合成层 */
+            contain: layout style; /* 限制重排范围 */
         }
         
         /* #home-page 样式已移除，以便恢复默认文档流和滚动行为 */
@@ -63,6 +65,27 @@ body {
             align-items: center;
             z-index: 10;
             position: relative;
+        }
+        /* 当背景完全透明时，移除毛玻璃效果以透出背景图 */
+        /* 注意：如果通过自定义CSS设置透明，需要同时设置 backdrop-filter: none !important; */
+        .top-widget[style*="background: transparent"],
+        .top-widget[style*="background:transparent"],
+        .top-widget[style*="background: none"],
+        .top-widget[style*="background:none"],
+        .top-widget[style*="background-color: transparent"],
+        .top-widget[style*="background-color:transparent"] {
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+        }
+        /* 底栏透明处理 - 当背景完全透明时，移除毛玻璃效果以透出背景图 */
+        .dock[style*="background: transparent"],
+        .dock[style*="background:transparent"],
+        .dock[style*="background: none"],
+        .dock[style*="background:none"],
+        .dock[style*="background-color: transparent"],
+        .dock[style*="background-color:transparent"] {
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
         }
         .top-widget .icon {
             width: 48px;
@@ -158,6 +181,7 @@ body {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
             gap: 24px 8px; /* 恢复紧凑间距 */
+            min-width: 0; /* 防止 grid 溢出 */
         }
 /* 拍立得组件 */
 .photo-widget {
@@ -236,6 +260,8 @@ body {
             gap: 4px;
             cursor: pointer;
             -webkit-tap-highlight-color: transparent;
+            min-width: 0; /* 防止 grid 列溢出 */
+            max-width: 100%; /* 限制最大宽度 */
         }
         .app-icon .icon {
             width: 56px;
@@ -246,10 +272,16 @@ body {
             box-shadow: none;
             background-size: cover;
             background-position: center;
+            flex-shrink: 0; /* 图标不收缩 */
         }
         .app-icon .name {
             font-size: 10px;
             text-align: center;
+            width: 100%; /* 占满容器宽度 */
+            overflow: hidden; /* 隐藏溢出 */
+            text-overflow: ellipsis; /* 显示省略号 */
+            white-space: nowrap; /* 不换行 */
+            max-width: 100%; /* 限制最大宽度 */
         }
         /* 头像样式 */
         .circle-photo {
@@ -261,6 +293,8 @@ body {
             -webkit-tap-highlight-color: transparent;
             position: relative;
             margin-top: 8px;
+            min-width: 0; /* 防止 grid 列溢出 */
+            max-width: 100%; /* 限制最大宽度 */
         }
         .circle-photo .bubble {
             position: absolute;
@@ -281,10 +315,18 @@ body {
             overflow: hidden;
             background-size: cover;
             background-position: center;
+            flex-shrink: 0; /* 头像不收缩 */
         }
         .circle-photo .img.has-image::before,
         .circle-photo .img.has-image::after {
             display: none;
+        }
+        .circle-photo .name {
+            width: 100%; /* 占满容器宽度 */
+            overflow: hidden; /* 隐藏溢出 */
+            text-overflow: ellipsis; /* 显示省略号 */
+            white-space: nowrap; /* 不换行 */
+            max-width: 100%; /* 限制最大宽度 */
         }
 /* 倒数日胶囊 */
 .days-capsule {
@@ -2080,13 +2122,25 @@ body {
             height: 40px;
             cursor: pointer;
             color: var(--ins-text);
+            position: relative;
+            z-index: 2;
         }
         .chat-title {
             font-size: 17px;
             font-weight: 600;
-            flex: 1;
-            text-align: center;
             color: var(--ins-text);
+            position: absolute;
+            left: 50%;
+            top: 44px;
+            height: 44px;
+            line-height: 44px;
+            transform: translateX(-50%);
+            max-width: calc(100% - 176px);
+            text-align: center;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            z-index: 1;
         }
         .chat-more {
             display: flex;
@@ -2096,6 +2150,8 @@ body {
             height: 40px;
             color: var(--ins-text);
             cursor: pointer;
+            position: relative;
+            z-index: 2;
         }
         .chat-body {
             flex: 1;
