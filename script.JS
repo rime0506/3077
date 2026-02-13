@@ -13615,10 +13615,8 @@ ${chatContext || '（没有聊天记录）'}
             
             document.getElementById('chat-window').style.display = 'flex';
             
-            // ✅ 应用角色的聊天主题
-            if (char.chatThemeId !== undefined) {
-                await applyThemeToChat(char.chatThemeId);
-            }
+            // ✅ 应用角色的聊天主题（始终调用，确保切换角色时正确切换/清除主题）
+            await applyThemeToChat(char.chatThemeId ?? null);
             
             // 进入聊天后，将底层列表设为不可见，防止透明样式穿透
             setTimeout(() => {
@@ -14341,8 +14339,20 @@ window.unmountUser = unmountUser;
             bgPreview.style.backgroundImage = '';
             bgPreview.textContent = '暂无背景图';
             
-            // 清除聊天界面的背景图
-            applyChatBackground(char);
+            // ✅ 清除角色独立背景图的内联样式
+            const chatBody = document.getElementById('chat-body');
+            if (chatBody) {
+                chatBody.style.backgroundImage = '';
+                chatBody.style.backgroundSize = '';
+                chatBody.style.backgroundPosition = '';
+                chatBody.style.backgroundRepeat = '';
+                chatBody.style.backgroundAttachment = '';
+            }
+            
+            // ✅ 如果有聊天主题，重新应用主题背景（恢复主题背景图）
+            if (char.chatThemeId !== undefined && char.chatThemeId !== null) {
+                await applyThemeToChat(char.chatThemeId);
+            }
         }
 
         function applyChatBackground(char) {
@@ -14350,18 +14360,16 @@ window.unmountUser = unmountUser;
             if (!chatBody) return;
             
             if (char.chat_background) {
+                // ✅ 角色独立背景图（优先级高于主题背景）
                 chatBody.style.backgroundImage = `url(${char.chat_background})`;
                 chatBody.style.backgroundSize = 'cover';
                 chatBody.style.backgroundPosition = 'center';
                 chatBody.style.backgroundRepeat = 'no-repeat';
                 chatBody.style.backgroundAttachment = 'fixed';
-            } else {
-                chatBody.style.backgroundImage = '';
-                chatBody.style.backgroundSize = '';
-                chatBody.style.backgroundPosition = '';
-                chatBody.style.backgroundRepeat = '';
-                chatBody.style.backgroundAttachment = '';
             }
+            // ✅ 没有角色独立背景图时，不清除任何背景属性
+            // 让主题背景图（由 applyThemeToChat 通过 style.background 简写设置）保持不变
+            // 清除操作由 clearChatBackground() 显式处理
         }
 
         // 展开/收起自定义样式区域
