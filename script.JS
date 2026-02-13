@@ -6876,6 +6876,9 @@ ${smsActionInstructions}
             replyText = aiResponse.trim() || '...';
         }
         
+        // ✅ 清理末尾的 [DONE] / [done]
+        replyText = replyText.replace(/\s*\[DONE\]\s*$/i, '').trim();
+        
         // 🎯 检测解除拉黑指令 ((UNBLOCK_USER))
         if (/\(\(UNBLOCK_USER\)\)/i.test(replyText)) {
             console.log('[acceptMessageReply] 🔓 检测到解除拉黑指令');
@@ -13674,7 +13677,10 @@ ${chatContext || '（没有聊天记录）'}
                 chatInputBox.placeholder = char.input_placeholder || '发送消息...';
             }
             
-            renderChatBody(char);
+            await renderChatBody(char);
+            
+            // ✅ 确保聊天背景图始终被应用（防止 applyThemeToChat 清除后、renderChatBody 优化跳过时丢失）
+            applyChatBackground(char);
             
             // 低电量提醒检查（读取真实设备电量）
             if (!isOnlineFriend) {
@@ -14792,7 +14798,7 @@ window.unmountUser = unmountUser;
                 const char = await db.characters.get(currentChatCharId);
                 const accountId = getCurrentAccountId();
                 await setChatHistory(char, accountId, []);
-                renderChatBody(char);
+                await renderChatBody(char, true); // ✅ forceRender=true 确保完整重新渲染（包括背景图）
                 alert("已清空");
             }
         }
@@ -18305,6 +18311,9 @@ ${groupContextStr}
                 lastRenderedHistoryLength === (history?.length || 0) &&
                 !isSelectionMode) {
                 console.log('[renderChatBody] 跳过重复渲染');
+                // ✅ 即使跳过渲染，也要重新应用背景图和自定义样式（防止被主题切换等操作清除）
+                applyCustomStyles(char);
+                applyChatBackground(char);
                 return;
             }
             
@@ -22348,6 +22357,8 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 // ✅ 修复：清理末尾多余的 ]，但保留 [voice:] [imgcard:] [sticker:] 等格式的闭合括号
                 function cleanMessage(text) {
                     if (!text) return text;
+                    // ✅ 清理末尾的 [DONE] / [done]（某些API代理会把SSE终止信号混入回复）
+                    text = text.replace(/\s*\[DONE\]\s*$/i, '').trim();
                     // 🔒 安全转换：AI禁止发真实图片，将 [img:URL] 转换为 [imgcard:图片描述]（但不处理 [sticker:]）
                     text = text.replace(/\[img:([^\]]+)\]/gi, (match, url) => {
                         if (url.startsWith('http') || url.startsWith('data:')) {
@@ -25187,6 +25198,7 @@ ${loreContext}
                     return rawText
                         .replace(/<[^>]*>/g, '') // 移除 HTML 标签
                         .replace(/[◇◆★☆●○■□▲△]/g, '') // 移除装饰字符
+                        .replace(/\s*\[DONE\]\s*$/i, '') // 移除末尾 [DONE]
                         .trim();
                 }
                 
@@ -25234,6 +25246,11 @@ ${loreContext}
                         data?.content ??                         // 直接返回内容
                         data?.reply ??                           // 自定义字段
                         '';
+                }
+                
+                // ✅ 清理末尾的 [DONE] / [done]（某些API代理会把SSE终止信号混入内容）
+                if (content) {
+                    content = content.replace(/\s*\[DONE\]\s*$/i, '').replace(/\s*\[done\]\s*$/i, '').trim();
                 }
                 
                 if (!content) {
@@ -25454,6 +25471,8 @@ ${loreContext}
             }
             
             // ✅ 流结束后，才做处理
+            // ✅ 清理末尾的 [DONE] / [done]（防止SSE终止信号泄入内容）
+            rawText = rawText.replace(/\s*\[DONE\]\s*$/i, '').trim();
             // 🎯 第二阶段：完成层 - 统一做翻译/结构解析
             const finalText = rawText;
             const processed = processTranslationAndStructure(finalText);
@@ -49501,9 +49520,10 @@ function previewChatTheme() {
     const previewContainer = document.getElementById('chat-theme-preview-container');
     if (!previewContainer) return;
 
-    const headerBgStyle = headerBg ? `background-image: url(${headerBg}); background-size: cover; background-position: center;` : '';
-    const footerBgStyle = footerBg ? `background-image: url(${footerBg}); background-size: cover; background-position: center;` : '';
-    const chatBgStyle = chatBg ? `background-image: url(${chatBg}); background-size: cover; background-position: center;` : '';
+    // 有背景图时用 background 简写覆盖，并设 transparent 让透明PNG透出后面内容
+    const headerBgStyle = headerBg ? `background: url(${headerBg}) center/cover no-repeat transparent;` : '';
+    const footerBgStyle = footerBg ? `background: url(${footerBg}) center/cover no-repeat transparent;` : '';
+    const chatBgStyle = chatBg ? `background: url(${chatBg}) center/cover no-repeat;` : '';
 
     // 图标渲染：有URL用图片，没有用默认SVG（使用自定义大小）
     const backIcon = iconBack
@@ -49537,7 +49557,7 @@ function previewChatTheme() {
     previewContainer.innerHTML = `
         <div style="width:100%; height:100%; display:flex; flex-direction:column; overflow:hidden;">
             <!-- ===== 顶栏 chat-header ===== -->
-            <div class="chat-header" style="height:54px; ${headerBgStyle} background-color:${headerColor}; backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); padding:0 10px 0 10px; display:flex; align-items:center; border-bottom:1px solid rgba(0,0,0,0.05); flex-shrink:0; position:relative; z-index:10; box-sizing:border-box;">
+            <div class="chat-header" style="height:54px; ${headerBgStyle} ${headerBg ? '' : 'background-color:' + headerColor + ';'} backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); padding:0 10px 0 10px; display:flex; align-items:center; border-bottom:1px solid rgba(0,0,0,0.05); flex-shrink:0; position:relative; z-index:10; box-sizing:border-box;">
                 <!-- 返回按钮 -->
                 <div class="chat-back" style="display:flex; align-items:center; justify-content:center; width:40px; height:40px; cursor:pointer; color:#333;">
                     ${backIcon}
@@ -49559,7 +49579,7 @@ function previewChatTheme() {
             </div>
             
             <!-- ===== 底栏 chat-footer ===== -->
-            <div class="chat-footer" style="${footerBgStyle} background-color:${footerColor}; border-top:1px solid rgba(0,0,0,0.05); display:flex; flex-direction:column; flex-shrink:0;">
+            <div class="chat-footer" style="${footerBgStyle} ${footerBg ? '' : 'background-color:' + footerColor + ';'} border-top:1px solid rgba(0,0,0,0.05); display:flex; flex-direction:column; flex-shrink:0;">
                 <div class="chat-input-bar" style="min-height:54px; padding:8px 12px; display:flex; align-items:center; gap:10px;">
                     <!-- AI接收回复按钮 -->
                     <div class="chat-icon-btn" style="width:32px; height:32px; color:#999; cursor:pointer; display:flex; align-items:center; justify-content:center; border-radius:50%; flex-shrink:0;">
@@ -49743,12 +49763,10 @@ async function applyThemeToChat(themeId) {
     _restoreDefaultIcons(chatHeader, chatFooter);
 
     if (themeId === null || themeId === undefined) {
-        // 恢复默认主题
-        chatBody.style.backgroundImage = '';
-        chatHeader.style.backgroundImage = '';
-        chatHeader.style.backgroundColor = '';
-        chatFooter.style.backgroundImage = '';
-        chatFooter.style.backgroundColor = '';
+        // 恢复默认主题 - 清除 background 简写（因为应用主题时使用了 background 简写）
+        chatBody.style.background = '';
+        chatHeader.style.background = '';
+        chatFooter.style.background = '';
         // 恢复标题颜色
         const chatTitle = chatHeader.querySelector('.chat-title');
         if (chatTitle) chatTitle.style.color = '';
@@ -49765,22 +49783,22 @@ async function applyThemeToChat(themeId) {
 
         // ===== 背景 =====
         if (theme.chatBackground) {
-            chatBody.style.backgroundImage = `url(${theme.chatBackground})`;
-            chatBody.style.backgroundSize = 'cover';
-            chatBody.style.backgroundPosition = 'center';
+            chatBody.style.background = `url(${theme.chatBackground}) center/cover no-repeat`;
         } else {
             chatBody.style.backgroundImage = '';
         }
 
         // ===== 顶栏背景 =====
         if (theme.headerBg) {
-            chatHeader.style.backgroundImage = `url(${theme.headerBg})`;
-            chatHeader.style.backgroundSize = 'cover';
-            chatHeader.style.backgroundPosition = 'center';
+            // 有背景图时：用 background 简写一次性覆盖（解决样式表 background 简写冲突）
+            // backgroundColor 设为 transparent，让透明PNG能透出后面的内容
+            chatHeader.style.background = `url(${theme.headerBg}) center/cover no-repeat transparent`;
+            chatHeader.style.backdropFilter = 'blur(10px)';
+            chatHeader.style.webkitBackdropFilter = 'blur(10px)';
         } else {
             chatHeader.style.backgroundImage = '';
+            if (theme.headerColor) chatHeader.style.backgroundColor = theme.headerColor;
         }
-        if (theme.headerColor) chatHeader.style.backgroundColor = theme.headerColor;
 
         // ===== 标题文字颜色 =====
         const chatTitle = chatHeader.querySelector('.chat-title');
@@ -49790,13 +49808,12 @@ async function applyThemeToChat(themeId) {
 
         // ===== 底栏背景 =====
         if (theme.footerBg) {
-            chatFooter.style.backgroundImage = `url(${theme.footerBg})`;
-            chatFooter.style.backgroundSize = 'cover';
-            chatFooter.style.backgroundPosition = 'center';
+            // 有背景图时：同理用 background 简写，transparent 让透明区域透出背景
+            chatFooter.style.background = `url(${theme.footerBg}) center/cover no-repeat transparent`;
         } else {
             chatFooter.style.backgroundImage = '';
+            if (theme.footerColor) chatFooter.style.backgroundColor = theme.footerColor;
         }
-        if (theme.footerColor) chatFooter.style.backgroundColor = theme.footerColor;
 
         // ===== 顶栏按钮图标替换 =====
         // 返回按钮
@@ -49855,6 +49872,13 @@ function _replaceWithImg(container, imgUrl, size) {
         }
         svg.style.display = 'none';
     }
+    // 如果是发送按钮，隐藏原始背景色/圆形样式，防止透出
+    if (container.classList.contains('chat-send-btn')) {
+        if (!container.getAttribute('data-original-bg')) {
+            container.setAttribute('data-original-bg', getComputedStyle(container).background);
+        }
+        container.style.background = 'transparent';
+    }
     // 移除已有的主题图标
     const oldImg = container.querySelector('.theme-icon-img');
     if (oldImg) oldImg.remove();
@@ -49878,6 +49902,10 @@ function _restoreDefaultIcons(chatHeader, chatFooter) {
         // 恢复SVG显示
         const svg = container.querySelector('svg');
         if (svg) svg.style.display = '';
+        // 恢复发送按钮的原始背景样式
+        if (container.classList.contains('chat-send-btn')) {
+            container.style.background = '';
+        }
     });
 }
 
