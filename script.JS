@@ -9854,6 +9854,57 @@ ${(() => {
             }
         }
         
+        // 🎯 检测修改密码指令 ((CHANGE_PASSWORD:新密码))
+        const changePasswordMatch = replyText.match(/\(\(CHANGE_PASSWORD:\s*([^)]+)\)\)/i);
+        if (changePasswordMatch) {
+            console.log('[acceptMessageReply] 🔐 检测到修改密码指令');
+            const newPassword = changePasswordMatch[1].trim();
+            replyText = replyText.replace(/\(\(CHANGE_PASSWORD:[^)]+\)\)/gi, '').trim();
+            
+            // 执行修改密码
+            const freshChar = await db.characters.get(targetChar.id);
+            if (freshChar) {
+                // 确保 identity 对象存在
+                if (!freshChar.identity) {
+                    freshChar.identity = {};
+                }
+                
+                const oldPassword = freshChar.identity.password || '';
+                freshChar.identity.password = newPassword;
+                
+                // 保存到数据库
+                await db.characters.put(freshChar);
+                console.log('[acceptMessageReply] ✅ 已修改密码，新密码:', newPassword);
+                
+                // 清除已验证状态，强制下次登录需要重新输入密码
+                const fpWechatVerified = new Set(JSON.parse(localStorage.getItem('fpWechatVerified') || '[]'));
+                fpWechatVerified.delete(String(freshChar.id));
+                localStorage.setItem('fpWechatVerified', JSON.stringify([...fpWechatVerified]));
+                
+                // 添加系统消息到微信聊天记录
+                const history = getChatHistory(freshChar, accountId);
+                history.push({
+                    role: 'system',
+                    content: `[${freshChar.name} 修改了账号密码，原密码已失效]`,
+                    time: Date.now(),
+                    type: 'char_change_password'
+                });
+                await setChatHistory(freshChar, accountId, history);
+                
+                // 刷新微信界面
+                if (typeof currentChatCharId !== 'undefined' && currentChatCharId === targetChar.id) {
+                    await renderChatBody(freshChar);
+                }
+                const activeTab = document.querySelector('.wechat-tab-item.active');
+                if (activeTab) {
+                    const tabIndex = Array.from(document.querySelectorAll('.wechat-tab-item')).indexOf(activeTab);
+                    switchWechatTab(tabIndex);
+                }
+                
+                showToast(`${freshChar.name} 修改了密码！`);
+            }
+        }
+        
         // 9. 处理分隔符，拆分成多条消息
         const replySegments = replyText.split('|||').map(s => s.trim()).filter(s => s.length > 0);
         
@@ -25939,15 +25990,35 @@ ${offlineLines}
                 let _fpHasPhoneActivity = false; // ★ 是否有查手机活动需要标记
                 let _fpNpcLinesForMemory = []; // ★ 保存活动详情，用于写入长期记忆
                 try {
+                    // 获取上下文条数，用于判断时间范围
+                    const contextCount = char.context_message_count || 20;
+                    
+                    // 获取聊天历史，计算时间范围
+                    const chatHistory = getChatHistory(char, accountId);
+                    let contextStartTime = 0;
+                    if (chatHistory.length > 0) {
+                        // 取最近的上下文条数，找到最早的消息时间
+                        const recentHistory = chatHistory.slice(-contextCount);
+                        if (recentHistory.length > 0) {
+                            contextStartTime = Math.min(...recentHistory.map(m => m.time || 0));
+                        }
+                    }
+                    
                     if (char.chat_history_by_user) {
                         const fpNpcLines = [];
                         for (const key of Object.keys(char.chat_history_by_user)) {
                             if (!key.startsWith('fp_npc_')) continue;
                             const npcIdStr = key.replace('fp_npc_', '');
                             const npcHistory = char.chat_history_by_user[key] || [];
-                            // 找出所有 fpSent=true 且未通知过的消息
-                            const unnotifiedFpMsgs = npcHistory.filter(m => m.fpSent && !m.fpNotified);
-                            if (unnotifiedFpMsgs.length === 0) continue;
+                            
+                            // ★ 修改：不再检查 fpNotified，而是根据时间范围判断
+                            // 找出所有 fpSent=true 且在上下文时间范围内的消息
+                            const relevantFpMsgs = npcHistory.filter(m => 
+                                m.fpSent && 
+                                (m.time || 0) >= contextStartTime
+                            );
+                            
+                            if (relevantFpMsgs.length === 0) continue;
 
                             // 查找NPC角色名
                             let npcName = 'NPC';
@@ -25956,13 +26027,13 @@ ${offlineLines}
                                 if (npcChar) npcName = npcChar.nick || npcChar.name || 'NPC';
                             } catch (e) {}
 
-                            // 找到第一条fpSent消息的时间，只收集该时间之后的消息
-                            const firstFpTime = unnotifiedFpMsgs[0].time || 0;
+                            // 找到第一条相关消息的时间
+                            const firstFpTime = Math.min(...relevantFpMsgs.map(m => m.time || 0));
 
-                            // 按时间顺序收集fpSent及之后的NPC回复
+                            // 按时间顺序收集上下文范围内的所有查手机活动（不管是否已通知）
                             for (const m of npcHistory) {
-                                if ((m.time || 0) < firstFpTime) continue;
-                                if (m.fpNotified) continue;
+                                if ((m.time || 0) < contextStartTime) continue; // 不在上下文范围内，跳过
+                                if ((m.time || 0) < firstFpTime) continue; // 在第一条查手机消息之前，跳过
 
                                 if (m.fpSent && m.role === 'char') {
                                     // 用户冒充角色发的消息 - ★ 保留完整内容，不截断
@@ -25983,19 +26054,21 @@ ${offlineLines}
                                     }
                                     // ★ 不再截断内容，保留完整消息
                                     fpNpcLines.push(`  → 冒充你给「${npcName}」发了一条消息，内容原文: "${desc}"`);
-                                } else if (!m.fpSent && m.role === 'user') {
+                                } else if (!m.fpSent && m.role === 'user' && (m.time || 0) >= firstFpTime) {
+                                    // NPC回复的消息，但只在查手机活动之后才显示
                                     let desc = m.content || '';
                                     fpNpcLines.push(`  ← 「${npcName}」回复了，内容原文: "${desc}"`);
                                 }
                             }
                         }
 
-                        // 也检测查手机发布的朋友圈
+                        // 也检测查手机发布的朋友圈（根据上下文时间范围）
                         if (char.fp_moments_by_user) {
                             for (const mKey of Object.keys(char.fp_moments_by_user)) {
                                 const momentsList = char.fp_moments_by_user[mKey] || [];
                                 for (const m of momentsList) {
-                                    if (m.fpSent && !m.fpNotified) {
+                                    // ★ 修改：不再检查 fpNotified，而是根据时间范围判断
+                                    if (m.fpSent && (m.time || 0) >= contextStartTime) {
                                         let desc = m.content || '';
                                         let imgInfo = '';
                                         if (m.images && m.images.length > 0) imgInfo = `（附带${m.images.length}张图片）`;
@@ -26011,7 +26084,6 @@ ${offlineLines}
                                                 if (cText) fpNpcLines.push(`    💬 ${cName} 评论了: "${cText}"`);
                                             }
                                         }
-                                        // ★ 不立即标记fpNotified
                                     }
                                 }
                             }
@@ -26019,6 +26091,10 @@ ${offlineLines}
 
                         if (fpNpcLines.length > 0) {
                             _fpNpcLinesForMemory = [...fpNpcLines]; // ★ 保存副本用于长期记忆
+                            
+                            // 检查角色是否有密码（用于修改密码指令）
+                            const hasPassword = char.identity?.password && char.identity.password.trim() !== '';
+                            
                             fpNpcActivityText = `
 
 ---
@@ -26030,7 +26106,28 @@ ${offlineLines}
 ${fpNpcLines.join('\n')}
 
 以上都不是你自己做的，是对方用你手机冒充你做的。
-请根据你的人设和性格，自然地对此做出反应。不要忽略这件事。`;
+请根据你的人设和性格，自然地对此做出反应。不要忽略这件事。
+
+${hasPassword ? `---
+
+## 🔐 重要：你可以修改密码
+
+你发现对方登录了你的账号（因为对方猜对了你的密码），为了安全，你可以修改密码防止对方再次登录。
+
+**如何修改密码：**
+- 如果你想修改密码，在回复的**最后**加上：\`((CHANGE_PASSWORD:新密码))\`
+- 例如：我要改密码了！|||((CHANGE_PASSWORD:新密码123456))
+- 或者：太不安全了|||我要改密码|||((CHANGE_PASSWORD:abc123))
+
+**修改后的效果：**
+- 你的账号密码会被更新为新密码
+- 对方需要重新猜测新密码才能登录你的账号
+- 原来的密码将失效
+
+**注意：**
+- 请根据你的人设和性格决定是否要修改密码
+- 如果你觉得对方登录你的账号是合理的（比如你们关系很好），可以不修改
+- 如果你觉得不安全或生气，可以立即修改密码` : ''}`;
                             _fpHasPhoneActivity = true; // ★ 标记有活动，等AI回复成功后再标记fpNotified
                             console.log('[triggerAiReply] ✅ 检测到查手机活动，共', fpNpcLines.length, '条记录（待AI回复后标记）');
                         }
@@ -27072,6 +27169,81 @@ ${checkResult.checkResult}
                     }
                     await executeCharBlockUser(targetCharId, accountId);
                     return;
+                }
+                
+                // 🎯 检测修改密码指令 ((CHANGE_PASSWORD:新密码))
+                const changePasswordMatch = replyText.match(/\(\(CHANGE_PASSWORD:\s*([^)]+)\)\)/i);
+                if (changePasswordMatch) {
+                    console.log('[TriggerAI] 🔐 检测到修改密码指令');
+                    const newPassword = changePasswordMatch[1].trim();
+                    const textBeforeChangePassword = cleanMessage(replyText.substring(0, changePasswordMatch.index).trim());
+                    
+                    // 先发送修改密码前的文字消息
+                    if (textBeforeChangePassword && textBeforeChangePassword.trim()) {
+                        const freshChar = await db.characters.get(targetCharId);
+                        if (freshChar) {
+                            let history = getChatHistory(freshChar, accountId);
+                            const textSegments = textBeforeChangePassword.split('|||').map(s => s.trim()).filter(s => s.length > 0);
+                            for (const seg of textSegments) {
+                                const subParts = splitMessageWithImages(cleanMessage(seg));
+                                
+                                for (const part of subParts) {
+                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode, { time: _vNow() }));
+                                    await setChatHistory(freshChar, accountId, history);
+                                    if (currentChatCharId === targetCharId) {
+                                        await appendMessageToUI('char', part);
+                                    }
+                                    await new Promise(r => setTimeout(r, 300));
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 执行修改密码
+                    const freshChar = await db.characters.get(targetCharId);
+                    if (freshChar) {
+                        // 确保 identity 对象存在
+                        if (!freshChar.identity) {
+                            freshChar.identity = {};
+                        }
+                        
+                        const oldPassword = freshChar.identity.password || '';
+                        freshChar.identity.password = newPassword;
+                        
+                        // 保存到数据库
+                        await db.characters.put(freshChar);
+                        console.log('[TriggerAI] ✅ 已修改密码，新密码:', newPassword);
+                        
+                        // 清除已验证状态，强制下次登录需要重新输入密码
+                        const fpWechatVerified = new Set(JSON.parse(localStorage.getItem('fpWechatVerified') || '[]'));
+                        fpWechatVerified.delete(String(freshChar.id));
+                        localStorage.setItem('fpWechatVerified', JSON.stringify([...fpWechatVerified]));
+                        
+                        // 添加系统消息到微信聊天记录
+                        let history = getChatHistory(freshChar, accountId);
+                        history.push({
+                            role: 'system',
+                            content: `[${freshChar.name} 修改了账号密码，原密码已失效]`,
+                            time: _vNow(),
+                            type: 'char_change_password'
+                        });
+                        await setChatHistory(freshChar, accountId, history);
+                        
+                        // 刷新微信界面
+                        if (currentChatCharId === targetCharId) {
+                            await renderChatBody(freshChar);
+                        }
+                        const activeTab = document.querySelector('.wechat-tab-item.active');
+                        if (activeTab) {
+                            const tabIndex = Array.from(document.querySelectorAll('.wechat-tab-item')).indexOf(activeTab);
+                            switchWechatTab(tabIndex);
+                        }
+                        
+                        showToast(`${freshChar.name} 修改了密码！`);
+                    }
+                    
+                    // 从回复文本中移除指令
+                    replyText = replyText.replace(/\(\(CHANGE_PASSWORD:[^)]+\)\)/gi, '').trim();
                 }
                 
                 // 🎯 检测NPC加好友指令（预处理）- 不return，继续处理消息
@@ -34721,6 +34893,130 @@ ${commenterInfos}
         
         // 刷新显示
         renderMomentsList();
+        
+        // 🎯 朋友圈私信功能：部分好友可能会因为朋友圈内容私聊用户
+        try {
+            if (friends.length > 0) {
+                // 随机选择10%-30%的好友来私信（至少0个，最多3个）
+                const dmRatio = 0.1 + Math.random() * 0.2;
+                const dmCount = Math.min(3, Math.max(0, Math.floor(friends.length * dmRatio)));
+                
+                if (dmCount > 0) {
+                    // 打乱顺序后取前dmCount个
+                    const shuffledForDM = [...friends].sort(() => Math.random() - 0.5);
+                    const dmFriends = shuffledForDM.slice(0, dmCount);
+                    
+                    console.log(`[朋友圈私信] 选中 ${dmFriends.length} 个好友来私信`);
+                    
+                    // 构建角色信息
+                    const _dmAid = getCurrentAccountId();
+                    const dmInfos = dmFriends.map(c => {
+                        const displayName = getCharDisplayName(c, _dmAid);
+                        return `- ${displayName}：${c.description || c.personality || '普通朋友'}`;
+                    }).join('\n');
+                    
+                    const dmPrompt = `${myName} 发了一条朋友圈：
+"${moment.content}"
+${moment.images?.length > 0 || moment.imageCount > 0 ? `（附带${moment.imageCount || moment.images.length}张图片${moment.imageDesc ? '：' + moment.imageDesc : ''}）` : ''}
+
+以下好友看到了这条朋友圈后，决定私聊 ${myName}，请为每个人生成一条私信内容：
+${dmInfos}
+
+要求：
+1. 私信内容要跟朋友圈内容相关
+2. 每条私信简短自然（5-30字），像微信私聊一样随意
+3. 可以用表情、语气词
+4. 符合每个角色的性格特点和与 ${myName} 的关系
+5. 不要跟朋友圈评论重复，私信更私密、更随意
+6. 可以是关心、调侃、好奇、羡慕等各种反应
+
+请返回JSON数组格式：
+[{"name": "角色名", "content": "私信内容"}, ...]`;
+
+                    const dmResult = await callAI([
+                        { role: 'system', content: '你是一个社交媒体私信生成助手，只返回JSON数组，不要任何其他文字。' },
+                        { role: 'user', content: dmPrompt }
+                    ]);
+                    
+                    // 解析AI返回的私信内容
+                    let aiDMs = [];
+                    try {
+                        let cleanDMResult = dmResult.trim();
+                        if (cleanDMResult.startsWith('```')) {
+                            cleanDMResult = cleanDMResult.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+                        }
+                        aiDMs = JSON.parse(cleanDMResult);
+                    } catch (e) {
+                        console.warn('[朋友圈私信] AI私信JSON解析失败:', e);
+                    }
+                    
+                    // 将私信写入聊天记录
+                    const _dmMatchAid = getCurrentAccountId();
+                    let dmSentCount = 0;
+                    
+                    for (const aiDM of aiDMs) {
+                        const dmChar = dmFriends.find(c => {
+                            const displayName = getCharDisplayName(c, _dmMatchAid);
+                            return displayName === aiDM.name || c.name === aiDM.name;
+                        });
+                        
+                        if (dmChar && aiDM.content) {
+                            try {
+                                // 延迟发送，模拟真实感（每条间隔2-8秒）
+                                const delay = (2000 + Math.random() * 6000) * (dmSentCount + 1);
+                                
+                                setTimeout(async () => {
+                                    try {
+                                        const freshDMChar = await db.characters.get(dmChar.id);
+                                        if (!freshDMChar) return;
+                                        
+                                        let history = getChatHistory(freshDMChar, _dmMatchAid);
+                                        
+                                        // 构建角色消息
+                                        const dmMsg = buildCharMessage(aiDM.content, !!freshDMChar.foreign_lang_mode);
+                                        dmMsg.momentDM = true; // 标记为朋友圈触发的私信
+                                        
+                                        history.push(dmMsg);
+                                        await setChatHistory(freshDMChar, _dmMatchAid, history);
+                                        
+                                        console.log(`[朋友圈私信] ${freshDMChar.name} 私信了 ${myName}: ${aiDM.content}`);
+                                        
+                                        // 如果用户正在查看这个聊天，更新UI
+                                        if (currentChatCharId === freshDMChar.id) {
+                                            await appendMessageToUI('char', aiDM.content, freshDMChar.avatar);
+                                        }
+                                        
+                                        // 发送通知
+                                        sendSystemNotification(freshDMChar.name, aiDM.content);
+                                        
+                                        // 刷新微信列表
+                                        if (currentChatCharId !== freshDMChar.id) {
+                                            const wechatPage = document.getElementById('wechat-page');
+                                            if (wechatPage && wechatPage.style.display !== 'none') {
+                                                const activeTab = document.querySelector('.wechat-tab-item.active .tab-name');
+                                                if (activeTab && activeTab.innerText === '微信') {
+                                                    renderWechatList(document.getElementById('wechat-content'));
+                                                }
+                                            }
+                                        }
+                                    } catch (dmErr) {
+                                        console.error('[朋友圈私信] 发送私信失败:', dmErr);
+                                    }
+                                }, delay);
+                                
+                                dmSentCount++;
+                            } catch (dmErr) {
+                                console.error('[朋友圈私信] 处理私信失败:', dmErr);
+                            }
+                        }
+                    }
+                    
+                    console.log(`[朋友圈私信] ✅ 已安排 ${dmSentCount} 条私信发送`);
+                }
+            }
+        } catch (dmError) {
+            console.error('[朋友圈私信] 私信功能执行失败:', dmError);
+        }
         
     } catch (error) {
         console.error('[朋友圈互动] 生成失败:', error);
