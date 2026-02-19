@@ -551,6 +551,53 @@ async function migratePhoneAndSmsToIndexedDB() {
             }
         }
 
+        // --- Web Worker 保活机制 (来自 pwa) ---
+        // 通过 Blob 创建内联 Worker，后台时 Worker 的 setInterval 不受浏览器节流限制
+        let keepAliveWorker = null;
+        try {
+            const workerCode = `
+                let tickInterval = null;
+                self.onmessage = function(e) {
+                    if (e.data === 'start') {
+                        if (tickInterval) clearInterval(tickInterval);
+                        console.log('[Worker] 保活心跳已启动');
+                        tickInterval = setInterval(() => {
+                            self.postMessage('tick');
+                        }, 5000); // 5秒心跳，Worker 不受后台节流
+                    } else if (e.data === 'stop') {
+                        if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
+                    }
+                };
+            `;
+            const blob = new Blob([workerCode], {type: 'application/javascript'});
+            const workerUrl = URL.createObjectURL(blob);
+            keepAliveWorker = new Worker(workerUrl);
+            
+            // Worker 每5秒发一个 tick，收到后检查是否需要触发主动聊天
+            let lastWorkerCheckTime = 0;
+            keepAliveWorker.onmessage = function(e) {
+                if (e.data === 'tick') {
+                    const now = Date.now();
+                    // 每15秒检查一次（与原来的 syncTimer 间隔一致）
+                    if (now - lastWorkerCheckTime >= 15000) {
+                        lastWorkerCheckTime = now;
+                        // 调用主动聊天检查（如果函数已定义）
+                        if (typeof checkAutoChat === 'function') {
+                            checkAutoChat();
+                        }
+                        if (typeof checkAutoMoments === 'function') {
+                            checkAutoMoments();
+                        }
+                    }
+                }
+            };
+            
+            keepAliveWorker.postMessage('start');
+            console.log('[KeepAlive] ✅ Worker 保活心跳已启动（后台不被节流）');
+        } catch (e) {
+            console.warn('[KeepAlive] ❌ 无法启动 Worker 保活:', e);
+        }
+
         // --- 强力保活功能 ---
         let keepAliveAudio = null;
 
@@ -936,7 +983,7 @@ async function migratePhoneAndSmsToIndexedDB() {
         }
 
         // ===== 更新公告弹窗 =====
-        const UPDATE_VERSION = 'v2026-02-09'; // 每次更新改这个版本号，就会重新弹出
+        const UPDATE_VERSION = 'v2026-02-19'; // 每次更新改这个版本号，就会重新弹出
         
         function checkUpdateNotice() {
             const readKey = 'update_notice_read_' + UPDATE_VERSION;
@@ -953,26 +1000,22 @@ async function migratePhoneAndSmsToIndexedDB() {
             overlay.innerHTML = `
                 <div style="background:#fff;border-radius:16px;width:310px;max-height:80vh;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,0.15);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;flex-direction:column;">
                     <div style="padding:22px 20px 0;text-align:center;">
-                        <div style="font-size:28px;margin-bottom:6px;">🎉</div>
                         <div style="font-size:17px;font-weight:700;color:#262626;letter-spacing:0.3px;">更新公告</div>
                         <div style="font-size:11px;color:#c7c7c7;margin-top:3px;">Update Notes · ${UPDATE_VERSION}</div>
                     </div>
                     <div style="padding:16px 20px;font-size:13px;color:#444;line-height:1.9;letter-spacing:0.2px;overflow-y:auto;flex:1;">
-                        <div style="font-size:14px;font-weight:600;color:#333;margin-bottom:8px;">🔧 修复了Bug</div>
+                        <div style="font-size:14px;font-weight:600;color:#333;margin-bottom:8px;">2.19更新</div>
                         <div style="padding-left:4px;">
-                            <p style="margin:0 0 4px;">1. 规范角色发送表情包</p>
-                            <p style="margin:0 0 4px;">2. 回复条数最大设置50</p>
-                            <p style="margin:0 0 4px;">3. 修复了编辑消息没反应</p>
-                            <p style="margin:0 0 4px;">4. 修复了长按消息</p>
-                            <p style="margin:0 0 4px;">5. 修复了群聊无法发送表情包红包</p>
-                            <p style="margin:0 0 4px;">6. 修复了快进时间戳</p>
-                            <p style="margin:0 0 4px;">7. 修复了视频不读人设</p>
-                            <p style="margin:0 0 4px;">8. 修复了线下不读人设</p>
-                            <p style="margin:0 0 4px;">9. 改进了一下翻译</p>
-                            <p style="margin:0 0 4px;">10. 修了点朋友圈</p>
+                            <p style="margin:0 0 4px;">1. 新增查手机/查岗功能，支持给角色好友发消息、给自己发消息/转账、发朋友圈，后续将持续扩充</p>
+                            <p style="margin:0 0 4px;">2. 角色查岗新增使用用户账号发朋友圈</p>
+                            <p style="margin:0 0 4px;">3. 拉黑删除角色后，角色可触发的行为内容更丰富</p>
+                            <p style="margin:0 0 4px;">4. 优化线上线下相关逻辑与表现</p>
+                            <p style="margin:0 0 4px;">5. 朋友圈新增删除功能，优化评论体验</p>
+                            <p style="margin:0 0 4px;">6. 上线默契绘画玩法</p>
+                            <p style="margin:0 0 4px;">7. 新增简易版购物功能（基础版）</p>
                         </div>
                         <div style="margin-top:12px;padding-top:10px;border-top:1px solid #f0f0f0;font-size:12px;color:#888;line-height:1.7;">
-                            谢谢大家反馈 如果还有bug欢迎再告知 ❤️
+                            如有bug欢迎反馈
                         </div>
                     </div>
                     <div style="padding:12px 20px 20px;text-align:center;">
@@ -1055,15 +1098,15 @@ async function migratePhoneAndSmsToIndexedDB() {
             dialog.innerHTML = `
                 <h3 style="margin: 0 0 16px 0; font-size: 18px;">导出数据选项</h3>
                 <p style="margin: 0 0 20px 0; font-size: 14px; color: #666;">
-                    选择要导出的数据类型：
+                    选择要导出的数据类型（默认导出全部）：
                 </p>
                 <div style="margin-bottom: 20px;">
                     <label style="display: flex; align-items: center; margin-bottom: 12px; cursor: pointer;">
                         <input type="checkbox" id="export-local-data" checked style="margin-right: 8px; width: 18px; height: 18px;">
                         <div>
-                            <div style="font-weight: 500;">本地数据</div>
+                            <div style="font-weight: 500;">本地全部数据</div>
                             <div style="font-size: 12px; color: #999;">
-                                包括：角色、聊天记录、世界书、表情包、朋友圈、群聊、电话/短信记录等
+                                包括：角色、聊天记录、世界书、表情包、朋友圈、群聊、电话/短信、日记、音乐、已安装应用、所有本地设置等
                             </div>
                         </div>
                     </label>
@@ -1120,7 +1163,7 @@ async function migratePhoneAndSmsToIndexedDB() {
         async function exportAllDataWithOptions(includeLocal = true, includeOnline = true) {
             try {
                 const exportData = {
-                    version: '2.0', // 版本升级到2.0
+                    version: '3.0', // 版本升级到3.0 - 完整导出
                     exportTime: new Date().toISOString(),
                     dataTypes: {
                         local: includeLocal,
@@ -1130,43 +1173,64 @@ async function migratePhoneAndSmsToIndexedDB() {
                 };
                 
                 if (includeLocal) {
-                    // 导出所有数据库表
+                    // ===== 1. 导出主数据库所有表 =====
                     exportData.data.dexiData = await db.dexiData.toArray();
                     exportData.data.lorebooks = await db.lorebooks.toArray();
                     exportData.data.characters = await db.characters.toArray();
                     exportData.data.sticker_categories = await db.sticker_categories.toArray();
                     exportData.data.moments = await db.moments.toArray();
                     exportData.data.friend_requests = await db.friend_requests.toArray();
-                    
-                    // 新增：导出群聊数据
                     exportData.data.group_chats = await db.group_chats.toArray();
-                    
-                    // 新增：导出电话和短信记录
                     exportData.data.phone_recents = await db.phone_recents.toArray();
                     exportData.data.sms_messages = await db.sms_messages.toArray();
-                    
-                    // 新增：导出聊天总结
                     exportData.data.chat_summaries = await db.chat_summaries.toArray();
-                    
-                    // 新增：导出头像库
                     exportData.data.avatar_library = await db.avatar_library.toArray();
                     exportData.data.avatar_categories = await db.avatar_categories.toArray();
-                    
-                    // 新增：导出聊天主题
                     exportData.data.chat_themes = await db.chat_themes.toArray();
                     
-                    // 导出本地 localStorage 数据
-                    exportData.localStorage = {
-                        user_id: localStorage.getItem('user_id'),
-                        current_my_char_id: localStorage.getItem('current_my_char_id'),
-                        notification_enabled: localStorage.getItem('notification_enabled'),
-                        debug_mode: localStorage.getItem('debug_mode'),
-                        keepalive_enabled: localStorage.getItem('keepalive_enabled')
-                    };
+                    // ===== 2. 导出 iCity 日记数据库 =====
+                    try {
+                        exportData.icityData = {
+                            diaries: await icityDb.diaries.toArray(),
+                            annotations: await icityDb.annotations.toArray()
+                        };
+                    } catch(e) {
+                        console.warn('[Export] iCity数据库导出失败:', e);
+                    }
+                    
+                    // ===== 3. 导出已安装应用数据库 =====
+                    try {
+                        exportData.installedAppsData = {
+                            apps: await installedAppsDb.apps.toArray()
+                        };
+                    } catch(e) {
+                        console.warn('[Export] 已安装应用数据库导出失败:', e);
+                    }
+                    
+                    // ===== 4. 导出音乐播放器数据库（不含音频文件） =====
+                    try {
+                        exportData.wyyMusicData = {
+                            userSettings: await wyyDb.userSettings.toArray(),
+                            playlistCards: await wyyDb.playlistCards.toArray(),
+                            songs: await wyyDb.songs.toArray(),
+                            lyrics: await wyyDb.lyrics.toArray(),
+                            playlists: await wyyDb.playlists.toArray()
+                            // 注意：songFiles 包含音频二进制数据，体积过大，不导出
+                        };
+                    } catch(e) {
+                        console.warn('[Export] 音乐播放器数据库导出失败:', e);
+                    }
+                    
+                    // ===== 5. 导出完整 localStorage（全量） =====
+                    exportData.localStorage = {};
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const key = localStorage.key(i);
+                        exportData.localStorage[key] = localStorage.getItem(key);
+                    }
                 }
                 
                 if (includeOnline) {
-                    // 导出联机相关数据
+                    // 导出联机相关数据（兼容旧格式）
                     exportData.onlineData = {
                         server_url: localStorage.getItem('online_server_url'),
                         token: localStorage.getItem('online_token'),
@@ -1206,15 +1270,25 @@ async function migratePhoneAndSmsToIndexedDB() {
                     const charCount = exportData.data.characters?.length || 0;
                     const groupCount = exportData.data.group_chats?.length || 0;
                     const momentCount = exportData.data.moments?.length || 0;
+                    const diaryCount = exportData.icityData?.diaries?.length || 0;
+                    const songCount = exportData.wyyMusicData?.songs?.length || 0;
+                    const lsCount = Object.keys(exportData.localStorage || {}).length;
                     stats.push(`角色: ${charCount}个`);
                     stats.push(`群聊: ${groupCount}个`);
                     stats.push(`朋友圈: ${momentCount}条`);
+                    if (diaryCount > 0) stats.push(`日记: ${diaryCount}篇`);
+                    if (songCount > 0) stats.push(`音乐: ${songCount}首`);
+                    stats.push(`本地设置: ${lsCount}项`);
+                    
+                    // 文件大小
+                    const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
+                    stats.push(`文件大小: ${sizeMB}MB`);
                 }
                 if (includeOnline) {
                     stats.push('联机账号信息已包含');
                 }
                 
-                alert('数据导出成功！\n\n' + stats.join('\n'));
+                alert('数据导出成功！（完整备份）\n\n' + stats.join('\n'));
             } catch (error) {
                 console.error('导出数据失败:', error);
                 alert('导出数据失败: ' + error.message);
@@ -1250,10 +1324,16 @@ async function migratePhoneAndSmsToIndexedDB() {
                     const charCount = importData.data.characters?.length || 0;
                     const groupCount = importData.data.group_chats?.length || 0;
                     const momentCount = importData.data.moments?.length || 0;
+                    const diaryCount = importData.icityData?.diaries?.length || 0;
+                    const songCount = importData.wyyMusicData?.songs?.length || 0;
+                    const lsCount = Object.keys(importData.localStorage || {}).length;
                     previewMsg += `📱 本地数据：\n`;
                     previewMsg += `  - 角色: ${charCount}个\n`;
                     previewMsg += `  - 群聊: ${groupCount}个\n`;
                     previewMsg += `  - 朋友圈: ${momentCount}条\n`;
+                    if (diaryCount > 0) previewMsg += `  - 日记: ${diaryCount}篇\n`;
+                    if (songCount > 0) previewMsg += `  - 音乐: ${songCount}首\n`;
+                    previewMsg += `  - 本地设置: ${lsCount}项\n`;
                     previewMsg += `  - 以及世界书、表情包、电话/短信记录等\n\n`;
                 }
                 if (hasOnlineData) {
@@ -1280,18 +1360,35 @@ async function migratePhoneAndSmsToIndexedDB() {
                 
                 // 清空现有数据
                 if (hasLocalData) {
+                    // 清空主数据库所有表
                     await db.dexiData.clear();
                     await db.lorebooks.clear();
                     await db.characters.clear();
                     await db.sticker_categories.clear();
                     await db.moments.clear();
                     await db.friend_requests.clear();
-                    
-                    // 清空新增的表
                     if (db.group_chats) await db.group_chats.clear();
                     if (db.phone_recents) await db.phone_recents.clear();
                     if (db.sms_messages) await db.sms_messages.clear();
                     if (db.chat_summaries) await db.chat_summaries.clear();
+                    if (db.avatar_library) await db.avatar_library.clear();
+                    if (db.avatar_categories) await db.avatar_categories.clear();
+                    if (db.chat_themes) await db.chat_themes.clear();
+                    
+                    // 清空子数据库
+                    try { await icityDb.diaries.clear(); await icityDb.annotations.clear(); } catch(e) { console.warn('[Import] 清空iCity失败:', e); }
+                    try { await installedAppsDb.apps.clear(); } catch(e) { console.warn('[Import] 清空Apps失败:', e); }
+                    try {
+                        await wyyDb.userSettings.clear();
+                        await wyyDb.playlistCards.clear();
+                        await wyyDb.songs.clear();
+                        await wyyDb.songFiles.clear();
+                        await wyyDb.lyrics.clear();
+                        if (wyyDb.playlists) await wyyDb.playlists.clear();
+                    } catch(e) { console.warn('[Import] 清空音乐数据库失败:', e); }
+                    
+                    // 清空 localStorage
+                    localStorage.clear();
                 }
                 
                 // 导入数据库表数据
@@ -1314,8 +1411,6 @@ async function migratePhoneAndSmsToIndexedDB() {
                     if (importData.data.friend_requests) {
                         await db.friend_requests.bulkAdd(importData.data.friend_requests);
                     }
-                    
-                    // 导入新增的表
                     if (importData.data.group_chats && db.group_chats) {
                         await db.group_chats.bulkAdd(importData.data.group_chats);
                     }
@@ -1338,7 +1433,49 @@ async function migratePhoneAndSmsToIndexedDB() {
                         await db.chat_themes.bulkAdd(importData.data.chat_themes);
                     }
                     
-                    // 导入 localStorage 数据
+                    // 导入 iCity 日记数据库
+                    if (importData.icityData) {
+                        try {
+                            if (importData.icityData.diaries?.length > 0) {
+                                await icityDb.diaries.bulkAdd(importData.icityData.diaries);
+                            }
+                            if (importData.icityData.annotations?.length > 0) {
+                                await icityDb.annotations.bulkAdd(importData.icityData.annotations);
+                            }
+                        } catch(e) { console.warn('[Import] 导入iCity数据失败:', e); }
+                    }
+                    
+                    // 导入已安装应用数据库
+                    if (importData.installedAppsData) {
+                        try {
+                            if (importData.installedAppsData.apps?.length > 0) {
+                                await installedAppsDb.apps.bulkAdd(importData.installedAppsData.apps);
+                            }
+                        } catch(e) { console.warn('[Import] 导入Apps数据失败:', e); }
+                    }
+                    
+                    // 导入音乐播放器数据库
+                    if (importData.wyyMusicData) {
+                        try {
+                            if (importData.wyyMusicData.userSettings?.length > 0) {
+                                await wyyDb.userSettings.bulkAdd(importData.wyyMusicData.userSettings);
+                            }
+                            if (importData.wyyMusicData.playlistCards?.length > 0) {
+                                await wyyDb.playlistCards.bulkAdd(importData.wyyMusicData.playlistCards);
+                            }
+                            if (importData.wyyMusicData.songs?.length > 0) {
+                                await wyyDb.songs.bulkAdd(importData.wyyMusicData.songs);
+                            }
+                            if (importData.wyyMusicData.lyrics?.length > 0) {
+                                await wyyDb.lyrics.bulkAdd(importData.wyyMusicData.lyrics);
+                            }
+                            if (importData.wyyMusicData.playlists?.length > 0 && wyyDb.playlists) {
+                                await wyyDb.playlists.bulkAdd(importData.wyyMusicData.playlists);
+                            }
+                        } catch(e) { console.warn('[Import] 导入音乐数据失败:', e); }
+                    }
+                    
+                    // 导入 localStorage 数据（全量恢复）
                     if (importData.localStorage) {
                         Object.keys(importData.localStorage).forEach(key => {
                             const value = importData.localStorage[key];
@@ -1349,7 +1486,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                     }
                 }
                 
-                // 导入联机数据
+                // 导入联机数据（兼容旧版和新版）
                 if (hasOnlineData && importData.onlineData) {
                     if (importData.onlineData.server_url) {
                         localStorage.setItem('online_server_url', importData.onlineData.server_url);
@@ -1385,7 +1522,7 @@ async function migratePhoneAndSmsToIndexedDB() {
         
         // 清空所有数据
         async function clearAllDataConfirm() {
-            const confirm1 = confirm('⚠️ 警告：此操作将删除所有数据！\n\n包括：\n- 所有角色和聊天记录\n- 所有世界书\n- 所有表情包\n- 所有朋友圈\n- 所有群聊\n- 电话和短信记录\n- 联机账号信息\n- API设置\n\n此操作不可恢复，确定要继续吗？');
+            const confirm1 = confirm('⚠️ 警告：此操作将删除所有数据！\n\n包括：\n- 所有角色和聊天记录\n- 所有世界书\n- 所有表情包\n- 所有朋友圈\n- 所有群聊\n- 电话和短信记录\n- 日记数据\n- 音乐数据\n- 已安装应用\n- 联机账号信息\n- API设置\n- 所有本地设置\n\n此操作不可恢复，确定要继续吗？');
             if (!confirm1) return;
             
             const confirm2 = prompt('请输入"确认删除"以继续：');
@@ -1395,19 +1532,32 @@ async function migratePhoneAndSmsToIndexedDB() {
             }
             
             try {
-                // 清空所有数据库表
+                // 清空主数据库所有表
                 await db.dexiData.clear();
                 await db.lorebooks.clear();
                 await db.characters.clear();
                 await db.sticker_categories.clear();
                 await db.moments.clear();
                 await db.friend_requests.clear();
-                
-                // 清空新增的表
                 if (db.group_chats) await db.group_chats.clear();
                 if (db.phone_recents) await db.phone_recents.clear();
                 if (db.sms_messages) await db.sms_messages.clear();
                 if (db.chat_summaries) await db.chat_summaries.clear();
+                if (db.avatar_library) await db.avatar_library.clear();
+                if (db.avatar_categories) await db.avatar_categories.clear();
+                if (db.chat_themes) await db.chat_themes.clear();
+                
+                // 清空子数据库
+                try { await icityDb.diaries.clear(); await icityDb.annotations.clear(); } catch(e) { console.warn('[Clear] 清空iCity失败:', e); }
+                try { await installedAppsDb.apps.clear(); } catch(e) { console.warn('[Clear] 清空Apps失败:', e); }
+                try {
+                    await wyyDb.userSettings.clear();
+                    await wyyDb.playlistCards.clear();
+                    await wyyDb.songs.clear();
+                    await wyyDb.songFiles.clear();
+                    await wyyDb.lyrics.clear();
+                    if (wyyDb.playlists) await wyyDb.playlists.clear();
+                } catch(e) { console.warn('[Clear] 清空音乐数据库失败:', e); }
                 
                 // 清空 localStorage
                 localStorage.clear();
@@ -1833,6 +1983,66 @@ async function migratePhoneAndSmsToIndexedDB() {
             showToast('✅ 已恢复默认字体');
         }
         
+        // ===== 全局字体大小设置 =====
+        let globalFontSizeStyleElement = null;
+        
+        // 预览全局字体大小（拖动滑块时实时生效）
+        function previewGlobalFontSize(size) {
+            document.getElementById('global-font-size-value').textContent = size + 'px';
+            applyGlobalFontSize(size);
+        }
+        
+        // 应用全局字体大小
+        function applyGlobalFontSize(size) {
+            if (globalFontSizeStyleElement) {
+                globalFontSizeStyleElement.remove();
+            }
+            
+            globalFontSizeStyleElement = document.createElement('style');
+            globalFontSizeStyleElement.id = 'global-font-size-style';
+            globalFontSizeStyleElement.textContent = `
+                /* 全局默认字体大小 */
+                .message-content,
+                .message-content .msg-text,
+                .message-content .text-content {
+                    font-size: ${size}px !important;
+                }
+            `;
+            document.head.appendChild(globalFontSizeStyleElement);
+        }
+        
+        // 保存全局字体大小
+        async function saveGlobalFontSize() {
+            const size = document.getElementById('global-font-size-slider').value;
+            try {
+                await db.dexiData.put({ key: 'globalFontSize', value: size });
+                applyGlobalFontSize(size);
+                showToast(`✅ 字体大小已保存：${size}px`);
+            } catch(e) {
+                console.error('[FontSize] 保存失败:', e);
+                showToast('⚠️ 保存失败');
+            }
+        }
+        
+        // 重置全局字体大小为默认
+        async function resetGlobalFontSize() {
+            document.getElementById('global-font-size-slider').value = 14;
+            document.getElementById('global-font-size-value').textContent = '14px';
+            
+            // 移除自定义样式
+            if (globalFontSizeStyleElement) {
+                globalFontSizeStyleElement.remove();
+                globalFontSizeStyleElement = null;
+            }
+            
+            try {
+                await db.dexiData.put({ key: 'globalFontSize', value: '' });
+            } catch(e) {
+                console.error('[FontSize] 清除设置失败:', e);
+            }
+            showToast('✅ 已恢复默认字体大小');
+        }
+        
         // 桌面文字颜色相关
         let desktopTextColorStyleElement = null;
         
@@ -2025,11 +2235,2071 @@ async function migratePhoneAndSmsToIndexedDB() {
             });
         })();
 
-        // ===== 查手机（占位，暂无功能） =====
-        function showFindPhonePage() {
-            alert('暂无功能');
+        // ===== 查手机功能（白色INS风） =====
+        let findPhoneTargetAccountId = null; // 选中的用户账号ID
+        let findPhoneTargetRoleId = null;    // 选中的角色ID
+        
+        // 获取某个账号下的所有相关角色（尽可能宽松匹配，确保不遗漏）
+        function getFindPhoneFriends(allChars, accountId) {
+            console.log(`[查手机] 开始过滤好友，accountId=${accountId}，总角色数=${allChars.length}`);
+            const result = allChars.filter(c => {
+                if (c.type === 'user') return false;
+                
+                // 1. 按账号隔离的好友状态（最优先）
+                const perUserStatus = c.wechat_status_by_user?.[accountId];
+                if (perUserStatus === 'friend' || perUserStatus === 'deleted' || perUserStatus === 'blocked' || perUserStatus === 'deleted_by_char' || perUserStatus === 'blocked_by_char') {
+                    console.log(`[查手机] ✅ ${c.name}(id=${c.id}) - 按账号状态: ${perUserStatus}`);
+                    return true;
+                }
+                
+                // 2. 有按账号隔离的聊天记录（说明跟这个账号有过互动）
+                const perUserChat = c.chat_history_by_user?.[accountId];
+                if (perUserChat && perUserChat.length > 0) {
+                    console.log(`[查手机] ✅ ${c.name}(id=${c.id}) - 有账号隔离聊天记录(${perUserChat.length}条)`);
+                    return true;
+                }
+                
+                // 3. 旧的全局好友状态（无论wechat_status_by_user是否存在）
+                if (c.wechat_status === 'friend' || c.wechat_status === 'deleted' || c.wechat_status === 'blocked') {
+                    console.log(`[查手机] ✅ ${c.name}(id=${c.id}) - 旧全局状态: ${c.wechat_status}`);
+                    return true;
+                }
+                
+                // 4. 旧的全局聊天记录
+                if (c.chat_history && c.chat_history.length > 0 && !c.chat_history_by_user) {
+                    console.log(`[查手机] ✅ ${c.name}(id=${c.id}) - 有旧全局聊天记录(${c.chat_history.length}条)`);
+                    return true;
+                }
+                
+                // 5. 如果这个角色在任意账号下是好友，检查是否有遗漏
+                if (c.wechat_status_by_user) {
+                    const anyFriend = Object.values(c.wechat_status_by_user).some(s => s === 'friend');
+                    if (anyFriend) {
+                        console.log(`[查手机] ⚠️ ${c.name}(id=${c.id}) 在其他账号是好友但当前账号(${accountId})不是，wechat_status_by_user=`, JSON.stringify(c.wechat_status_by_user));
+                    }
+                }
+                
+                return false;
+            });
+            console.log(`[查手机] 过滤结果: ${result.length}个好友 - [${result.map(r => r.name).join(', ')}]`);
+            return result;
+        }
+        
+        // 第一步：显示用户账号列表
+        async function showFindPhonePage() {
+            const page = document.getElementById('findphone-page');
+            const listContainer = document.getElementById('findphone-account-list');
+            listContainer.innerHTML = '';
+            
+            const allUsers = await db.characters.where('type').equals('user').toArray();
+            const registeredUsers = allUsers.filter(u => u.identity && u.identity.wechat_registered);
+            
+            if (registeredUsers.length === 0) {
+                listContainer.innerHTML = `
+                    <div style="text-align:center; padding:50px 20px; color:#ccc;">
+                        <svg viewBox="0 0 24 24" style="width:48px; height:48px; stroke:#ddd; fill:none; stroke-width:1.5; margin-bottom:12px;"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+                        <div style="font-size:14px; color:#bbb;">暂无可查看的账号</div>
+                        <div style="font-size:12px; margin-top:6px; color:#ddd;">请先在 WeChat 中注册用户</div>
+                    </div>
+                `;
+                page.style.display = 'flex';
+                return;
+            }
+            
+            const allChars = await db.characters.toArray();
+            
+            for (const user of registeredUsers) {
+                const accountId = String(user.id);
+                const friends = getFindPhoneFriends(allChars, accountId);
+                
+                const card = document.createElement('div');
+                card.className = 'findphone-account-card';
+                card.onclick = () => showFindPhoneRoles(user);
+                
+                const avatarStyle = user.avatar ? `background-image:url(${user.avatar})` : '';
+                
+                // 好友头像叠放
+                let friendDotsHtml = '';
+                if (friends.length > 0) {
+                    const dots = friends.slice(0, 4).map(f => {
+                        const fa = f.avatar ? `background-image:url(${f.avatar})` : '';
+                        return `<div class="findphone-friend-dot" style="${fa}"></div>`;
+                    }).join('');
+                    friendDotsHtml = `<div class="findphone-friends-row">${dots}<span class="findphone-friends-count">${friends.length}位好友</span></div>`;
+                }
+                
+                card.innerHTML = `
+                    <div class="findphone-account-avatar" style="${avatarStyle}"></div>
+                    <div class="findphone-account-info">
+                        <div class="findphone-account-name">${user.nick || user.name}</div>
+                        <div class="findphone-account-sub">${user.identity && user.identity.account ? user.identity.account : ''}</div>
+                        ${friendDotsHtml}
+                    </div>
+                    <div class="findphone-account-arrow">›</div>
+                `;
+                listContainer.appendChild(card);
+            }
+            
+            page.style.display = 'flex';
+        }
+        
+        function hideFindPhonePage() {
+            const page = document.getElementById('findphone-page');
+            page.style.transform = 'scale(0.95)';
+            page.style.opacity = '0';
+            setTimeout(() => {
+                page.style.display = 'none';
+                page.style.transform = '';
+                page.style.opacity = '';
+            }, 200);
+        }
+        
+        // 第二步：显示选中用户账号下的角色好友列表
+        async function showFindPhoneRoles(user) {
+            findPhoneTargetAccountId = String(user.id);
+            
+            const page = document.getElementById('findphone-roles-page');
+            const title = document.getElementById('findphone-roles-title');
+            const listContainer = document.getElementById('findphone-roles-list');
+            
+            title.textContent = (user.nick || user.name) + ' 的好友';
+            listContainer.innerHTML = '';
+            
+            const allChars = await db.characters.toArray();
+            const accountId = String(user.id);
+            const friends = getFindPhoneFriends(allChars, accountId);
+            
+            // 数据自动修复：如果角色全局是好友但当前账号没有隔离记录，自动补上
+            for (const f of friends) {
+                const perUserStatus = f.wechat_status_by_user?.[accountId];
+                if (!perUserStatus || perUserStatus === 'stranger') {
+                    // 当前账号没有记录，但被 getFindPhoneFriends 匹配到了（说明有旧数据或聊天记录）
+                    // 自动修复：设置为好友
+                    if (!f.wechat_status_by_user) f.wechat_status_by_user = {};
+                    f.wechat_status_by_user[accountId] = 'friend';
+                    db.characters.put(f).catch(e => console.error('[查手机] 自动修复好友状态失败:', e));
+                    console.log(`[查手机] 🔧 自动修复: ${f.name}(id=${f.id}) 在账号 ${accountId} 下设为好友`);
+                }
+            }
+            
+            if (friends.length === 0) {
+                listContainer.innerHTML = `
+                    <div style="text-align:center; padding:50px 20px; color:#ccc;">
+                        <svg viewBox="0 0 24 24" style="width:40px; height:40px; stroke:#ddd; fill:none; stroke-width:1.5; margin-bottom:12px;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                        <div style="font-size:14px; color:#bbb;">该账号暂无角色好友</div>
+                    </div>
+                `;
+                page.style.display = 'flex';
+                return;
+            }
+            
+            for (const role of friends) {
+                const card = document.createElement('div');
+                card.className = 'findphone-account-card';
+                card.onclick = () => openFindPhoneDesktop(role);
+                
+                const avatarStyle = role.avatar ? `background-image:url(${role.avatar})` : '';
+                const displayName = getCharDisplayName(role, accountId);
+                const status = getFriendStatus(role, accountId);
+                const desc = role.identity && role.identity.account ? role.identity.account : (role.nick || '');
+                
+                card.innerHTML = `
+                    <div class="findphone-account-avatar" style="${avatarStyle}"></div>
+                    <div class="findphone-account-info">
+                        <div class="findphone-account-name">${displayName}</div>
+                        <div class="findphone-account-sub">${desc}</div>
+                    </div>
+                    <div class="findphone-account-arrow">›</div>
+                `;
+                listContainer.appendChild(card);
+            }
+            
+            page.style.display = 'flex';
+        }
+        
+        function hideFindPhoneRolesPage() {
+            const page = document.getElementById('findphone-roles-page');
+            page.style.transform = 'scale(0.95)';
+            page.style.opacity = '0';
+            setTimeout(() => {
+                page.style.display = 'none';
+                page.style.transform = '';
+                page.style.opacity = '';
+            }, 200);
+        }
+        
+        // 第三步：打开角色的手机桌面
+        async function openFindPhoneDesktop(role) {
+            findPhoneTargetRoleId = String(role.id);
+            
+            const desktop = document.getElementById('findphone-desktop');
+            const ownerLabel = document.getElementById('findphone-owner-name');
+            const timeEl = document.getElementById('findphone-time');
+            const lockTime = document.getElementById('findphone-lock-time');
+            const lockDate = document.getElementById('findphone-lock-date');
+            const wallpaper = document.getElementById('findphone-wallpaper');
+            
+            ownerLabel.textContent = (role.nick || role.name) + ' 的手机';
+            
+            const now = new Date();
+            const hh = now.getHours().toString().padStart(2, '0');
+            const mm = now.getMinutes().toString().padStart(2, '0');
+            timeEl.textContent = hh + ':' + mm;
+            lockTime.textContent = hh + ':' + mm;
+            
+            const weekdays = ['星期日','星期一','星期二','星期三','星期四','星期五','星期六'];
+            lockDate.textContent = (now.getMonth()+1) + '月' + now.getDate() + '日 ' + weekdays[now.getDay()];
+            
+            // 淡雅壁纸色
+            const wallpapers = [
+                'linear-gradient(160deg, #fdf6f0 0%, #fce4ec 40%, #e8daef 70%, #d5daf5 100%)',
+                'linear-gradient(160deg, #fefefe 0%, #fce4ec 50%, #f3e5f5 100%)',
+                'linear-gradient(160deg, #fafafa 0%, #e8f5e9 40%, #e3f2fd 100%)',
+                'linear-gradient(160deg, #fff8e1 0%, #ffe0b2 40%, #ffccbc 100%)',
+                'linear-gradient(160deg, #f3e5f5 0%, #e1bee7 40%, #d1c4e9 100%)',
+                'linear-gradient(160deg, #e0f7fa 0%, #b2ebf2 40%, #b2dfdb 100%)',
+            ];
+            wallpaper.style.background = wallpapers[Math.floor(Math.random() * wallpapers.length)];
+            
+            // 隐藏角色选择页，显示桌面
+            document.getElementById('findphone-roles-page').style.display = 'none';
+            desktop.style.display = 'flex';
+        }
+        
+        // 关闭手机桌面
+        function closeFindPhoneDesktop() {
+            const desktop = document.getElementById('findphone-desktop');
+            desktop.style.transform = 'scale(0.95)';
+            desktop.style.opacity = '0';
+            setTimeout(() => {
+                desktop.style.display = 'none';
+                desktop.style.transform = '';
+                desktop.style.opacity = '';
+                findPhoneTargetRoleId = null;
+            }, 200);
+        }
+        
+        // 已验证过的角色ID集合（登录一次后不再要求输入密码，持久化到localStorage）
+        const fpWechatVerified = new Set(JSON.parse(localStorage.getItem('fpWechatVerified') || '[]'));
+        function saveFpWechatVerified() {
+            localStorage.setItem('fpWechatVerified', JSON.stringify([...fpWechatVerified]));
+        }
+        
+        // 第四步：在角色手机桌面点击WeChat → 显示登录框（已验证过则直接进入）
+        async function openFindPhoneWechat() {
+            // 如果该角色已经验证过，直接进入微信
+            if (fpWechatVerified.has(findPhoneTargetRoleId)) {
+                window._fpWechatRoleId = findPhoneTargetRoleId;
+                const fpPage = document.getElementById('fp-wechat-page');
+                fpPage.style.display = 'flex';
+                await switchFpWechatTab(0);
+                return;
+            }
+            
+            const loginOverlay = document.getElementById('findphone-wechat-login');
+            const accountInput = document.getElementById('findphone-login-account');
+            const passwordInput = document.getElementById('findphone-login-password');
+            const errorEl = document.getElementById('findphone-login-error');
+            
+            // 清空输入框和错误提示
+            accountInput.value = '';
+            passwordInput.value = '';
+            errorEl.style.display = 'none';
+            
+            loginOverlay.style.display = 'flex';
+            
+            // 聚焦账号输入框
+            setTimeout(() => accountInput.focus(), 300);
+        }
+        
+        // 关闭登录框
+        function closeFindPhoneLogin() {
+            document.getElementById('findphone-wechat-login').style.display = 'none';
+        }
+        
+        // 查手机WeChat登录验证（验证角色char的账号密码）
+        async function findPhoneWechatLogin() {
+            const accountInput = document.getElementById('findphone-login-account');
+            const passwordInput = document.getElementById('findphone-login-password');
+            const errorEl = document.getElementById('findphone-login-error');
+            
+            const inputAccount = accountInput.value.trim();
+            const inputPassword = passwordInput.value.trim();
+            
+            if (!inputAccount || !inputPassword) {
+                errorEl.textContent = '请输入账号和密码';
+                errorEl.style.display = 'block';
+                return;
+            }
+            
+            // 获取当前选中的角色（char），验证角色的账号和密码
+            const roleChar = await db.characters.get(parseInt(findPhoneTargetRoleId));
+            if (!roleChar) {
+                errorEl.textContent = '角色数据异常';
+                errorEl.style.display = 'block';
+                return;
+            }
+            
+            const charAccount = roleChar.identity?.account || '';
+            const charPassword = roleChar.identity?.password || '';
+            
+            if (inputAccount !== charAccount || inputPassword !== charPassword) {
+                errorEl.textContent = '账号或密码错误';
+                errorEl.style.display = 'block';
+                // 震动效果
+                const card = errorEl.closest('.findphone-login-card');
+                card.style.animation = 'none';
+                card.offsetHeight;
+                card.style.animation = 'findphoneShake 0.4s ease';
+                return;
+            }
+            
+            // 登录成功！关闭登录框
+            closeFindPhoneLogin();
+            
+            // 记录为已验证，下次不再需要输入密码
+            fpWechatVerified.add(findPhoneTargetRoleId);
+            saveFpWechatVerified();
+            
+            // 记录登录的角色ID（用于"我"页面显示角色信息）
+            window._fpWechatRoleId = findPhoneTargetRoleId;
+            
+            // 打开全新独立的WeChat页面
+            const fpPage = document.getElementById('fp-wechat-page');
+            fpPage.style.display = 'flex';
+            
+            // 默认切到第一个tab（微信聊天列表）
+            await switchFpWechatTab(0);
+        }
+        
+        // 关闭查手机的独立WeChat页面
+        function closeFpWechat() {
+            // 关闭所有fp子页面
+            ['fp-service-page', 'fp-wallet-page', 'fp-balance-page', 'fp-bill-page', 'fp-moments-page'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) { el.style.display = 'none'; el.classList.remove('slide-in', 'active'); }
+            });
+            
+            const fpPage = document.getElementById('fp-wechat-page');
+            fpPage.style.transform = 'scale(0.95)';
+            fpPage.style.opacity = '0';
+            setTimeout(() => {
+                fpPage.style.display = 'none';
+                fpPage.style.transform = '';
+                fpPage.style.opacity = '';
+            }, 200);
+            // 回到查手机桌面
+            document.getElementById('findphone-desktop').style.display = 'flex';
+        }
+        
+        // 查手机独立WeChat的tab切换
+        async function switchFpWechatTab(index) {
+            const tabs = document.querySelectorAll('#fp-wechat-page .wechat-tab-item');
+            tabs.forEach((tab, i) => {
+                if (i === index) tab.classList.add('active');
+                else tab.classList.remove('active');
+            });
+            
+            const titleEl = document.getElementById('fp-wechat-title');
+            const content = document.getElementById('fp-wechat-content');
+            
+            if (index === 0) {
+                titleEl.textContent = '微信';
+                await renderFpChatList(content);
+            } else if (index === 1) {
+                titleEl.textContent = '通讯录';
+                await renderFpContactList(content);
+            } else if (index === 2) {
+                titleEl.textContent = '发现';
+                await renderFpDiscoverPage(content);
+            } else if (index === 3) {
+                titleEl.textContent = '我';
+                await renderFpMePage(content);
+            }
+        }
+        
+        // 查手机WeChat - 渲染聊天列表（角色自己的微信消息列表，基于角色的通讯录）
+        async function renderFpChatList(container) {
+            const roleId = window._fpWechatRoleId;
+            const accountId = findPhoneTargetAccountId;
+            let roleChar = await db.characters.get(parseInt(roleId));
+            
+            // ★ 自动将关联NPC填充到通讯录
+            roleChar = await autoPopulateRelationshipContacts(roleChar, accountId);
+            
+            // 获取该角色自己的通讯录联系人
+            const contactIds = getRolePhoneContacts(roleChar, accountId);
+            const allChars = await db.characters.toArray();
+            const chatContacts = [];
+            
+            // 1. 添加该NPC关联的用户（即选中的用户账号，始终显示）
+            if (accountId) {
+                const userChar = await db.characters.get(parseInt(accountId));
+                if (userChar) {
+                    // 获取该NPC和用户的聊天记录
+                    const chatHistory = roleChar?.chat_history_by_user?.[accountId] || roleChar?.chat_history || [];
+                    const lastMsg = chatHistory.length > 0 ? chatHistory[chatHistory.length - 1] : null;
+                    chatContacts.push({
+                        char: userChar,
+                        lastMsg: lastMsg,
+                        lastTime: lastMsg ? (lastMsg.time || lastMsg.timestamp || '') : ''
+                    });
+                }
+            }
+            
+            // 2. 只显示该角色通讯录中的NPC联系人（读取fp_npc_聊天记录）
+            for (const cid of contactIds) {
+                const npc = allChars.find(ch => ch.id === cid);
+                if (npc && String(npc.id) !== String(roleId) && npc.type !== 'user') {
+                    const fpNpcKey = 'fp_npc_' + cid;
+                    const npcHistory = roleChar?.chat_history_by_user?.[fpNpcKey] || [];
+                    const npcLastMsg = npcHistory.length > 0 ? npcHistory[npcHistory.length - 1] : null;
+                    chatContacts.push({
+                        char: npc,
+                        lastMsg: npcLastMsg,
+                        lastTime: npcLastMsg ? (npcLastMsg.time || '') : ''
+                    });
+                }
+            }
+            
+            if (chatContacts.length === 0) {
+                container.innerHTML = `<div class="wechat-empty-state"><svg class="svg-icon" style="width:48px; height:48px; stroke:#ccc;" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="8" y1="15" x2="16" y2="15"></line><line x1="9" y1="9" x2="9.01" y2="9"></line><line x1="15" y1="9" x2="15.01" y2="9"></line></svg><div>暂无消息</div></div>`;
+                return;
+            }
+            
+            let html = '<div style="width:100%; background:#fff;">';
+            // 获取角色对用户的备注名
+            const fpRemark = roleChar?.fp_remark_by_user?.[accountId] || '';
+            for (const contact of chatContacts) {
+                const c = contact.char;
+                const cAvatar = getCharAvatar(c, accountId);
+                const avatarStyle = cAvatar ? `background-image:url(${cAvatar})` : 'background-color:#e8e8e8';
+                const displayName = c.type === 'user' ? (fpRemark || c.nick || c.name) : getCharDisplayName(c, accountId);
+                const lastMsgText = contact.lastMsg ? (contact.lastMsg.text || contact.lastMsg.content || '').substring(0, 20) : '';
+                
+                html += `
+                    <div class="fp-chat-list-item" data-contact-id="${c.id}" style="display:flex; padding:12px 16px; border-bottom:0.5px solid #f0f0f0; align-items:center; gap:12px; cursor:pointer; transition:background 0.15s;" onmousedown="this.style.background='#f0f0f0'" onmouseup="this.style.background=''" onmouseleave="this.style.background=''">
+                        <div style="width:48px; height:48px; border-radius:6px; ${avatarStyle}; background-size:cover; background-position:center; flex-shrink:0;"></div>
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-size:16px; font-weight:500; color:#1a1a1a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${displayName}</div>
+                            <div style="font-size:13px; color:#999; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${lastMsgText || '暂无消息'}</div>
+                        </div>
+                    </div>
+                `;
+            }
+            html += '</div>';
+            container.innerHTML = html;
+            
+            // 绑定点击事件：点击聊天列表项进入聊天详情（视角转换）
+            container.querySelectorAll('.fp-chat-list-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const contactId = parseInt(item.dataset.contactId);
+                    openFpChatDetail(contactId);
+                });
+            });
+        }
+        
+        // 获取角色自己的通讯录联系人ID列表
+        function getRolePhoneContacts(roleChar, accountId) {
+            if (!roleChar) return [];
+            const phoneContacts = roleChar.phone_contacts_by_user || {};
+            return phoneContacts[accountId] || [];
+        }
+        
+        // 添加联系人到角色的通讯录
+        async function addRolePhoneContact(roleId, accountId, contactCharId) {
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) return;
+            if (!roleChar.phone_contacts_by_user) roleChar.phone_contacts_by_user = {};
+            if (!roleChar.phone_contacts_by_user[accountId]) roleChar.phone_contacts_by_user[accountId] = [];
+            const list = roleChar.phone_contacts_by_user[accountId];
+            if (!list.includes(contactCharId)) {
+                list.push(contactCharId);
+                await db.characters.put(roleChar);
+            }
+        }
+        
+        // 从角色的通讯录移除联系人
+        async function removeRolePhoneContact(roleId, accountId, contactCharId) {
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) return;
+            if (!roleChar.phone_contacts_by_user) return;
+            if (!roleChar.phone_contacts_by_user[accountId]) return;
+            roleChar.phone_contacts_by_user[accountId] = roleChar.phone_contacts_by_user[accountId].filter(id => id !== contactCharId);
+            await db.characters.put(roleChar);
+        }
+        
+        // ★ 自动将角色的 relationships 关联NPC填充到通讯录中（默认好友）
+        async function autoPopulateRelationshipContacts(roleChar, accountId) {
+            if (!roleChar || !accountId) return roleChar;
+            if (!roleChar.relationships || roleChar.relationships.length === 0) return roleChar;
+            
+            if (!roleChar.phone_contacts_by_user) roleChar.phone_contacts_by_user = {};
+            if (!roleChar.phone_contacts_by_user[accountId]) roleChar.phone_contacts_by_user[accountId] = [];
+            
+            const list = roleChar.phone_contacts_by_user[accountId];
+            let changed = false;
+            
+            for (const rel of roleChar.relationships) {
+                if (!rel.targetId) continue;
+                // 检查目标角色是否存在且不是user类型
+                try {
+                    const targetChar = await db.characters.get(rel.targetId);
+                    if (!targetChar || targetChar.type === 'user') continue;
+                    if (String(targetChar.id) === String(roleChar.id)) continue;
+                    
+                    if (!list.includes(targetChar.id)) {
+                        list.push(targetChar.id);
+                        changed = true;
+                        console.log(`[自动填充通讯录] ✅ 将关联NPC "${rel.targetName}"(id=${rel.targetId}) 添加到 ${roleChar.name} 的通讯录`);
+                    }
+                } catch (e) {
+                    console.warn(`[自动填充通讯录] 跳过关联角色 ${rel.targetName}:`, e);
+                }
+            }
+            
+            if (changed) {
+                await db.characters.put(roleChar);
+                console.log(`[自动填充通讯录] 已更新 ${roleChar.name} 的通讯录，当前联系人数: ${list.length}`);
+            }
+            
+            return roleChar;
+        }
+        
+        // 查手机WeChat - 渲染通讯录（显示该角色自己的联系人，而非用户的好友列表）
+        async function renderFpContactList(container) {
+            const roleId = window._fpWechatRoleId;
+            const accountId = findPhoneTargetAccountId;
+            let roleChar = await db.characters.get(parseInt(roleId));
+            
+            // ★ 自动将关联NPC填充到通讯录
+            roleChar = await autoPopulateRelationshipContacts(roleChar, accountId);
+            
+            const allChars = await db.characters.toArray();
+            
+            // 获取该角色自己的通讯录联系人ID列表
+            const contactIds = getRolePhoneContacts(roleChar, accountId);
+            
+            let contacts = [];
+            
+            // 1. 添加用户好友（该角色关联的用户账号，始终显示）
+            if (accountId) {
+                const userChar = await db.characters.get(parseInt(accountId));
+                if (userChar) {
+                    contacts.push({ char: userChar, isUser: true });
+                }
+            }
+            
+            // 2. 只添加该角色通讯录中明确存在的NPC联系人
+            for (const cid of contactIds) {
+                const c = allChars.find(ch => ch.id === cid);
+                if (c && String(c.id) !== String(roleId) && c.type !== 'user') {
+                    contacts.push({ char: c, isUser: false });
+                }
+            }
+            
+            container.innerHTML = '';
+            const listDiv = document.createElement('div');
+            listDiv.style.width = '100%';
+            listDiv.style.background = '#fff';
+            
+            // "添加联系人"入口（从用户好友列表中添加到角色通讯录）
+            const addContactItem = document.createElement('div');
+            addContactItem.style.cssText = 'display:flex; padding:12px 16px; border-bottom:0.5px solid #f0f0f0; align-items:center; gap:12px; cursor:pointer;';
+            addContactItem.onclick = () => showFpAddContactPicker(roleId, accountId, allChars, contactIds, container);
+            addContactItem.innerHTML = `
+                <div style="width:40px; height:40px; border-radius:4px; background:linear-gradient(135deg, #ffc2d1 0%, #ff8fab 100%); display:flex; align-items:center; justify-content:center;">
+                    <svg class="svg-icon" style="width:24px; height:24px; stroke:#fff;" viewBox="0 0 24 24">
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="8.5" cy="7" r="4"></circle>
+                        <line x1="20" y1="8" x2="20" y2="14"></line>
+                        <line x1="23" y1="11" x2="17" y2="11"></line>
+                    </svg>
+                </div>
+                <div style="flex:1; font-size:16px; font-weight:500; color:#333;">添加联系人</div>
+                <div style="color:#ccc; font-size:18px;">›</div>
+            `;
+            listDiv.appendChild(addContactItem);
+            
+            if (contacts.length === 0) {
+                const emptyDiv = document.createElement('div');
+                emptyDiv.style.textAlign = 'center';
+                emptyDiv.style.padding = '40px 20px';
+                emptyDiv.style.color = '#999';
+                emptyDiv.innerHTML = `
+                    <svg class="svg-icon" style="width:48px; height:48px; stroke:#ccc; margin-bottom:10px;" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                    <div>通讯录为空</div>
+                `;
+                listDiv.appendChild(emptyDiv);
+            } else {
+                // 用户好友分组
+                const userFriends = contacts.filter(c => c.isUser);
+                const npcFriendsArr = contacts.filter(c => !c.isUser);
+                
+                if (userFriends.length > 0) {
+                    const sectionTitle = document.createElement('div');
+                    sectionTitle.style.cssText = 'padding:8px 16px; font-size:13px; color:#888; background:#f7f7f7; font-weight:500;';
+                    sectionTitle.textContent = '好友';
+                    listDiv.appendChild(sectionTitle);
+                    
+                    // 获取角色对用户的备注
+                    const fpRemarkContact = roleChar?.fp_remark_by_user?.[accountId] || '';
+                    for (const contact of userFriends) {
+                        const item = document.createElement('div');
+                        item.style.cssText = 'display:flex; padding:10px 16px; border-bottom:0.5px solid #f0f0f0; align-items:center; gap:12px; cursor:pointer; transition:background 0.15s;';
+                        item.onmousedown = function() { this.style.background = '#f5f5f5'; };
+                        item.onmouseup = function() { this.style.background = ''; };
+                        item.onmouseleave = function() { this.style.background = ''; };
+                        
+                        const c = contact.char;
+                        const cAvatar = c.avatar || '';
+                        const avatarStyle = cAvatar ? `background-image:url(${cAvatar})` : 'background-color:#e8e8e8';
+                        const displayName = fpRemarkContact || c.nick || c.name;
+                        
+                        item.innerHTML = `
+                            <div style="width:40px; height:40px; border-radius:4px; ${avatarStyle}; background-size:cover; background-position:center;"></div>
+                            <div style="flex:1; font-size:16px; font-weight:500; color:#333;">${displayName}</div>
+                            <div style="color:#ccc; font-size:18px;">›</div>
+                        `;
+                        // 点击进入聊天详情（视角转换）
+                        const charId = c.id;
+                        item.onclick = () => openFpChatDetail(charId);
+                        listDiv.appendChild(item);
+                    }
+                }
+                
+                if (npcFriendsArr.length > 0) {
+                    const sectionTitle = document.createElement('div');
+                    sectionTitle.style.cssText = 'padding:8px 16px; font-size:13px; color:#888; background:#f7f7f7; font-weight:500;';
+                    sectionTitle.textContent = '联系人';
+                    listDiv.appendChild(sectionTitle);
+                    
+                    for (const contact of npcFriendsArr) {
+                        const item = createFpContactItem(contact.char, accountId, roleId, container);
+                        listDiv.appendChild(item);
+                    }
+                }
+            }
+            
+            container.appendChild(listDiv);
+        }
+        
+        // 创建联系人行（带点击查看聊天 + 长按删除功能）
+        function createFpContactItem(c, accountId, roleId, container) {
+            const item = document.createElement('div');
+            item.style.cssText = 'display:flex; padding:10px 16px; border-bottom:0.5px solid #f0f0f0; align-items:center; gap:12px; position:relative; cursor:pointer; transition:background 0.15s;';
+            item.onmousedown = function() { this.style.background = '#f5f5f5'; };
+            item.onmouseup = function() { this.style.background = ''; };
+            item.onmouseleave = function() { this.style.background = ''; };
+            
+            const cAvatar = getCharAvatar(c, accountId);
+            const avatarStyle = cAvatar ? `background-image:url(${cAvatar})` : 'background-color:#e8e8e8';
+            const displayName = getCharDisplayName(c, accountId);
+            
+            item.innerHTML = `
+                <div style="width:40px; height:40px; border-radius:4px; ${avatarStyle}; background-size:cover; background-position:center;"></div>
+                <div style="flex:1; font-size:16px; font-weight:500; color:#333;">${displayName}</div>
+                <div style="color:#ccc; font-size:18px;">›</div>
+            `;
+            
+            // 点击进入聊天详情（视角转换）
+            const charId = c.id;
+            item.addEventListener('click', () => openFpChatDetail(charId));
+            
+            // 长按删除联系人
+            let pressTimer = null;
+            item.addEventListener('touchstart', () => {
+                pressTimer = setTimeout(() => {
+                    if (confirm(`从通讯录中移除 ${displayName}？`)) {
+                        removeRolePhoneContact(roleId, accountId, c.id).then(() => {
+                            renderFpContactList(container);
+                        });
+                    }
+                }, 600);
+            });
+            item.addEventListener('touchend', () => clearTimeout(pressTimer));
+            item.addEventListener('touchmove', () => clearTimeout(pressTimer));
+            // 桌面端右键删除
+            item.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                if (confirm(`从通讯录中移除 ${displayName}？`)) {
+                    removeRolePhoneContact(roleId, accountId, c.id).then(() => {
+                        renderFpContactList(container);
+                    });
+                }
+            });
+            
+            return item;
+        }
+        
+        // 显示"添加联系人"选择器（从用户好友列表中选择添加到角色通讯录）
+        async function showFpAddContactPicker(roleId, accountId, allChars, existingContactIds, parentContainer) {
+            // 获取用户账号下的所有NPC好友（排除角色自身和已有联系人）
+            const availableNpcs = allChars.filter(c => {
+                if (c.type === 'user') return false;
+                if (String(c.id) === String(roleId)) return false;
+                if (existingContactIds.includes(c.id)) return false;
+                const status = getFriendStatus(c, accountId);
+                return status === 'friend';
+            });
+            
+            const content = document.getElementById('fp-wechat-content');
+            
+            let pickerHtml = '<div style="width:100%; background:#fff;">';
+            pickerHtml += `
+                <div style="display:flex; padding:12px 16px; border-bottom:1px solid #f0f0f0; align-items:center; gap:8px;">
+                    <div onclick="switchFpWechatTab(1)" style="cursor:pointer; color:var(--ins-pink); font-size:15px; font-weight:500;">← 返回</div>
+                    <div style="flex:1; text-align:center; font-size:16px; font-weight:600; color:#333;">选择要添加的联系人</div>
+                    <div style="width:40px;"></div>
+                </div>
+            `;
+            
+            if (availableNpcs.length === 0) {
+                pickerHtml += `
+                    <div style="text-align:center; padding:50px 20px; color:#999;">
+                        <svg class="svg-icon" style="width:48px; height:48px; stroke:#ccc; margin-bottom:10px;" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                        <div>没有更多可添加的联系人</div>
+                        <div style="font-size:12px; color:#bbb; margin-top:6px;">用户账号下的所有好友已添加</div>
+                    </div>
+                `;
+            } else {
+                pickerHtml += `<div style="padding:8px 16px; font-size:13px; color:#888; background:#f7f7f7; font-weight:500;">用户账号下的好友</div>`;
+                for (const npc of availableNpcs) {
+                    const cAvatar = getCharAvatar(npc, accountId);
+                    const avatarStyle = cAvatar ? `background-image:url(${cAvatar})` : 'background-color:#e8e8e8';
+                    const displayName = getCharDisplayName(npc, accountId);
+                    
+                    pickerHtml += `
+                        <div class="fp-add-contact-item" data-char-id="${npc.id}" style="display:flex; padding:10px 16px; border-bottom:0.5px solid #f0f0f0; align-items:center; gap:12px; cursor:pointer; transition:background 0.15s;" onmousedown="this.style.background='#f5f5f5'" onmouseup="this.style.background=''" onmouseleave="this.style.background=''">
+                            <div style="width:40px; height:40px; border-radius:4px; ${avatarStyle}; background-size:cover; background-position:center;"></div>
+                            <div style="flex:1; font-size:16px; font-weight:500; color:#333;">${displayName}</div>
+                            <div style="color:var(--ins-pink); font-size:13px; font-weight:500; padding:4px 12px; border:1px solid var(--ins-pink); border-radius:14px;">添加</div>
+                        </div>
+                    `;
+                }
+            }
+            pickerHtml += '</div>';
+            
+            content.innerHTML = pickerHtml;
+            
+            // 绑定点击事件
+            content.querySelectorAll('.fp-add-contact-item').forEach(item => {
+                item.addEventListener('click', async () => {
+                    const charId = parseInt(item.dataset.charId);
+                    await addRolePhoneContact(roleId, accountId, charId);
+                    // 添加成功后返回通讯录
+                    await switchFpWechatTab(1);
+                });
+            });
+        }
+        
+        // 查手机WeChat - 渲染"发现"页面（含朋友圈入口）
+        async function renderFpDiscoverPage(container) {
+            container.innerHTML = `
+                <div class="wechat-cell-group" style="margin-top:0;">
+                    <div class="wechat-cell" onclick="showFpMomentsPage()">
+                        <div class="wechat-cell-icon icon-moments">
+                            <svg class="svg-icon" style="stroke:currentColor;" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                        </div>
+                        <div class="wechat-cell-text">朋友圈</div>
+                        <div class="wechat-cell-arrow">›</div>
+                    </div>
+                </div>
+                <div class="wechat-cell-group">
+                    <div class="wechat-cell" style="cursor:default;">
+                        <div class="wechat-cell-icon" style="background:linear-gradient(135deg, #fa709a 0%, #fee140 100%);">
+                            <svg class="svg-icon" style="stroke:#fff;" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                        </div>
+                        <div class="wechat-cell-text">搜一搜</div>
+                        <div class="wechat-cell-arrow">›</div>
+                    </div>
+                </div>
+                <div class="wechat-cell-group">
+                    <div class="wechat-cell" style="cursor:default;">
+                        <div class="wechat-cell-icon" style="background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                            <svg class="svg-icon" style="stroke:#fff;" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect><path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line></svg>
+                        </div>
+                        <div class="wechat-cell-text">看一看</div>
+                        <div class="wechat-cell-arrow">›</div>
+                    </div>
+                </div>
+                <div class="wechat-cell-group">
+                    <div class="wechat-cell" style="cursor:default;">
+                        <div class="wechat-cell-icon" style="background:linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+                            <svg class="svg-icon" style="stroke:#fff;" viewBox="0 0 24 24"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+                        </div>
+                        <div class="wechat-cell-text">视频号</div>
+                        <div class="wechat-cell-arrow">›</div>
+                    </div>
+                </div>
+                <div class="wechat-cell-group">
+                    <div class="wechat-cell" style="cursor:default;">
+                        <div class="wechat-cell-icon" style="background:linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
+                            <svg class="svg-icon" style="stroke:#fff;" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><polygon points="10 8 16 12 10 16 10 8"></polygon></svg>
+                        </div>
+                        <div class="wechat-cell-text">小程序</div>
+                        <div class="wechat-cell-arrow">›</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // ===== 查手机 - 角色朋友圈页面 =====
+        let fpMomentsScrollInit = false;
+
+        function showFpMomentsPage() {
+            const page = document.getElementById('fp-moments-page');
+            page.style.display = 'block';
+            page.offsetHeight;
+            page.classList.add('slide-in');
+
+            if (!fpMomentsScrollInit) {
+                initFpMomentsScroll();
+                fpMomentsScrollInit = true;
+            }
+
+            renderFpMomentsUserInfo();
+            renderFpMomentsList();
         }
 
+        function hideFpMomentsPage() {
+            const page = document.getElementById('fp-moments-page');
+            page.classList.remove('slide-in');
+            setTimeout(() => { page.style.display = 'none'; }, 300);
+        }
+
+        function initFpMomentsScroll() {
+            const page = document.getElementById('fp-moments-page');
+            const navBar = document.getElementById('fp-moments-nav-bar');
+            page.addEventListener('scroll', () => {
+                if (page.scrollTop > 200) {
+                    navBar.classList.add('scrolled');
+                } else {
+                    navBar.classList.remove('scrolled');
+                }
+            });
+        }
+
+        async function renderFpMomentsUserInfo() {
+            const roleId = window._fpWechatRoleId;
+            if (!roleId) return;
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) return;
+
+            const nameEl = document.getElementById('fp-moments-user-name');
+            const avatarEl = document.getElementById('fp-moments-user-avatar');
+            const coverEl = document.getElementById('fp-moments-cover-area');
+
+            nameEl.textContent = roleChar.nick || roleChar.name || '未知';
+
+            const accountId = findPhoneTargetAccountId;
+            const avatar = getCharAvatar(roleChar, accountId) || roleChar.avatar || '';
+            if (avatar) {
+                avatarEl.style.backgroundImage = `url(${avatar})`;
+            } else {
+                avatarEl.style.backgroundImage = '';
+                avatarEl.style.backgroundColor = '#eee';
+            }
+
+            // 封面
+            const cover = roleChar.fp_moments_cover || roleChar.identity?.cover || '';
+            if (cover) {
+                coverEl.style.backgroundImage = `url(${cover})`;
+            } else {
+                coverEl.style.backgroundImage = '';
+            }
+        }
+
+        async function renderFpMomentsList() {
+            const container = document.getElementById('fp-moments-list');
+            container.innerHTML = '';
+
+            const roleId = window._fpWechatRoleId;
+            const accountId = findPhoneTargetAccountId;
+            if (!roleId || !accountId) {
+                container.innerHTML = '<div style="text-align:center; color:#ccc; margin-top:100px; font-size:14px;">无法加载</div>';
+                return;
+            }
+
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) return;
+
+            // 获取角色的好友朋友圈数据（存储在 roleChar.fp_moments_by_user[accountId]）
+            const momentsData = roleChar.fp_moments_by_user?.[accountId] || [];
+
+            if (momentsData.length === 0) {
+                container.innerHTML = '<div style="text-align:center; color:#ccc; margin-top:100px; font-size:14px;">暂无动态<br><span style="font-size:12px;">请在「我」页面点击 AI生成数据</span></div>';
+                return;
+            }
+
+            // 按时间倒序排列
+            const sortedMoments = [...momentsData].sort((a, b) => (b.time || 0) - (a.time || 0));
+
+            const roleName = roleChar.nick || roleChar.name || '未知';
+            const roleAvatar = getCharAvatar(roleChar, accountId) || roleChar.avatar || '';
+
+            // 预加载NPC头像映射
+            const npcAvatarMap = {};
+            const contactIds = getRolePhoneContacts(roleChar, accountId);
+            for (const cid of contactIds) {
+                try {
+                    const nc = await db.characters.get(cid);
+                    if (nc) {
+                        const nName = nc.nick || nc.name;
+                        npcAvatarMap[nName] = nc.avatar || '';
+                    }
+                } catch(e) {}
+            }
+
+            for (const m of sortedMoments) {
+                const div = document.createElement('div');
+                div.className = 'moment-item';
+
+                // 时间格式化
+                const date = m.time ? new Date(m.time) : new Date();
+                const timeStr = `${date.getMonth()+1}月${date.getDate()}日 ${date.getHours()}:${date.getMinutes().toString().padStart(2,'0')}`;
+
+                // 发布者：如果 userId 是角色自己（包括用户冒充发的），用角色信息；否则用 author 字段
+                const isRoleMoment = m.userId === parseInt(roleId) || m.fpSent;
+                const authorName = isRoleMoment ? roleName : (m.author || '好友');
+                const authorAvatar = isRoleMoment ? roleAvatar : (npcAvatarMap[m.author] || '');
+
+                // 图片展示
+                let imagesHtml = '';
+                if (m.images && m.images.length > 0) {
+                    const imageDescs = m.images.filter(img => typeof img === 'string');
+                    if (imageDescs.length > 0) {
+                        const count = Math.min(imageDescs.length, 9);
+                        const gridClass = `grid-${count}`;
+                        let squares = '';
+                        for (let imgIdx = 0; imgIdx < count; imgIdx++) {
+                            const desc = imageDescs[imgIdx].replace(/^\[/, '').replace(/\]$/, '');
+                            squares += `<div class="moment-img-placeholder" onclick="event.stopPropagation(); showMomentImageDesc('${desc.replace(/'/g, "\\'")}')">
+                                <div class="moment-img-placeholder-inner">
+                                    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                                    ${count === 1 ? '<div class="moment-img-placeholder-hint">点击查看</div>' : ''}
+                                </div>
+                            </div>`;
+                        }
+                        imagesHtml = `<div class="moment-image-grid ${gridClass}">${squares}</div>`;
+                    }
+                }
+
+                // 点赞显示
+                let likesHtml = '';
+                const hasLikes = m.likes && m.likes.length > 0;
+                if (hasLikes) {
+                    // likes 可能是字符串数组或对象数组
+                    likesHtml = m.likes.map(l => typeof l === 'string' ? l : (l.name || '')).join('，');
+                }
+
+                // 评论显示
+                let commentsHtml = '';
+                const hasComments = m.comments && m.comments.length > 0;
+                if (hasComments) {
+                    commentsHtml = m.comments.map(c => {
+                        return `<div class="comment-item">
+                            <span class="comment-user">${escapeHtml(c.name || '好友')}</span>：<span class="comment-content">${escapeHtml(c.text || c.content || '')}</span>
+                        </div>`;
+                    }).join('');
+                }
+
+                div.innerHTML = `
+                    <div class="moment-avatar" style="${authorAvatar ? `background-image:url(${authorAvatar});background-size:cover;background-position:center;` : 'background-color:#e8e8e8;'}"></div>
+                    <div class="moment-content">
+                        <div class="moment-name">${escapeHtml(authorName)}</div>
+                        <div class="moment-text">${escapeHtml(m.content || '')}</div>
+                        ${imagesHtml}
+                        <div class="moment-meta">
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <span class="moment-time">${timeStr}</span>
+                            </div>
+                        </div>
+                        <!-- 互动区 -->
+                        <div class="moment-interactions" style="display: ${hasLikes || hasComments ? 'block' : 'none'}">
+                            <div class="moment-likes" style="display: ${hasLikes ? 'flex' : 'none'}">
+                                <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"></path></svg>
+                                <span>${likesHtml}</span>
+                            </div>
+                            <div class="moment-comments" style="display: ${hasComments ? 'block' : 'none'}">
+                                ${commentsHtml}
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                container.appendChild(div);
+            }
+        }
+
+        // ===== 查手机 - 以角色身份发朋友圈 =====
+
+        // 查手机模式 - 以角色身份发朋友圈（复用原版发布页面，支持图片等）
+        function showFpMomentsCompose() {
+            // 设置FP模式标记，doPublishMoment会根据此标记决定保存逻辑
+            window._fpMomentMode = true;
+            // 临时提高 moments-publish-page 的 z-index，使其显示在 fp-moments-page 之上
+            const pubPage = document.getElementById('moments-publish-page');
+            if (pubPage) pubPage.style.zIndex = '350';
+            // 调用原版发布页
+            showMomentsPublish();
+        }
+
+        // ★ 查手机朋友圈 - NPC好友自动评论点赞（一次AI调用批量生成）
+        async function triggerFpMomentNpcInteractions(roleCharId, accountId, momentId) {
+            try {
+                const roleChar = await db.characters.get(roleCharId);
+                if (!roleChar) return;
+
+                // 获取角色的NPC好友通讯录
+                const contactIds = getRolePhoneContacts(roleChar, accountId);
+                if (contactIds.length === 0) {
+                    console.log('[FP朋友圈NPC] 没有NPC好友，跳过互动');
+                    return;
+                }
+
+                // 查找朋友圈数据
+                const moments = roleChar.fp_moments_by_user?.[accountId] || [];
+                const targetMoment = moments.find(m => m.id === momentId);
+                if (!targetMoment) return;
+
+                // 加载NPC角色数据
+                const npcChars = [];
+                for (const cid of contactIds) {
+                    const c = await db.characters.get(cid);
+                    if (c && c.type !== 'user') {
+                        npcChars.push(c);
+                    }
+                }
+
+                if (npcChars.length === 0) {
+                    console.log('[FP朋友圈NPC] 没有可用NPC角色，跳过互动');
+                    return;
+                }
+
+                const roleName = roleChar.nick || roleChar.name || '角色';
+
+                console.log(`[FP朋友圈NPC] 开始批量生成NPC互动，NPC数量: ${npcChars.length}`);
+
+                // 随机选取NPC来评论（1~3个）
+                const shuffled = [...npcChars].sort(() => Math.random() - 0.5);
+                const commentCount = Math.min(shuffled.length, 1 + Math.floor(Math.random() * 3));
+                const selectedNPCs = shuffled.slice(0, commentCount);
+
+                // 随机NPC点赞（50%概率）
+                const likers = npcChars.filter(() => Math.random() < 0.5);
+
+                // 构建评论者信息
+                const commenterInfos = selectedNPCs.map(c => {
+                    const npcName = c.nick || c.name || 'NPC';
+                    const npcDesc = c.description || c.personality || '普通朋友';
+                    return `- ${npcName}：${npcDesc}`;
+                }).join('\n');
+
+                // 一次AI调用批量生成所有评论
+                let aiComments = [];
+                if (selectedNPCs.length > 0) {
+                    try {
+                        const batchPrompt = `${roleName} 发了一条朋友圈："${targetMoment.content}"
+${targetMoment.images?.length > 0 ? `（附带${targetMoment.images.length}张图片）` : ''}
+
+以下好友看到了这条朋友圈，请为每个人生成一条符合其性格的评论：
+${commenterInfos}
+
+要求：
+1. 每条评论简短自然（2-25字）
+2. 可以用表情、语气词、调侃、夸赞、吐槽等
+3. 符合每个角色的性格特点和与 ${roleName} 的关系
+4. 像真人在朋友圈下评论一样随意
+5. 好友之间可以互相回复（使用 replyTo 字段指定回复的人名），但不是每个人都要回复别人
+
+请返回JSON数组格式：
+[{"name": "角色名", "content": "评论内容"}, {"name": "角色名", "replyTo": "被回复的角色名", "content": "回复内容"}, ...]`;
+
+                        const result = await callAI([
+                            { role: 'system', content: '你是一个社交媒体评论生成助手，只返回JSON数组，不要任何其他文字。' },
+                            { role: 'user', content: batchPrompt }
+                        ]);
+
+                        // 解析AI返回的JSON
+                        try {
+                            let cleanResult = result.trim();
+                            if (cleanResult.startsWith('```')) {
+                                cleanResult = cleanResult.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+                            }
+                            aiComments = JSON.parse(cleanResult);
+                        } catch (e) {
+                            console.warn('[FP朋友圈NPC] AI评论JSON解析失败，尝试提取内容');
+                            aiComments = [];
+                        }
+                    } catch (apiErr) {
+                        console.warn('[FP朋友圈NPC] AI调用失败:', apiErr);
+                    }
+                }
+
+                // 如果AI生成失败，使用预设评论
+                if (aiComments.length === 0 && selectedNPCs.length > 0) {
+                    const presetComments = [
+                        '👍', '❤️', '太棒了！', '真好看~', '哇！', '赞！',
+                        '羡慕！', '厉害啊', '太美了', '🔥', '绝了', '爱了'
+                    ];
+                    for (const npc of selectedNPCs) {
+                        aiComments.push({
+                            name: npc.nick || npc.name,
+                            content: presetComments[Math.floor(Math.random() * presetComments.length)]
+                        });
+                    }
+                }
+
+                // 一次性读取最新数据，写入点赞和评论
+                const freshChar = await db.characters.get(roleCharId);
+                if (!freshChar) return;
+                const momentsList = freshChar.fp_moments_by_user?.[accountId] || [];
+                const m = momentsList.find(x => x.id === momentId);
+                if (!m) return;
+
+                // 写入点赞
+                if (!m.likes) m.likes = [];
+                for (const liker of likers) {
+                    const likerName = liker.nick || liker.name;
+                    if (!m.likes.some(l => typeof l === 'string' ? l === likerName : l.name === likerName)) {
+                        m.likes.push(likerName);
+                    }
+                }
+
+                // 写入评论
+                if (!m.comments) m.comments = [];
+                for (const aiComment of aiComments) {
+                    const matchedNpc = selectedNPCs.find(c =>
+                        (c.nick || c.name) === aiComment.name || c.name === aiComment.name
+                    );
+                    if (aiComment.content) {
+                        const commentObj = {
+                            name: aiComment.name || (matchedNpc ? (matchedNpc.nick || matchedNpc.name) : 'NPC'),
+                            text: aiComment.content,
+                            time: Date.now() + Math.random() * 60000
+                        };
+                        if (aiComment.replyTo) {
+                            commentObj.replyTo = aiComment.replyTo;
+                        }
+                        m.comments.push(commentObj);
+                    }
+                }
+
+                await db.characters.put(freshChar);
+                renderFpMomentsList();
+                console.log(`[FP朋友圈NPC] ✅ 批量生成完成: ${likers.length}人点赞, ${aiComments.length}条评论`);
+
+            } catch (err) {
+                console.error('[FP朋友圈NPC] 互动生成失败:', err);
+            }
+        }
+
+        // 查手机WeChat - 渲染"我"页面（显示角色char自己的信息，含服务等）
+        async function renderFpMePage(container) {
+            const roleId = window._fpWechatRoleId;
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) {
+                container.innerHTML = '<div class="wechat-empty-state"><div>无法加载</div></div>';
+                return;
+            }
+            
+            const avatar = roleChar.avatar || '';
+            const name = roleChar.nick || roleChar.name || '未知';
+            const wxAccount = roleChar.identity?.account || '未设置';
+            
+            container.innerHTML = `
+                <div class="wechat-me-container">
+                    <div class="wechat-profile" style="cursor:default;">
+                        <div class="wechat-profile-avatar" style="${avatar ? `background-image:url(${avatar})` : ''}"></div>
+                        <div class="wechat-profile-info">
+                            <div class="wechat-profile-name">${name}</div>
+                            <div class="wechat-profile-id">
+                                <span>微信号：${wxAccount}</span>
+                                <svg class="svg-icon wechat-qrcode-icon" viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M3 3h6v6H3zm2 2v2h2V5zm8-2h6v6h-6zm2 2v2h2V5zM3 13h6v6H3zm2 2v2h2v-2zm8-2h2v2h-2zm4 0h2v2h-2zm-4 4h2v2h-2zm2-2h2v2h-2zm2 2h2v2h-2z"/></svg>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="wechat-cell-group">
+                        <div class="wechat-cell" onclick="showFpServicePage()">
+                            <div class="wechat-cell-icon icon-service">
+                                <svg class="svg-icon" style="stroke:currentColor;" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                            </div>
+                            <div class="wechat-cell-text">服务</div>
+                            <div class="wechat-cell-arrow">›</div>
+                        </div>
+                    </div>
+                    <div class="wechat-cell-group">
+                        <div class="wechat-cell" style="cursor:default;">
+                            <div class="wechat-cell-icon icon-collect">
+                                <svg class="svg-icon" style="stroke:currentColor;" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
+                            </div>
+                            <div class="wechat-cell-text">收藏</div>
+                            <div class="wechat-cell-arrow">›</div>
+                        </div>
+                        <div class="wechat-cell" onclick="showFpMomentsPage()">
+                            <div class="wechat-cell-icon icon-moments">
+                                <svg class="svg-icon" style="stroke:currentColor;" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                            </div>
+                            <div class="wechat-cell-text">朋友圈</div>
+                            <div class="wechat-cell-arrow">›</div>
+                        </div>
+                        <div class="wechat-cell" style="cursor:default;">
+                            <div class="wechat-cell-icon icon-emoji">
+                                <svg class="svg-icon" style="stroke:currentColor;" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M8 14s1.5 2 4 2 4-2 4-2"></path><line x1="9" y1="9" x2="9.01" y2="9"></line><line x1="15" y1="9" x2="15.01" y2="9"></line></svg>
+                            </div>
+                            <div class="wechat-cell-text">表情</div>
+                            <div class="wechat-cell-arrow">›</div>
+                        </div>
+                    </div>
+                    <div class="wechat-cell-group">
+                        <div class="wechat-cell" style="cursor:default;">
+                            <div class="wechat-cell-icon icon-settings">
+                                <svg class="svg-icon" style="stroke:currentColor;" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                            </div>
+                            <div class="wechat-cell-text">设置</div>
+                            <div class="wechat-cell-arrow">›</div>
+                        </div>
+                    </div>
+                    
+                    <!-- AI生成数据按钮 -->
+                    <div style="padding:20px 16px;">
+                        <button id="fp-generate-btn" onclick="generateFpRoleData()" style="
+                            width:100%; padding:14px; border:none; border-radius:12px;
+                            background:linear-gradient(135deg, var(--ins-pink) 0%, #ff6b9d 100%);
+                            color:#fff; font-size:15px; font-weight:600; cursor:pointer;
+                            display:flex; align-items:center; justify-content:center; gap:8px;
+                            box-shadow:0 4px 12px rgba(255,107,157,0.3);
+                            transition:all 0.2s;
+                        ">
+                            <svg class="svg-icon" style="width:16px;height:16px;" viewBox="0 0 24 24"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path><line x1="21" y1="2" x2="12" y2="11"></line></svg>
+                            AI生成数据
+                        </button>
+                        <div style="text-align:center; font-size:12px; color:#999; margin-top:8px;">一键生成好友、聊天记录、钱包、朋友圈等数据</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // ===== 查手机WeChat - 服务页面 =====
+
+        function showFpServicePage() {
+            const page = document.getElementById('fp-service-page');
+            page.style.display = 'flex';
+            page.offsetHeight;
+            page.classList.add('slide-in');
+        }
+
+        function hideFpServicePage() {
+            const page = document.getElementById('fp-service-page');
+            page.classList.remove('slide-in');
+            setTimeout(() => { page.style.display = 'none'; }, 300);
+        }
+
+        async function showFpWalletPage() {
+            const page = document.getElementById('fp-wallet-page');
+            page.style.display = 'flex';
+            page.offsetHeight;
+            page.classList.add('active');
+            // 更新余额显示
+            await updateFpWalletBalance();
+        }
+
+        function hideFpWalletPage() {
+            const page = document.getElementById('fp-wallet-page');
+            page.classList.remove('active');
+            setTimeout(() => { page.style.display = 'none'; }, 350);
+        }
+
+        async function showFpBalancePage() {
+            const page = document.getElementById('fp-balance-page');
+            page.style.display = 'flex';
+            page.offsetHeight;
+            page.classList.add('active');
+            await updateFpWalletBalance();
+        }
+
+        function hideFpBalancePage() {
+            const page = document.getElementById('fp-balance-page');
+            page.classList.remove('active');
+            setTimeout(() => { page.style.display = 'none'; }, 350);
+        }
+
+        function showFpBillPage() {
+            const page = document.getElementById('fp-bill-page');
+            page.style.display = 'flex';
+            page.offsetHeight;
+            page.classList.add('active');
+            renderFpBillList();
+        }
+
+        function hideFpBillPage() {
+            const page = document.getElementById('fp-bill-page');
+            page.classList.remove('active');
+            setTimeout(() => { page.style.display = 'none'; }, 350);
+        }
+
+        // 获取/设置角色的fp钱包数据（存储在 roleChar.fp_wallet_by_user[accountId] 中）
+        function getFpWalletData(roleChar, accountId) {
+            if (!roleChar || !accountId) return { balance: '0.00', transactions: [] };
+            if (!roleChar.fp_wallet_by_user) roleChar.fp_wallet_by_user = {};
+            if (!roleChar.fp_wallet_by_user[accountId]) roleChar.fp_wallet_by_user[accountId] = { balance: '0.00', transactions: [] };
+            return roleChar.fp_wallet_by_user[accountId];
+        }
+
+        async function setFpWalletData(roleChar, accountId, data) {
+            if (!roleChar.fp_wallet_by_user) roleChar.fp_wallet_by_user = {};
+            roleChar.fp_wallet_by_user[accountId] = data;
+            await db.characters.put(roleChar);
+        }
+
+        async function updateFpWalletBalance() {
+            const roleId = window._fpWechatRoleId;
+            const accountId = findPhoneTargetAccountId;
+            if (!roleId || !accountId) return;
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) return;
+            const walletData = getFpWalletData(roleChar, accountId);
+            const balanceStr = '¥' + (walletData.balance || '0.00');
+            const el1 = document.getElementById('fp-wallet-balance');
+            const el2 = document.getElementById('fp-balance-amount-display');
+            if (el1) el1.textContent = balanceStr;
+            if (el2) el2.textContent = balanceStr;
+        }
+
+        async function renderFpBillList() {
+            const roleId = window._fpWechatRoleId;
+            const accountId = findPhoneTargetAccountId;
+            const listEl = document.getElementById('fp-bill-list');
+            const emptyEl = document.getElementById('fp-bill-empty');
+            if (!roleId || !accountId) { listEl.innerHTML = ''; emptyEl.style.display = 'block'; return; }
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) { listEl.innerHTML = ''; emptyEl.style.display = 'block'; return; }
+            const walletData = getFpWalletData(roleChar, accountId);
+            const transactions = walletData.transactions || [];
+            if (transactions.length === 0) {
+                listEl.innerHTML = '';
+                emptyEl.style.display = 'block';
+                return;
+            }
+            emptyEl.style.display = 'none';
+            // 按时间倒序
+            const sorted = [...transactions].sort((a, b) => (b.time || 0) - (a.time || 0));
+            listEl.innerHTML = sorted.map(t => {
+                const isIncome = t.type === 'income';
+                const sign = isIncome ? '+' : '-';
+                const color = isIncome ? '#07c160' : '#333';
+                const timeStr = t.time ? new Date(t.time).toLocaleDateString('zh-CN', { month:'numeric', day:'numeric', hour:'numeric', minute:'numeric' }) : '';
+                return `<div style="background:#fff; padding:14px 16px; display:flex; align-items:center; justify-content:space-between;">
+                    <div>
+                        <div style="font-size:15px; color:#333;">${t.title || '未知'}</div>
+                        <div style="font-size:12px; color:#999; margin-top:4px;">${timeStr} ${t.desc || ''}</div>
+                    </div>
+                    <div style="font-size:16px; font-weight:600; color:${color};">${sign}¥${t.amount}</div>
+                </div>`;
+            }).join('');
+        }
+
+        // ===== 查手机 - AI生成角色数据（一次性生成所有数据，仅调用一次AI） =====
+        async function generateFpRoleData() {
+            const roleId = window._fpWechatRoleId;
+            const accountId = findPhoneTargetAccountId;
+            if (!roleId || !accountId) { showToast('参数缺失'); return; }
+
+            let roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) { showToast('角色不存在'); return; }
+
+            const roleName = roleChar.nick || roleChar.name || '未知角色';
+            const roleDesc = roleChar.description || roleChar.desc || '';
+
+            // ★ 先自动将关联NPC填充到通讯录
+            roleChar = await autoPopulateRelationshipContacts(roleChar, accountId);
+
+            // 获取现有通讯录NPC（现在已包含关联NPC）
+            let contactIds = getRolePhoneContacts(roleChar, accountId);
+            const allChars = await db.characters.toArray();
+            let npcContacts = [];
+            for (const cid of contactIds) {
+                const c = allChars.find(ch => ch.id === cid);
+                if (c && c.type !== 'user' && String(c.id) !== String(roleId)) {
+                    npcContacts.push(c);
+                }
+            }
+            
+            // ★ 构建关联NPC的关系描述（用于AI生成更准确的聊天记录）
+            let relationshipContext = '';
+            if (roleChar.relationships && roleChar.relationships.length > 0) {
+                const relDescs = roleChar.relationships.map(r => {
+                    const npc = npcContacts.find(n => n.id === r.targetId);
+                    const npcNick = npc ? (npc.nick || npc.name) : r.targetName;
+                    return `- ${npcNick}：${r.relation}${r.desc ? '（' + r.desc + '）' : ''}`;
+                }).filter(Boolean);
+                if (relDescs.length > 0) {
+                    relationshipContext = `\n关联NPC与角色的关系：\n${relDescs.join('\n')}\n`;
+                }
+            }
+
+            const userChar = await db.characters.get(parseInt(accountId));
+            const userName = userChar ? (userChar.nick || userChar.name) : '用户';
+
+            // 显示loading
+            const btn = document.getElementById('fp-generate-btn');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<div class="loading-spinner" style="display:inline-block; width:16px; height:16px; border-width:2px; border-color:var(--ins-pink); border-top-color:transparent;"></div> 生成中...';
+            }
+
+            try {
+                const needNpcs = npcContacts.length === 0;
+                const npcCount = needNpcs ? (Math.floor(Math.random() * 3) + 2) : 0; // 2~4个NPC
+
+                // ★ 构建一次性 prompt，包含所有数据的生成 ★
+                let npcSection = '';
+                if (needNpcs) {
+                    npcSection = `
+一、生成${npcCount}个微信好友NPC
+每个NPC需要：
+- name: 真实的中文全名（如"李婷"、"王浩然"、"赵小雪"），要像真人名字
+- nick: 真实的微信昵称（如"小婷子🌸"、"浩然"、"雪雪"），像真人的微信名
+- relation: 与主角色的具体关系（如：大学室友、公司同事、高中闺蜜、前男友等）
+- desc: 一句话人设描述（如：活泼开朗的90后设计师，喜欢摄影和旅行）
+
+`;
+                }
+
+                const existingNpcList = !needNpcs ? npcContacts.map(n => {
+                    // ★ 优先使用关系描述来描述NPC
+                    const rel = roleChar.relationships?.find(r => r.targetId === n.id);
+                    const relInfo = rel ? `[${rel.relation}] ` : '';
+                    return `- ${n.nick || n.name}: ${relInfo}${n.description || '好友'}`;
+                }).join('\n') : '（将在npcs字段中生成）';
+                const existingNpcNames = !needNpcs ? npcContacts.map(n => n.nick || n.name).join('、') : '';
+
+                // ★ 获取世界书上下文（用于没有关联NPC时根据世界观生成）
+                let fpLoreContext = '';
+                try {
+                    const lorebookIds = roleChar.lorebookIds || (roleChar.lorebookId ? [roleChar.lorebookId] : []);
+                    if (lorebookIds.length > 0) {
+                        fpLoreContext = await getLorebookContext(lorebookIds, roleName);
+                    }
+                } catch (e) {
+                    console.warn('[FP生成] 获取世界书失败:', e);
+                }
+
+                const combinedPrompt = `你是一个辅助生成角色手机数据的AI助手。请一次性生成以下所有数据。
+
+主角色信息：
+角色名称：${roleName}
+角色描述：${roleDesc || '暂无描述'}
+关联用户：${userName}
+${relationshipContext}${fpLoreContext ? `\n世界观背景：\n${fpLoreContext}\n` : ''}
+请生成以下所有内容：
+${npcSection}${needNpcs ? '二' : '一'}、为主角色与每个NPC好友之间各生成3~6条简短的日常聊天记录
+${needNpcs ? '好友列表将在npcs中生成，chats的key要用NPC的nick' : '好友列表：\n' + existingNpcList + '\nchats的key要用NPC的nick（即：' + existingNpcNames + '）'}
+每条消息role: "user"(NPC发的) 或 "char"(主角色发的)
+
+${needNpcs ? '三' : '二'}、生成钱包数据
+余额要符合角色经济状况，生成3~6笔交易(收入/支出)，贴合日常生活
+
+${needNpcs ? '四' : '三'}、生成角色对用户"${userName}"的微信备注名
+备注要符合关系（恋人用昵称/爱称，朋友用外号等），最多8个字
+
+${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主角色发的，是好友NPC发的！）
+总共生成5~8条朋友圈动态，分散在不同的NPC好友身上。
+每条动态的author字段填NPC好友的nick。
+内容要符合对应NPC的人设和性格，包含日常生活、心情、分享等。
+每条动态可以有文字图片描述（用方括号包裹图片描述，如"[自拍照]"、"[咖啡拉花]"）。
+部分动态可以有其他好友的点赞（用nick）和评论。主角色"${roleName}"也可能会点赞或评论好友的动态。
+
+请严格按照以下JSON格式返回，不要有任何其他文字：
+{
+  ${needNpcs ? '"npcs": [{"name":"李婷","nick":"小婷子🌸","relation":"大学室友","desc":"活泼开朗的90后设计师"}],' : ''}
+  "chats": {
+    "${needNpcs ? '小婷子🌸' : (npcContacts[0]?.nick || npcContacts[0]?.name || 'NPC昵称')}": [{"role":"user","content":"消息内容"},{"role":"char","content":"回复内容"}]
+  },
+  "wallet": {
+    "balance": "1234.56",
+    "transactions": [{"type":"expense","amount":"25.00","title":"外卖","desc":"美团外卖"},{"type":"income","amount":"5000.00","title":"工资","desc":"XX公司"}]
+  },
+  "remark": "备注名",
+  "moments": [
+    {"author":"${needNpcs ? '小婷子🌸' : (npcContacts[0]?.nick || npcContacts[0]?.name || 'NPC昵称')}","content":"今天天气真好～出去走走","images":["[蓝天白云的照片]"],"likes":["${roleName}","其他好友nick"],"comments":[{"name":"${roleName}","text":"好美啊"}]},
+    {"author":"另一个好友nick","content":"加班到现在...","images":[],"likes":[],"comments":[]}
+  ]
+}`;
+
+                // ★ 仅调用一次AI ★
+                const aiResult = await callAI([
+                    { role: 'system', content: combinedPrompt },
+                    { role: 'user', content: '请一次性生成所有数据，只返回JSON。' }
+                ]);
+
+                let parsedData = {};
+                try {
+                    const jsonMatch = aiResult.match(/\{[\s\S]*\}/);
+                    if (jsonMatch) {
+                        parsedData = JSON.parse(jsonMatch[0]);
+                    }
+                } catch(e) {
+                    console.error('[FP生成] JSON解析失败:', e, aiResult);
+                    showToast('生成失败：数据格式错误');
+                    return;
+                }
+
+                // ===== 处理NPC数据 =====
+                let generatedNpcs = [];
+                if (needNpcs && parsedData.npcs && Array.isArray(parsedData.npcs)) {
+                    for (const npc of parsedData.npcs) {
+                        const newChar = {
+                            name: npc.name || '未知NPC',
+                            nick: npc.nick || npc.name || '好友',
+                            description: `[${npc.relation || '好友'}] ${npc.desc || ''}`,
+                            avatar: '',
+                            type: 'npc',
+                            created_at: Date.now()
+                        };
+                        const id = await db.characters.add(newChar);
+                        newChar.id = id;
+                        npcContacts.push(newChar);
+                        generatedNpcs.push(newChar);
+                        await addRolePhoneContact(roleId, accountId, id);
+                    }
+                }
+
+                // ===== 处理聊天记录 =====
+                const chatsData = parsedData.chats || {};
+                const baseTime = Date.now() - 3600000 * 24;
+                const roleCharForChat = await db.characters.get(parseInt(roleId));
+                if (!roleCharForChat.chat_history_by_user) roleCharForChat.chat_history_by_user = {};
+
+                for (const npc of npcContacts) {
+                    const npcKey = npc.nick || npc.name;
+                    const messages = chatsData[npcKey] || [];
+                    if (messages.length === 0) continue;
+
+                    const fpNpcKey = 'fp_npc_' + npc.id;
+                    const hist = [];
+                    messages.forEach((m, idx) => {
+                        hist.push({
+                            role: m.role || 'user',
+                            content: m.content || '',
+                            time: baseTime + idx * 600000
+                        });
+                    });
+                    roleCharForChat.chat_history_by_user[fpNpcKey] = hist;
+                }
+                await db.characters.put(roleCharForChat);
+
+                // ===== 处理钱包数据 =====
+                let walletResult = parsedData.wallet || { balance: '0.00', transactions: [] };
+                const txBaseTime = Date.now() - 3600000 * 72;
+                if (walletResult.transactions) {
+                    walletResult.transactions.forEach((tx, idx) => {
+                        tx.time = txBaseTime + idx * 3600000 * 8;
+                    });
+                }
+                const charForWallet = await db.characters.get(parseInt(roleId));
+                await setFpWalletData(charForWallet, accountId, walletResult);
+                await updateFpWalletBalance();
+
+                // ===== 处理备注 =====
+                const remark = (parsedData.remark || '').trim().replace(/["""]/g, '').substring(0, 20);
+                if (remark) {
+                    const charForRemark = await db.characters.get(parseInt(roleId));
+                    if (!charForRemark.fp_remark_by_user) charForRemark.fp_remark_by_user = {};
+                    charForRemark.fp_remark_by_user[accountId] = remark;
+                    await db.characters.put(charForRemark);
+                    console.log('[FP生成] 备注生成:', remark);
+                }
+
+                // ===== 处理朋友圈数据（好友NPC发的朋友圈） =====
+                const momentsArr = parsedData.moments || [];
+                if (momentsArr.length > 0) {
+                    const charForMoments = await db.characters.get(parseInt(roleId));
+                    if (!charForMoments.fp_moments_by_user) charForMoments.fp_moments_by_user = {};
+                    
+                    const momentBaseTime = Date.now() - 3600000 * 48; // 从48小时前开始
+                    const processedMoments = momentsArr.map((m, idx) => ({
+                        author: m.author || '好友',
+                        content: m.content || '',
+                        images: (m.images || []).map(img => {
+                            // 如果图片描述没有方括号，加上
+                            if (typeof img === 'string' && !img.startsWith('[')) return '[' + img + ']';
+                            return img;
+                        }),
+                        likes: m.likes || [],
+                        comments: (m.comments || []).map(c => ({
+                            name: c.name || '好友',
+                            text: c.text || ''
+                        })),
+                        time: momentBaseTime + idx * 3600000 * 6 // 每条间隔6小时
+                    }));
+
+                    // 按时间倒序排列（最新的在前）
+                    processedMoments.sort((a, b) => b.time - a.time);
+                    charForMoments.fp_moments_by_user[accountId] = processedMoments;
+                    await db.characters.put(charForMoments);
+                    console.log('[FP生成] 好友朋友圈生成:', processedMoments.length, '条');
+                }
+
+                showToast('✅ 数据生成完成');
+                if (generatedNpcs.length > 0) {
+                    showToast(`已生成 ${generatedNpcs.length} 个好友和聊天记录`);
+                }
+
+            } catch(e) {
+                console.error('[FP生成] 整体失败:', e);
+                showToast('生成失败：' + (e.message || '未知错误'));
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<svg class="svg-icon" style="width:16px;height:16px;" viewBox="0 0 24 24"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path><line x1="21" y1="2" x2="12" y2="11"></line></svg> AI生成数据';
+                }
+            }
+        }
+
+        // ===== 查手机WeChat - 聊天详情（直接复用真实chat-window，通过 _fpChatMode 标记控制） =====
+        
+        // 打开聊天详情 - 直接复用真实 chat-window，设置 fp 模式标记
+        async function openFpChatDetail(contactCharId) {
+            const roleId = window._fpWechatRoleId;
+            const accountId = findPhoneTargetAccountId;
+            
+            console.log('[openFpChatDetail] contactCharId=', contactCharId, 'roleId=', roleId, 'accountId=', accountId, 'getCurrentAccountId=', getCurrentAccountId());
+            
+            const roleChar = await db.characters.get(parseInt(roleId));
+            const contactChar = await db.characters.get(parseInt(contactCharId));
+            
+            if (!roleChar || !contactChar) { console.error('[openFpChatDetail] 角色或联系人不存在'); return; }
+            
+            // ★ 设置 fp 聊天模式标记 ★
+            window._fpChatMode = true;
+            window._fpRoleCharId = parseInt(roleId);          // 角色（手机主人，消息右侧=自己）
+            window._fpContactCharId = parseInt(contactCharId); // 联系人（消息左侧=对方）
+            // NPC联系人使用特殊key存储聊天记录，用户联系人使用正常accountId
+            window._fpAccountId = (contactChar.type === 'user') ? accountId : ('fp_npc_' + contactCharId);
+            
+            // 缓存头像信息供 renderChatBody 和 appendMessageToUI 使用
+            window._fpRoleAvatar = getCharAvatar(roleChar, accountId) || roleChar.avatar || '';
+            window._fpContactAvatar = contactChar.type === 'user' 
+                ? (contactChar.avatar || '') 
+                : (getCharAvatar(contactChar, accountId) || contactChar.avatar || '');
+            // 联系人名称：如果是用户，优先用角色设置的备注
+            const fpRemarkForUser = roleChar?.fp_remark_by_user?.[accountId] || '';
+            window._fpContactName = contactChar.type === 'user' 
+                ? (fpRemarkForUser || contactChar.nick || contactChar.name || '未知') 
+                : getCharDisplayName(contactChar, accountId);
+            
+            // 设置 currentChatCharId 为角色ID（聊天记录存储在角色身上）
+            currentChatCharId = parseInt(roleId);
+            window._currentChatCharId = currentChatCharId;
+            window.currentGroupChatId = null;
+            
+            // 设置标题为联系人名称
+            const titleEl = document.getElementById('chat-title');
+            titleEl.innerText = window._fpContactName;
+            titleEl.style.cursor = 'default';
+            titleEl.onclick = null; // fp模式下不显示聊天详情
+            
+            // 显示真实的 chat-window（z-index 需要高于 fp-wechat-page 的 320）
+            const chatWin = document.getElementById('chat-window');
+            chatWin.style.display = 'flex';
+            chatWin.style.zIndex = '350';
+            
+            // 显示输入框
+            const chatFooter = document.getElementById('chat-footer');
+            chatFooter.style.display = 'flex';
+            
+            // 显示所有按钮（AI魔法棒、表情、菜单等）
+            const aiMagicBtn = document.querySelector('.chat-input-bar .chat-icon-btn');
+            if (aiMagicBtn) aiMagicBtn.style.display = '';
+            const actionPanel = document.getElementById('action-panel');
+            if (actionPanel) {
+                const actionItems = actionPanel.querySelectorAll('.action-item');
+                actionItems.forEach(item => { item.style.display = ''; });
+            }
+            
+            // 重置输入框
+            const chatInputBox = document.getElementById('chat-input-box');
+            if (chatInputBox) {
+                chatInputBox.placeholder = '发送消息...';
+                chatInputBox.value = '';
+                chatInputBox.readOnly = false;
+                chatInputBox.style.opacity = '';
+            }
+            
+            // 渲染聊天内容（renderChatBody 会检测 _fpChatMode 并翻转角色）
+            await renderChatBody(roleChar, true);
+            
+            // 滚动到底部
+            setTimeout(() => {
+                const body = document.getElementById('chat-body');
+                if (body) body.scrollTop = body.scrollHeight;
+            }, 100);
+        }
+
+        // ★ fp模式发送消息：以角色身份发送（role:'char'），消息存到角色的聊天记录中
+        async function sendFpChatMessage() {
+            const input = document.getElementById('chat-input-box');
+            let text = input.value.trim();
+            if (!text || !window._fpRoleCharId) return;
+            
+            const roleCharId = window._fpRoleCharId;
+            const accountId = window._fpAccountId;
+            
+            console.log('[FP发送] roleCharId=', roleCharId, 'fpAccountId=', accountId, 'currentAccountId=', getCurrentAccountId());
+            
+            if (!accountId) {
+                console.error('[FP发送] accountId为空！');
+                showToast('发送失败：账号信息丢失');
+                return;
+            }
+            
+            const roleChar = await db.characters.get(roleCharId);
+            if (!roleChar) { showToast('发送失败：角色不存在'); return; }
+            
+            // 清空输入框
+            input.value = '';
+            handleChatInputChange(input);
+            closeChatPanel();
+            
+            // 获取聊天历史
+            let history = getChatHistory(roleChar, accountId);
+            
+            // ★ 核心：消息以 role:'char' 保存（因为是角色在发消息），fpSent 标记为查手机模式发送
+            const charMsg = { role: 'char', content: text, time: Date.now(), fpSent: true };
+            
+            // 如果有引用
+            if (currentQuote) {
+                charMsg.quote = {
+                    name: currentQuote.name,
+                    content: currentQuote.content
+                };
+                cancelQuote();
+            }
+            
+            history.push(charMsg);
+            
+            try {
+                await setChatHistory(roleChar, accountId, history);
+                console.log('[FP发送] ✅ 保存成功 roleChar(id=' + roleCharId + ').chat_history_by_user[' + accountId + '], 历史长度=' + history.length);
+            } catch (e) {
+                console.error('[FP发送] ❌ 保存失败:', e);
+                showToast('消息保存失败！');
+                return;
+            }
+            
+            // 重新渲染聊天（因为需要翻转角色，直接重新渲染最简单）
+            await renderChatBody(roleChar, true);
+            
+            // 滚动到底部
+            setTimeout(() => {
+                const body = document.getElementById('chat-body');
+                if (body) body.scrollTop = body.scrollHeight;
+            }, 50);
+        }
+        
+        // ★ 查手机NPC模式 - NPC视角AI回复
+        // NPC以为是角色给他发消息，NPC用自己的人设回复
+        async function triggerFpNpcReply() {
+            console.log('[FP-NPC回复] ⚡ 触发NPC AI回复');
+            
+            if (window._isGeneratingReply) {
+                console.log('[FP-NPC回复] 正在生成中，忽略');
+                return;
+            }
+            
+            const roleCharId = window._fpRoleCharId;
+            const npcCharId = window._fpContactCharId;
+            const fpNpcKey = window._fpAccountId; // 'fp_npc_' + npcId
+            
+            if (!roleCharId || !npcCharId || !fpNpcKey) {
+                console.error('[FP-NPC回复] 缺少必要参数');
+                return;
+            }
+            
+            const roleChar = await db.characters.get(roleCharId);
+            const npcChar = await db.characters.get(npcCharId);
+            if (!roleChar || !npcChar) {
+                showToast('角色数据异常');
+                return;
+            }
+            
+            window._isGeneratingReply = true;
+            
+            // 显示"正在输入"
+            const chatTitleEl = document.getElementById('chat-title');
+            const originalTitle = chatTitleEl ? chatTitleEl.innerText : '';
+            if (chatTitleEl) chatTitleEl.innerText = '对方正在输入中...';
+            
+            try {
+                const npcName = npcChar.nick || npcChar.name || 'NPC';
+                const npcDesc = npcChar.description || '';
+                const roleName = roleChar.nick || roleChar.name || '角色';
+                const roleDesc = roleChar.description || '';
+                
+                // 获取聊天历史（存储在 roleChar.chat_history_by_user['fp_npc_' + npcId]）
+                const fullHistory = getChatHistory(roleChar, fpNpcKey);
+                console.log('[FP-NPC回复] 聊天历史条数:', fullHistory.length);
+                
+                // 构建NPC视角的系统提示
+                const now = new Date();
+                const timeStr = `${now.getFullYear()}年${now.getMonth()+1}月${now.getDate()}日 ${now.getHours()}:${String(now.getMinutes()).padStart(2,'0')}`;
+                
+                let systemPrompt = `# 角色扮演任务
+
+【当前时间】
+${timeStr}
+
+---
+
+## 你是谁
+
+**你的名字**：${npcName}
+**你的人设**：${npcDesc}
+
+你不是AI助手。你是一个独立的人，有自己的生活、情绪和想法。
+
+---
+
+## 你的对话对象
+
+**对方名字**：${roleName}
+**对方信息**：${roleDesc}
+
+你正在用微信和 ${roleName} 聊天。${roleName} 是给你发消息的人。
+
+---
+
+## 扮演原则
+
+1. 完全沉浸在你的人设里，像真人一样聊天
+2. 你有自己的情绪和想法
+3. 根据你和${roleName}的关系来调整语气和态度
+4. 对话要自然、口语化
+5. **不要只回答！要主动分享、追问、延展话题**
+
+---
+
+## 微信聊天方式
+
+你在用微信聊天，可以用：
+- **文字**：直接说话
+- **语音**：\`[voice:内容]\`
+- **图片/卡片**：\`[imgcard:图片描述]\`
+- **转账**：\`((TRANSFER: 金额, 备注))\`
+- **购物送礼**：\`((SHOP_GIFT: 金额, 商品名))\`（给对方买礼物，可选分期）
+- **表情包**：\`[sticker:描述]\`（如果有的话）
+
+---
+
+## 气泡分割
+
+真人在微信上是分多条发的：
+- 发 1-3 条短消息
+- 用 \`|||\` 分隔每条消息
+- 每条不要太长，像真人打字
+- 口语化，少用标点
+
+---
+
+## 回复格式
+
+用JSON格式返回（不要有markdown标记）：
+\`\`\`
+{
+  "reply": "第一条消息|||第二条消息",
+  "thought": "你此刻内心的想法"
+}
+\`\`\`
+
+**重要**：
+- reply 文本内禁止使用逗号，但 JSON 字段之间的逗号必须保留
+- **thought 字段是必填项！必须写出你此刻的真实心理活动（至少10个字）**
+- thought 必须是真实情绪和内心想法，不要写系统分析
+
+---
+
+现在，作为 **${npcName}**，根据你的人设和对话历史，像真人一样回复 ${roleName} 吧。`;
+
+                // 构建消息历史（从NPC视角看：char=角色发的→对NPC来说是user，user=NPC发的→对NPC来说是assistant）
+                const contextCount = 20;
+                const recentHistory = fullHistory
+                    .slice(-contextCount)
+                    .filter(m => m.role !== 'system')
+                    .map(m => {
+                        let content = m.content || '';
+                        // 在这个聊天记录中：role:'char' = 角色发的（NPC视角的user），role:'user' = NPC发的（NPC视角的assistant）
+                        const aiRole = m.role === 'char' ? 'user' : 'assistant';
+                        
+                        // 处理特殊消息格式
+                        if (content.startsWith('[img:')) content = '（发送了一张图片/表情包）';
+                        else if (content.startsWith('[imgcard:')) content = '（发送了一张图片卡片）';
+                        else if (content.startsWith('[voice:')) {
+                            const voiceContent = content.match(/\[voice:(.*?)\]/)?.[1] || '';
+                            content = `（发送语音消息：${voiceContent}）`;
+                        }
+                        else if (m.type === 'transfer') {
+                            try {
+                                const t = JSON.parse(content);
+                                content = aiRole === 'user' 
+                                    ? `（对方给你转账了${t.amount}元，备注：${t.desc || '转账'}）`
+                                    : `（你给对方转账了${t.amount}元，备注：${t.desc || '转账'}）`;
+                            } catch(e) { content = '（一笔转账）'; }
+                        }
+                        else if (m.type === 'location') {
+                            try {
+                                const l = JSON.parse(content);
+                                content = `（位置分享："${l.name}"）`;
+                            } catch(e) { content = '（一条位置分享）'; }
+                        }
+                        
+                        return { role: aiRole, content: content };
+                    })
+                    .filter(m => m.content && m.content.trim());
+                
+                // 如果最后一条是assistant（NPC发的），添加触发消息
+                const messages = [
+                    { role: 'system', content: systemPrompt },
+                    ...recentHistory
+                ];
+                
+                if (messages.length > 1) {
+                    const lastMsg = messages[messages.length - 1];
+                    if (lastMsg.role === 'assistant') {
+                        messages.push({
+                            role: 'user',
+                            content: `[系统指令] ${roleName}没有回复，请你作为${npcName}继续这个话题。`
+                        });
+                    }
+                }
+                
+                console.log('[FP-NPC回复] 发送给AI的消息数:', messages.length);
+                
+                // 调用AI
+                const aiResponse = await callAI(messages);
+                
+                // 解析回复
+                let replyText = '';
+                let thought = '';
+                
+                const parsed = extractAndParseJSON(aiResponse);
+                if (parsed) {
+                    replyText = parsed.reply || parsed.content || parsed.message || '';
+                    thought = parsed.thought || '';
+                }
+                if (!replyText) {
+                    const replyMatch = aiResponse.match(/"reply"\s*:\s*"([\s\S]*?)"/);
+                    if (replyMatch) {
+                        replyText = replyMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+                    } else {
+                        replyText = aiResponse.trim() || '(NPC 返回为空)';
+                    }
+                }
+                
+                // 清理回复文本
+                replyText = replyText.replace(/\s*\[DONE\]\s*$/i, '').trim();
+                replyText = replyText.replace(/(\|\|\|)+$/g, '').replace(/^\|\|\|/g, '').replace(/\|\|\|\|\|\|/g, '|||').trim();
+                
+                console.log('[FP-NPC回复] AI回复:', replyText);
+                if (thought) console.log('[FP-NPC回复] NPC心声:', thought);
+                
+                // 分割消息并逐条保存
+                const segments = replyText.split('|||').map(s => s.trim()).filter(s => s.length > 0);
+                
+                // 重新获取最新的roleChar
+                const freshRoleChar = await db.characters.get(roleCharId);
+                let history = getChatHistory(freshRoleChar, fpNpcKey);
+                
+                for (let i = 0; i < segments.length; i++) {
+                    let seg = segments[i];
+                    
+                    // 检测转账
+                    const transferMatch = seg.match(/\(\(TRANSFER:\s*(\d+(?:\.\d+)?)(?:,\s*(.+?))?\)\)/i);
+                    // 检测购物送礼
+                    const fpShopGiftMatch = !transferMatch ? seg.match(/\(\(SHOP_GIFT:\s*(\d+(?:\.\d+)?)(?:,\s*(.+?))?\)\)/i) : null;
+                    
+                    if (transferMatch) {
+                        const amount = parseFloat(transferMatch[1]);
+                        const note = transferMatch[2] || '转账';
+                        const textBefore = seg.substring(0, transferMatch.index).trim();
+                        
+                        // 如果转账前有文字，先保存文字
+                        if (textBefore) {
+                            const textMsg = { role: 'user', content: textBefore, time: Date.now() + i * 2 };
+                            history.push(textMsg);
+                            await setChatHistory(freshRoleChar, fpNpcKey, history);
+                            if (currentChatCharId === roleCharId) {
+                                await renderChatBody(freshRoleChar, true);
+                            }
+                            await new Promise(r => setTimeout(r, 300));
+                        }
+                        
+                        // 保存转账消息
+                        const transferData = { amount: amount.toFixed(2), desc: note, status: 'sent' };
+                        const transferMsg = { role: 'user', type: 'transfer', content: JSON.stringify(transferData), time: Date.now() + i * 2 + 1 };
+                        history.push(transferMsg);
+                        await setChatHistory(freshRoleChar, fpNpcKey, history);
+                        if (currentChatCharId === roleCharId) {
+                            await renderChatBody(freshRoleChar, true);
+                        }
+                    } else if (fpShopGiftMatch) {
+                        const gAmt = parseFloat(fpShopGiftMatch[1]);
+                        let gName = fpShopGiftMatch[2] || '购物礼物';
+                        if (gName.length > 30) gName = gName.substring(0, 30);
+                        const textBefore = seg.substring(0, fpShopGiftMatch.index).trim();
+                        
+                        if (textBefore) {
+                            history.push({ role: 'user', content: textBefore, time: Date.now() + i * 2 });
+                            await setChatHistory(freshRoleChar, fpNpcKey, history);
+                            if (currentChatCharId === roleCharId) await renderChatBody(freshRoleChar, true);
+                            await new Promise(r => setTimeout(r, 300));
+                        }
+                        
+                        const giftCardData = { amount: gAmt.toFixed(2), items: gName, buyForName: '', installmentInfo: '', isGift: true, status: 'paid' };
+                        const giftMsg = { role: 'user', type: 'shopPayRequest', content: JSON.stringify(giftCardData), time: Date.now() + i * 2 + 1 };
+                        history.push(giftMsg);
+                        await setChatHistory(freshRoleChar, fpNpcKey, history);
+                        if (currentChatCharId === roleCharId) {
+                            if (window._appendShopCardToChat) {
+                                await window._appendShopCardToChat(roleCharId, giftMsg);
+                            } else {
+                                await renderChatBody(freshRoleChar, true);
+                            }
+                        }
+                    } else {
+                        // 普通消息：保存为 role:'user'（NPC发的消息在角色聊天记录中是user）
+                        const npcMsg = { role: 'user', content: seg, time: Date.now() + i * 2 };
+                        if (thought && i === 0) npcMsg.thought = thought;
+                        history.push(npcMsg);
+                        await setChatHistory(freshRoleChar, fpNpcKey, history);
+                        
+                        if (currentChatCharId === roleCharId) {
+                            await renderChatBody(freshRoleChar, true);
+                        }
+                    }
+                    
+                    // 消息间延迟
+                    if (i < segments.length - 1) {
+                        await new Promise(r => setTimeout(r, 400 + Math.random() * 300));
+                    }
+                }
+                
+                // 滚动到底部
+                setTimeout(() => {
+                    const body = document.getElementById('chat-body');
+                    if (body) body.scrollTop = body.scrollHeight;
+                }, 100);
+                
+            } catch(e) {
+                console.error('[FP-NPC回复] 失败:', e);
+                showToast('NPC回复失败：' + (e.message || '未知错误'));
+            } finally {
+                window._isGeneratingReply = false;
+                if (chatTitleEl) chatTitleEl.innerText = originalTitle;
+            }
+        }
+        
         // 各项自定义方法（修改后自动保存到Dexie）
         function setWallpaper(input) {
             const file = input.files[0];
@@ -2603,6 +4873,13 @@ async function migratePhoneAndSmsToIndexedDB() {
             if (display) display.textContent = val;
         }
 
+        // 切换 NovelAI 自动生图开关
+        async function toggleNovelAIAutoGenerate(el) {
+            const enabled = el.checked;
+            await db.dexiData.put({ key: 'novelaiAutoGenerate', value: enabled });
+            console.log('[NovelAI] 自动生图:', enabled ? '开启' : '关闭');
+        }
+
         // 加载 NovelAI 配置
         async function loadNovelAIConfig() {
             try {
@@ -2631,6 +4908,13 @@ async function migratePhoneAndSmsToIndexedDB() {
                 if (sizeItem) document.getElementById('novelai-size').value = sizeItem.value;
                 if (systemPromptItem) document.getElementById('novelai-system-prompt').value = systemPromptItem.value;
                 if (negativePromptItem) document.getElementById('novelai-negative-prompt').value = negativePromptItem.value;
+                
+                // 加载自动生图开关状态
+                const autoGenItem = await db.dexiData.get('novelaiAutoGenerate');
+                const autoGenSwitch = document.getElementById('novelai-auto-generate-switch');
+                if (autoGenSwitch) {
+                    autoGenSwitch.checked = autoGenItem ? !!autoGenItem.value : false;
+                }
             } catch (e) {
                 console.error("加载 NovelAI 配置失败", e);
             }
@@ -2718,6 +5002,527 @@ async function migratePhoneAndSmsToIndexedDB() {
             } finally {
                 btnText.textContent = '测试 NovelAI 连接';
             }
+        }
+
+        // ========== NovelAI 自动生图功能 ==========
+        
+        // Blob 转 DataURL 辅助函数
+        function blobToDataUrl(blob) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result);
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            });
+        }
+        
+        // 从 ZIP Blob 中提取图片，返回 DataURL
+        async function extractPngFromZipBlob(zipBlob) {
+            const arrayBuffer = await zipBlob.arrayBuffer();
+            const uint8 = new Uint8Array(arrayBuffer);
+            
+            // 在 zip 字节流中定位 PNG 签名 (89 50 4E 47 0D 0A 1A 0A)
+            let pngStart = -1;
+            for (let i = 0; i < uint8.length - 8; i++) {
+                if (uint8[i] === 0x89 && uint8[i+1] === 0x50 && uint8[i+2] === 0x4E && uint8[i+3] === 0x47) {
+                    pngStart = i;
+                    break;
+                }
+            }
+            
+            if (pngStart >= 0) {
+                // 找到 PNG IEND 标记来精确截取
+                let pngEnd = uint8.length;
+                for (let i = pngStart + 8; i < uint8.length - 8; i++) {
+                    // IEND chunk: 00 00 00 00 49 45 4E 44 AE 42 60 82
+                    if (uint8[i] === 0x49 && uint8[i+1] === 0x45 && uint8[i+2] === 0x4E && uint8[i+3] === 0x44) {
+                        pngEnd = i + 8; // IEND(4) + CRC(4)
+                        break;
+                    }
+                }
+                const pngBlob = new Blob([uint8.slice(pngStart, pngEnd)], { type: 'image/png' });
+                return await blobToDataUrl(pngBlob);
+            }
+            
+            // 没找到 PNG，尝试找 JPEG 签名 (FF D8 FF)
+            for (let i = 0; i < uint8.length - 3; i++) {
+                if (uint8[i] === 0xFF && uint8[i+1] === 0xD8 && uint8[i+2] === 0xFF) {
+                    const jpgBlob = new Blob([uint8.slice(i)], { type: 'image/jpeg' });
+                    return await blobToDataUrl(jpgBlob);
+                }
+            }
+            
+            // 都找不到，直接当整个文件转
+            return await blobToDataUrl(zipBlob);
+        }
+        
+        // 从 base64 字符串解析为图片 DataURL
+        function resolveBase64Image(b64) {
+            if (!b64) return null;
+            if (b64.startsWith('http')) return b64; // 是 URL
+            if (b64.startsWith('data:image')) return b64; // 已经是 DataURL
+            // 猜测图片格式
+            if (b64.startsWith('iVBOR')) return `data:image/png;base64,${b64}`;
+            if (b64.startsWith('/9j/')) return `data:image/jpeg;base64,${b64}`;
+            // 默认当 png
+            return `data:image/png;base64,${b64}`;
+        }
+        
+        // 调用 NovelAI API 生成图片，返回 DataURL 或 null
+        async function generateNovelAIImage(description) {
+            try {
+                const apiKeyItem = await db.dexiData.get('novelaiApiKey');
+                const proxyUrlItem = await db.dexiData.get('novelaiProxyUrl');
+                const modelItem = await db.dexiData.get('novelaiModel');
+                const stepsItem = await db.dexiData.get('novelaiSteps');
+                const scaleItem = await db.dexiData.get('novelaiScale');
+                const samplerItem = await db.dexiData.get('novelaiSampler');
+                const sizeItem = await db.dexiData.get('novelaiSize');
+                const systemPromptItem = await db.dexiData.get('novelaiSystemPrompt');
+                const negativePromptItem = await db.dexiData.get('novelaiNegativePrompt');
+                
+                const rawApiKey = apiKeyItem ? apiKeyItem.value : '';
+                if (!rawApiKey) {
+                    console.warn('[NovelAI-AutoGen] 未配置 API Key，跳过');
+                    return null;
+                }
+                // 清理 Key 中可能的特殊字符
+                const apiKey = rawApiKey.trim().replace(/[^\x20-\x7E]/g, '');
+                
+                const userProxyUrl = proxyUrlItem ? proxyUrlItem.value.trim() : '';
+                let model = modelItem ? modelItem.value : 'nai-diffusion-4-5-full';
+                const steps = stepsItem ? parseInt(stepsItem.value) : 28;
+                const scale = scaleItem ? parseFloat(scaleItem.value) : 5;
+                const sampler = samplerItem ? samplerItem.value : 'k_euler';
+                const sizeStr = sizeItem ? sizeItem.value : '832x1216';
+                const systemPrompt = systemPromptItem ? systemPromptItem.value : 'masterpiece, best quality, highres, 1girl, solo, anime style, detailed, beautiful, cute';
+                const negativePrompt = negativePromptItem ? negativePromptItem.value : 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry';
+                
+                // inpainting 模型不能直接生成，回退到同版本的普通模型
+                if (model === 'nai-diffusion-3-inpainting') model = 'nai-diffusion-3';
+                
+                const isV4 = model.includes('nai-diffusion-4');
+                const [width, height] = sizeStr.split('x').map(Number);
+                
+                // 拼接最终 prompt
+                const fullPrompt = [systemPrompt, description].filter(Boolean).join(', ');
+                
+                console.log(`[NovelAI-AutoGen] 🎨 开始生成 | model=${model} (V4=${isV4}) | "${description}"`);
+                
+                // 根据模型版本选择端点
+                let apiUrl;
+                if (userProxyUrl && !userProxyUrl.includes('novelai.net')) {
+                    // 用户自定义代理，直接用
+                    apiUrl = userProxyUrl;
+                } else {
+                    apiUrl = isV4
+                        ? 'https://image.novelai.net/ai/generate-image-stream'
+                        : 'https://image.novelai.net/ai/generate-image';
+                }
+                
+                // 根据模型版本构建不同的请求体
+                let requestBody;
+                const commonSeed = Math.floor(Math.random() * 9999999999);
+                
+                if (isV4) {
+                    requestBody = {
+                        input: fullPrompt,
+                        model: model,
+                        action: 'generate',
+                        parameters: {
+                            params_version: 3,
+                            width, height, scale, sampler, steps,
+                            seed: commonSeed,
+                            n_samples: 1,
+                            ucPreset: 0,
+                            qualityToggle: true,
+                            autoSmea: false,
+                            dynamic_thresholding: false,
+                            controlnet_strength: 1,
+                            legacy: false,
+                            add_original_image: true,
+                            cfg_rescale: 0,
+                            noise_schedule: 'karras',
+                            legacy_v3_extend: false,
+                            skip_cfg_above_sigma: null,
+                            use_coords: false,
+                            legacy_uc: false,
+                            normalize_reference_strength_multiple: true,
+                            inpaintImg2ImgStrength: 1,
+                            characterPrompts: [],
+                            v4_prompt: {
+                                caption: { base_caption: fullPrompt, char_captions: [] },
+                                use_coords: false,
+                                use_order: true
+                            },
+                            v4_negative_prompt: {
+                                caption: { base_caption: negativePrompt, char_captions: [] },
+                                legacy_uc: false
+                            },
+                            negative_prompt: negativePrompt,
+                            deliberate_euler_ancestral_bug: false,
+                            prefer_brownian: true
+                        }
+                    };
+                } else {
+                    // V3 请求格式
+                    requestBody = {
+                        input: fullPrompt,
+                        model: model,
+                        action: 'generate',
+                        parameters: {
+                            width, height, scale, sampler, steps,
+                            seed: commonSeed,
+                            n_samples: 1,
+                            ucPreset: 0,
+                            qualityToggle: true,
+                            sm: false,
+                            sm_dyn: false,
+                            dynamic_thresholding: false,
+                            controlnet_strength: 1,
+                            legacy: false,
+                            add_original_image: false,
+                            cfg_rescale: 0,
+                            noise_schedule: 'native',
+                            negative_prompt: negativePrompt
+                        }
+                    };
+                }
+                
+                console.log('[NovelAI-AutoGen] 请求:', { url: apiUrl, model, isV4, prompt: fullPrompt.substring(0, 80) + '...' });
+                
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiKey}`
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+                
+                console.log(`[NovelAI-AutoGen] 响应状态: ${response.status}`);
+                
+                if (!response.ok) {
+                    // 尝试读取错误信息
+                    let errDetail = '';
+                    try {
+                        const errText = await response.text();
+                        const errObj = JSON.parse(errText);
+                        errDetail = errObj.message || errObj.error || errText.substring(0, 150);
+                    } catch (e) {
+                        try { errDetail = await response.text(); } catch (_) {}
+                        errDetail = errDetail.substring(0, 150);
+                    }
+                    console.error(`[NovelAI-AutoGen] API 错误 (${response.status}): ${errDetail}`);
+                    return null;
+                }
+                
+                // === 根据响应 Content-Type 选择解析策略 ===
+                const contentType = response.headers.get('content-type') || '';
+                let imageDataUrl = null;
+                
+                if (contentType.includes('text/event-stream') || contentType.includes('application/x-ndjson')) {
+                    // V4 SSE 流式响应
+                    const sseText = await response.text();
+                    const lines = sseText.trim().split('\n');
+                    
+                    // 从后往前扫描，找到最终的图片数据
+                    for (let i = lines.length - 1; i >= 0; i--) {
+                        const line = lines[i].trim();
+                        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+                        
+                        const payload = line.substring(6);
+                        try {
+                            const obj = JSON.parse(payload);
+                            // 检查是否有 URL 字段
+                            if (obj.output && Array.isArray(obj.output) && obj.output[0]?.url) {
+                                imageDataUrl = obj.output[0].url; break;
+                            }
+                            if (obj.url) { imageDataUrl = obj.url; break; }
+                            // 检查 base64 字段
+                            const b64 = (obj.event_type === 'final' && obj.image) ? obj.image : (obj.data || obj.image);
+                            if (b64) {
+                                imageDataUrl = resolveBase64Image(b64);
+                                if (!imageDataUrl) {
+                                    // 可能是 zip 的 base64，解码后提取
+                                    const raw = atob(b64);
+                                    const bytes = new Uint8Array(raw.length);
+                                    for (let j = 0; j < raw.length; j++) bytes[j] = raw.charCodeAt(j);
+                                    imageDataUrl = await extractPngFromZipBlob(new Blob([bytes]));
+                                }
+                                break;
+                            }
+                        } catch (e) {
+                            // 非 JSON，当成原始 base64 尝试
+                            if (payload.length > 100) {
+                                imageDataUrl = resolveBase64Image(payload);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (!imageDataUrl) {
+                        console.error('[NovelAI-AutoGen] SSE 响应中未找到图片数据');
+                        return null;
+                    }
+                    
+                } else if (contentType.includes('application/json')) {
+                    // JSON 响应（某些代理会返回 JSON 包裹的数据）
+                    const jsonData = await response.json();
+                    if (jsonData.output?.[0]?.url) {
+                        imageDataUrl = jsonData.output[0].url;
+                    } else if (jsonData.url) {
+                        imageDataUrl = jsonData.url;
+                    } else {
+                        const b64 = jsonData.image || jsonData.data;
+                        if (b64) {
+                            imageDataUrl = resolveBase64Image(b64);
+                        }
+                    }
+                    if (!imageDataUrl) {
+                        console.error('[NovelAI-AutoGen] JSON 响应中未找到图片');
+                        return null;
+                    }
+                    
+                } else {
+                    // 默认当 ZIP / 二进制 Blob 处理（V3 常见）
+                    const blob = await response.blob();
+                    if (blob.type && blob.type.startsWith('image/')) {
+                        imageDataUrl = await blobToDataUrl(blob);
+                    } else {
+                        imageDataUrl = await extractPngFromZipBlob(blob);
+                    }
+                }
+                
+                if (imageDataUrl) {
+                    console.log(`[NovelAI-AutoGen] ✅ 图片生成成功`);
+                }
+                return imageDataUrl || null;
+                
+            } catch (err) {
+                console.error('[NovelAI-AutoGen] 生成异常:', err);
+                return null;
+            }
+        }
+        
+        // 用 LLM 将中文 imgcard 描述翻译成英文 NovelAI tag
+        async function translateImgcardToEnglishTags(chineseDesc, charId) {
+            try {
+                // 获取角色信息，提取外貌/性别线索
+                let charHint = '';
+                if (charId) {
+                    const char = await db.characters.get(charId);
+                    if (char) {
+                        const desc = (char.description || '').substring(0, 300);
+                        charHint = `角色名: ${char.name}\n角色设定摘要: ${desc}`;
+                    }
+                }
+                
+                const sysPrompt = `你是一个 NovelAI 图像生成的 prompt 翻译专家。
+用户会给你一段中文的图片描述（来自聊天中角色发送的图片），你需要将它转换为 NovelAI 风格的英文 tag。
+
+规则：
+1. 输出纯英文 tag，用逗号分隔，不要输出任何解释
+2. 根据角色信息判断性别：男性用 1boy，女性用 1girl，不要搞错
+3. 包含人物外貌特征（发色、发型、瞳色、体型等）、服装、表情、动作、场景
+4. 使用 NovelAI/Danbooru 常用的 tag 风格（如 black hair, blue eyes, smile, sitting 等）
+5. 不要加质量词（如 masterpiece, best quality），系统会自动添加
+6. 只输出 tag，不要有其他内容`;
+
+                const userMsg = charHint
+                    ? `${charHint}\n\n图片描述: ${chineseDesc}`
+                    : `图片描述: ${chineseDesc}`;
+                
+                const result = await callAI([
+                    { role: 'system', content: sysPrompt },
+                    { role: 'user', content: userMsg }
+                ], { max_tokens: 200 });
+                
+                if (result && result.trim()) {
+                    const tags = result.trim().replace(/^["']|["']$/g, '').replace(/\n/g, ', ');
+                    console.log(`[NovelAI-AutoGen] 🔄 翻译结果: "${chineseDesc}" → "${tags}"`);
+                    return tags;
+                }
+            } catch (err) {
+                console.warn('[NovelAI-AutoGen] LLM 翻译失败，将直接使用原始描述:', err.message);
+            }
+            // 翻译失败回退：返回原始描述
+            return chineseDesc;
+        }
+        
+        // 检查是否启用了 NovelAI 自动生图
+        async function isNovelAIAutoGenerateEnabled() {
+            try {
+                const item = await db.dexiData.get('novelaiAutoGenerate');
+                return item ? !!item.value : false;
+            } catch (e) {
+                return false;
+            }
+        }
+        
+        // 在 AI 回复完成后，检测所有 imgcard 消息并自动生成图片
+        async function processImgCardsWithNovelAI(charId, accountId) {
+            // 检查开关是否开启
+            const enabled = await isNovelAIAutoGenerateEnabled();
+            if (!enabled) {
+                console.log('[NovelAI-AutoGen] 自动生图未开启，跳过');
+                return;
+            }
+            
+            // 检查 API Key 是否配置
+            const apiKeyItem = await db.dexiData.get('novelaiApiKey');
+            if (!apiKeyItem || !apiKeyItem.value) {
+                console.log('[NovelAI-AutoGen] 未配置 API Key，跳过');
+                return;
+            }
+            
+            const char = await db.characters.get(charId);
+            if (!char) return;
+            
+            let history = getChatHistory(char, accountId);
+            if (!history || history.length === 0) return;
+            
+            // 从最后往前找最近的 imgcard 消息（只检查最近一批 AI 消息，到遇到 user 消息为止）
+            const imgcardMessages = [];
+            for (let i = history.length - 1; i >= 0; i--) {
+                const msg = history[i];
+                if (msg.role === 'user') break; // 遇到用户消息就停止
+                if (msg.role === 'char' && msg.content && msg.content.startsWith('[imgcard:') && !msg.novelai_generated) {
+                    imgcardMessages.push({ index: i, msg: msg });
+                }
+            }
+            
+            if (imgcardMessages.length === 0) {
+                console.log('[NovelAI-AutoGen] 未检测到需要生成的 imgcard 消息');
+                return;
+            }
+            
+            console.log(`[NovelAI-AutoGen] 检测到 ${imgcardMessages.length} 条 imgcard 消息，开始生成...`);
+            
+            for (const { index, msg } of imgcardMessages) {
+                const cardText = msg.content.substring(9, msg.content.length - 1).trim();
+                console.log(`[NovelAI-AutoGen] 正在为 "${cardText}" 生成图片...`);
+                
+                // 🔄 用 LLM 将中文描述翻译为英文 NovelAI tag（带角色性别/外貌信息）
+                let englishTags = cardText;
+                try {
+                    englishTags = await translateImgcardToEnglishTags(cardText, charId);
+                } catch (translateErr) {
+                    console.warn('[NovelAI-AutoGen] 翻译失败，使用原始描述:', translateErr.message);
+                }
+                
+                // 更新 UI 显示加载状态（如果当前正在查看该聊天）
+                if (currentChatCharId === charId) {
+                    const chatBody = document.getElementById('chat-body');
+                    if (chatBody) {
+                        const messageRows = chatBody.querySelectorAll('.message-row');
+                        if (messageRows[index]) {
+                            const imgBubble = messageRows[index].querySelector('.img-card-bubble');
+                            if (imgBubble) {
+                                imgBubble.innerHTML = `
+                                    <div class="img-card-placeholder" style="position:relative;">
+                                        <div style="display:flex; flex-direction:column; align-items:center; gap:6px;">
+                                            <div class="novelai-loading-spinner" style="width:24px; height:24px; border:3px solid #e0e0e0; border-top-color:var(--deep-pink, #ff4081); border-radius:50%; animation:spin 0.8s linear infinite;"></div>
+                                            <div class="img-card-hint" style="font-size:11px; color:#999;">NovelAI 生成中...</div>
+                                        </div>
+                                    </div>
+                                `;
+                                imgBubble.onclick = null; // 生成过程中禁用点击
+                            }
+                        }
+                    }
+                }
+                
+                // 调用 NovelAI 生成图片（使用翻译后的英文 tag）
+                const imageDataUrl = await generateNovelAIImage(englishTags);
+                
+                if (imageDataUrl) {
+                    // 生成成功：更新历史记录中的消息
+                    const freshChar = await db.characters.get(charId);
+                    let freshHistory = getChatHistory(freshChar, accountId);
+                    
+                    if (freshHistory[index] && freshHistory[index].content === msg.content) {
+                        // 保留原始 imgcard 内容，添加生成的图片
+                        freshHistory[index].novelai_generated = true;
+                        freshHistory[index].novelai_image = imageDataUrl;
+                        freshHistory[index].novelai_description = cardText;
+                        await setChatHistory(freshChar, accountId, freshHistory);
+                        
+                        console.log(`[NovelAI-AutoGen] ✅ 图片已保存到历史记录 (index: ${index})`);
+                    }
+                    
+                    // 更新 UI（如果当前正在查看该聊天）
+                    if (currentChatCharId === charId) {
+                        const chatBody = document.getElementById('chat-body');
+                        if (chatBody) {
+                            const messageRows = chatBody.querySelectorAll('.message-row');
+                            if (messageRows[index]) {
+                                const imgBubble = messageRows[index].querySelector('.img-card-bubble');
+                                if (imgBubble) {
+                                    imgBubble.innerHTML = `
+                                        <img src="${imageDataUrl}" class="chat-image" 
+                                             style="width:200px; max-height:300px; object-fit:cover; border-radius:8px; cursor:pointer;" 
+                                             onclick="showFullImage(this.src)" />
+                                        <div style="font-size:10px; color:#bbb; text-align:center; margin-top:4px; padding:0 4px;">${escapeHtml(cardText)}</div>
+                                    `;
+                                    imgBubble.onclick = null;
+                                    imgBubble.style.cursor = 'default';
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // 生成失败：恢复原始状态
+                    console.warn(`[NovelAI-AutoGen] ❌ 图片生成失败: "${cardText}"`);
+                    
+                    if (currentChatCharId === charId) {
+                        const chatBody = document.getElementById('chat-body');
+                        if (chatBody) {
+                            const messageRows = chatBody.querySelectorAll('.message-row');
+                            if (messageRows[index]) {
+                                const imgBubble = messageRows[index].querySelector('.img-card-bubble');
+                                if (imgBubble) {
+                                    imgBubble.dataset.text = cardText;
+                                    imgBubble.dataset.expanded = 'false';
+                                    imgBubble.innerHTML = `
+                                        <div class="img-card-placeholder">
+                                            <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                                <polyline points="21 15 16 10 5 21"></polyline>
+                                            </svg>
+                                            <div class="img-card-hint" style="color:#ff6b6b;">生成失败，点击查看文字</div>
+                                        </div>
+                                    `;
+                                    // 恢复点击展开文字功能
+                                    imgBubble.onclick = (e) => {
+                                        e.stopPropagation();
+                                        const isExpanded = imgBubble.dataset.expanded === 'true';
+                                        if (isExpanded) {
+                                            imgBubble.innerHTML = `
+                                                <div class="img-card-placeholder">
+                                                    <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                                        <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                                        <polyline points="21 15 16 10 5 21"></polyline>
+                                                    </svg>
+                                                    <div class="img-card-hint">点击查看文字</div>
+                                                </div>
+                                            `;
+                                            imgBubble.dataset.expanded = 'false';
+                                        } else {
+                                            imgBubble.innerHTML = `<div class="img-card-text">${cardText}</div>`;
+                                            imgBubble.dataset.expanded = 'true';
+                                        }
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            console.log(`[NovelAI-AutoGen] 🎉 所有 imgcard 处理完成`);
         }
 
         // 构造智能 URL (自动补全 /v1)
@@ -2889,6 +5694,10 @@ async function migratePhoneAndSmsToIndexedDB() {
                 saveData.customFontUrl = customFontUrl;
                 saveData.customFontName = customFontName;
 
+                // 保存全局字体大小
+                const globalFontSize = document.getElementById('global-font-size-slider')?.value || '';
+                saveData.globalFontSize = globalFontSize;
+
                 // 保存自定义CSS
                 const customCssCode = document.getElementById('custom-css-input')?.value || '';
                 saveData.customCssCode = customCssCode;
@@ -2985,6 +5794,8 @@ async function migratePhoneAndSmsToIndexedDB() {
                 // 字体
                 theme.customFontUrl = document.getElementById('custom-font-input')?.value?.trim() || '';
                 theme.customFontName = document.getElementById('custom-font-name-input')?.value?.trim() || '';
+                // 全局字体大小
+                theme.globalFontSize = document.getElementById('global-font-size-slider')?.value || '';
                 // 自定义CSS
                 theme.customCssCode = document.getElementById('custom-css-input')?.value || '';
 
@@ -3142,6 +5953,14 @@ async function migratePhoneAndSmsToIndexedDB() {
                     const cfni = document.getElementById('custom-font-name-input');
                     if (cfni) cfni.value = theme.customFontName;
                     loadCustomFont(theme.customFontUrl, theme.customFontName, false);
+                }
+                // 全局字体大小
+                if (theme.globalFontSize && theme.globalFontSize !== '') {
+                    const slider = document.getElementById('global-font-size-slider');
+                    const label = document.getElementById('global-font-size-value');
+                    if (slider) slider.value = theme.globalFontSize;
+                    if (label) label.textContent = theme.globalFontSize + 'px';
+                    applyGlobalFontSize(theme.globalFontSize);
                 }
                 // 自定义CSS
                 if (theme.customCssCode !== undefined) {
@@ -6766,10 +9585,87 @@ async function acceptMessageReply() {
 `;
         }
         
+        // 6.5 读取查手机NPC活动记录
+        let fpNpcActivityTextSms = "";
+        let _fpHasPhoneActivitySms = false;
+        let _fpNpcLinesForMemorySms = []; // ★ 保存活动详情，用于写入长期记忆
+        try {
+            if (targetChar.chat_history_by_user) {
+                const fpNpcLinesSms = [];
+                for (const key of Object.keys(targetChar.chat_history_by_user)) {
+                    if (!key.startsWith('fp_npc_')) continue;
+                    const npcIdStr = key.replace('fp_npc_', '');
+                    const npcHistory = targetChar.chat_history_by_user[key] || [];
+                    const unnotifiedFpMsgs = npcHistory.filter(m => m.fpSent && !m.fpNotified);
+                    if (unnotifiedFpMsgs.length === 0) continue;
+                    let npcName = 'NPC';
+                    try {
+                        const npcChar = await db.characters.get(parseInt(npcIdStr));
+                        if (npcChar) npcName = npcChar.nick || npcChar.name || 'NPC';
+                    } catch (e) {}
+                    const firstFpTime = unnotifiedFpMsgs[0].time || 0;
+                    for (const m of npcHistory) {
+                        if ((m.time || 0) < firstFpTime) continue;
+                        if (m.fpNotified) continue;
+                        if (m.fpSent && m.role === 'char') {
+                            let desc = m.content || '';
+                            if (desc.startsWith('[img:')) desc = '一张图片/表情包';
+                            else if (desc.startsWith('[imgcard:')) {
+                                const imgContent = desc.match(/\[imgcard:(.*?)\]/)?.[1] || '一张图片';
+                                desc = `一张图片卡片（${imgContent}）`;
+                            }
+                            else if (desc.startsWith('[voice:')) {
+                                const voiceContent = desc.match(/\[voice:(.*?)\]/)?.[1] || '';
+                                desc = `一条语音消息："${voiceContent}"`;
+                            }
+                            fpNpcLinesSms.push(`  → 冒充你给「${npcName}」发了一条消息，内容原文: "${desc}"`);
+                        } else if (!m.fpSent && m.role === 'user') {
+                            let desc = m.content || '';
+                            fpNpcLinesSms.push(`  ← 「${npcName}」回复了，内容原文: "${desc}"`);
+                        }
+                    }
+                }
+                // 也检测查手机发布的朋友圈
+                if (targetChar.fp_moments_by_user) {
+                    for (const mKey of Object.keys(targetChar.fp_moments_by_user)) {
+                        const momentsList = targetChar.fp_moments_by_user[mKey] || [];
+                        for (const m of momentsList) {
+                            if (m.fpSent && !m.fpNotified) {
+                                let desc = m.content || '';
+                                let imgInfo = '';
+                                if (m.images && m.images.length > 0) imgInfo = `（附带${m.images.length}张图片）`;
+                                fpNpcLinesSms.push(`  → 冒充你发了一条朋友圈${imgInfo}，朋友圈内容原文: "${desc}"`);
+                                if (m.likes && m.likes.length > 0) {
+                                    const likeNames = m.likes.map(l => typeof l === 'string' ? l : (l.name || '')).filter(Boolean).join('、');
+                                    if (likeNames) fpNpcLinesSms.push(`    ❤ 点赞了这条朋友圈的人: ${likeNames}`);
+                                }
+                                if (m.comments && m.comments.length > 0) {
+                                    for (const c of m.comments) {
+                                        const cName = c.name || '好友';
+                                        const cText = c.text || c.content || '';
+                                        if (cText) fpNpcLinesSms.push(`    💬 ${cName} 评论了: "${cText}"`);
+                                    }
+                                }
+                                // ★ 不立即标记fpNotified
+                            }
+                        }
+                    }
+                }
+                if (fpNpcLinesSms.length > 0) {
+                    _fpNpcLinesForMemorySms = [...fpNpcLinesSms]; // ★ 保存副本用于长期记忆
+                    fpNpcActivityTextSms = `\n\n---\n\n## 紧急事件：有人动了你的手机\n\n你发现有人偷偷拿了你的手机，冒充你做了以下事情：\n\n${fpNpcLinesSms.join('\n')}\n\n以上都不是你自己做的，是对方用你手机冒充你做的。\n请根据你的人设和性格，自然地对此做出反应。不要忽略这件事。`;
+                    _fpHasPhoneActivitySms = true;
+                    console.log('[acceptMessageReply] ✅ 检测到查手机活动，共', fpNpcLinesSms.length, '条记录（待AI回复后标记）');
+                }
+            }
+        } catch (e) {
+            console.warn('[acceptMessageReply] 读取查手机NPC活动失败:', e);
+        }
+
         // 7. 构建系统提示
         let systemPrompt = `你正在进行角色扮演。
 【当前时间】
-${virtualTimeStr}
+${virtualTimeStr}${fpNpcActivityTextSms}
 
 【角色(你)信息】
 名字：${targetChar.name}
@@ -6799,11 +9695,22 @@ ${friendStatusPrompt}
 ${smsActionInstructions}
 
 【特别提示】
-由于对方可能暂时没有回复你之前的消息，你需要主动发送新的短信内容。这可能是：
+${(() => {
+    // 检查最后一条短信是否是用户发送的
+    const lastSms = chatMessages.length > 0 ? chatMessages[chatMessages.length - 1] : null;
+    const lastIsSent = lastSms && (lastSms.type === 'sent' || lastSms.sender === (myChar.nick || myChar.name));
+    if (lastIsSent) {
+        return `对方刚刚给你发了一条短信，内容是："${lastSms.content}"。
+你必须认真阅读并理解对方发来的这条消息，然后做出自然的、针对性的回复。
+不要忽略对方说的内容，要像真实聊天一样回应对方的话。`;
+    } else {
+        return `由于对方可能暂时没有回复你之前的消息，你需要主动发送新的短信内容。这可能是：
 - 补充说明之前的话题
 - 主动分享新的信息或想法
 - 询问对方的情况或状态
-- 根据你的性格和当前情境，自然地推进对话
+- 根据你的性格和当前情境，自然地推进对话`;
+    }
+})()}
 请确保每次生成的内容都是**全新的**，不要重复你之前已经发送过的消息。
 
 【重要回复规则 - 必须严格遵守】
@@ -6998,6 +9905,64 @@ ${smsActionInstructions}
         }, 100);
         
         console.log('[acceptMessageReply] ✅ 回复完成，共', replySegments.length, '条消息');
+        
+        // ★ AI回复成功后，标记查手机活动为已通知
+        if (_fpHasPhoneActivitySms) {
+            try {
+                const freshCharForFp = await db.characters.get(targetChar.id);
+                if (freshCharForFp) {
+                    let markedCount = 0;
+                    if (freshCharForFp.chat_history_by_user) {
+                        for (const key of Object.keys(freshCharForFp.chat_history_by_user)) {
+                            if (!key.startsWith('fp_npc_')) continue;
+                            const npcHistory = freshCharForFp.chat_history_by_user[key] || [];
+                            for (const m of npcHistory) {
+                                if ((m.fpSent || (!m.fpSent && m.role === 'user')) && !m.fpNotified) {
+                                    m.fpNotified = true;
+                                    markedCount++;
+                                }
+                            }
+                        }
+                    }
+                    if (freshCharForFp.fp_moments_by_user) {
+                        for (const mKey of Object.keys(freshCharForFp.fp_moments_by_user)) {
+                            const momentsList = freshCharForFp.fp_moments_by_user[mKey] || [];
+                            for (const m of momentsList) {
+                                if (m.fpSent && !m.fpNotified) {
+                                    m.fpNotified = true;
+                                    markedCount++;
+                                }
+                            }
+                        }
+                    }
+                    await db.characters.put(freshCharForFp);
+                    console.log('[acceptMessageReply] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
+                }
+                
+                // ★ 将查手机事件写入长期记忆，确保角色永久记住此事
+                try {
+                    const smsUserName = smsUserChar ? smsUserChar.name : (myChar.nick || myChar.name);
+                    const fpMemoryContent = `${smsUserName}偷偷拿了${targetChar.name}的手机，做了以下事情：${_fpNpcLinesForMemorySms.map(l => l.trim().replace(/^[→←]\s*/, '')).join('；')}。${targetChar.name}已经发现并做出了反应。`;
+                    await db.chat_summaries.add({
+                        accountId: accountId,
+                        chatType: 'private',
+                        chatId: String(targetChar.id),
+                        time: Date.now(),
+                        content: fpMemoryContent,
+                        messageCount: 0,
+                        timeRange: '',
+                        keywords: ['查手机', '冒充', '手机被动'],
+                        startTime: Date.now(),
+                        endTime: Date.now()
+                    });
+                    console.log('[acceptMessageReply] ✅ 查手机事件已写入长期记忆');
+                } catch (memErr) {
+                    console.warn('[acceptMessageReply] 写入查手机长期记忆失败:', memErr);
+                }
+            } catch (fpErr) {
+                console.warn('[acceptMessageReply] 标记fpNotified失败:', fpErr);
+            }
+        }
         
         // 恢复标题
         if (smsNameEl) {
@@ -7254,7 +10219,7 @@ async function showWechatRegisterPage() {
                 page.style.display = 'none';
                 page.style.transform = ''; 
                 page.style.opacity = '';
-                page.style.visibility = ''; // 清理可见性状态
+                page.style.visibility = '';
             }, 200);
         }
 
@@ -7849,6 +10814,26 @@ async function showWechatRegisterPage() {
             const chatHistory = getChatHistory(roleChar, accountId);
             const recentChats = chatHistory.slice(-20).map(m => `${m.role === 'user' ? (myChar?.name || '用户') : roleChar.name}: ${m.content}`).join('\n');
             
+            // ★ 获取关联NPC列表，优先用于生成好友数据
+            let relationshipFriendsHint = '';
+            if (roleChar.relationships && roleChar.relationships.length > 0) {
+                const relLines = [];
+                for (const rel of roleChar.relationships) {
+                    if (!rel.targetId) continue;
+                    try {
+                        const targetChar = await db.characters.get(rel.targetId);
+                        if (targetChar && targetChar.type !== 'user') {
+                            const npcName = targetChar.nick || targetChar.name || rel.targetName;
+                            const npcDesc = targetChar.description ? targetChar.description.substring(0, 100) : '';
+                            relLines.push(`- ${npcName}（${rel.relation}${rel.desc ? '，' + rel.desc : ''}）${npcDesc ? '：' + npcDesc : ''}`);
+                        }
+                    } catch (e) {}
+                }
+                if (relLines.length > 0) {
+                    relationshipFriendsHint = `\n【角色的关联NPC（必须包含在好友列表中！）】\n${relLines.join('\n')}\n这些是角色身边的重要人物，生成好友列表时必须优先包含他们，并根据关系生成相应的聊天记录。\n`;
+                }
+            }
+            
             // 构建AI提示 - 生成更完整的数据，包括聊天记录
             const prompt = `你是一个数据生成助手。请根据以下角色信息，生成这个角色的微信数据。
 
@@ -7869,6 +10854,7 @@ ${myChar ? `【与用户的关系】
 用户名：${myChar.name}
 用户设定：${myChar.description || '无'}
 ` : ''}
+${relationshipFriendsHint}
 
 ${recentChats ? `【与用户的最近聊天记录（真实）】
 ${recentChats}
@@ -7910,6 +10896,8 @@ ${loreContext}
 
 生成要求：
 1. friends：生成4-8个好友，根据角色设定和世界观生成合适的好友
+   - 如果上面提供了【角色的关联NPC】列表，必须优先将这些NPC作为好友包含进来，并根据他们的关系和人设生成自然的聊天记录
+   - 如果没有关联NPC，则根据角色人设和世界书自由生成合适的好友
    - 如果有与用户的聊天记录，用户（${myChar?.name || '用户'}）必须在好友列表中，且聊天记录要基于真实记录
    - 每个好友要生成5-15条聊天记录（chatHistory），体现他们的关系
    - chatHistory中 role为"friend"表示好友发的，"me"表示角色（${roleChar.name}）发的
@@ -8707,11 +11695,20 @@ ${loreContext}
             return char.nick || char.name;
         }
 
-        // 获取角色的好友状态（按账号隔离）
+        // 获取角色的好友状态（按账号隔离，含旧数据兼容）
         function getFriendStatus(char, accountId) {
             if (!accountId) return char.wechat_status || 'stranger';
-            // 直接从按账号隔离的结构中读取，不再自动把旧状态复制给任意账号
-            return char.wechat_status_by_user?.[accountId] || 'stranger';
+            // 优先从按账号隔离的结构中读取
+            const perUserStatus = char.wechat_status_by_user?.[accountId];
+            if (perUserStatus && perUserStatus !== 'stranger') {
+                return perUserStatus;
+            }
+            // 兜底：如果按账号隔离没有记录，检查旧的全局状态
+            // 这用于兼容旧数据（数据隔离功能上线前添加的好友）
+            if (char.wechat_status && char.wechat_status !== 'stranger') {
+                return char.wechat_status;
+            }
+            return perUserStatus || 'stranger';
         }
 
         // 设置角色的好友状态（按账号隔离）
@@ -8735,10 +11732,10 @@ ${loreContext}
                 // 直接从按账号隔离的结构中读取，不再自动把旧数据复制给任意账号
                 history = char.chat_history_by_user?.[accountId] || [];
             }
-            // 按时间戳排序，确保消息顺序正确（使用稳定排序：时间相同时保持原始顺序）
-            return [...history].map((m, i) => ({ _i: i, m }))
-                .sort((a, b) => (a.m.time || 0) - (b.m.time || 0) || a._i - b._i)
-                .map(x => x.m);
+            // 🔧 修复：不再按时间排序，直接返回数组原始顺序
+            // 因为快进时间和真实时间混合会导致时间戳非线性，按时间排序会破坏正确的消息顺序
+            // 消息 push 进数组的顺序就是正确的显示顺序
+            return [...history];
         }
 
         // 设置角色的聊天记录（按账号隔离）
@@ -9048,6 +12045,14 @@ ${loreContext}
                         if (last.type === 'familyCard') lastMsg = '[亲属卡]';
                         if (last.type === 'audio') lastMsg = '[语音]';
                         if (last.type === 'location') lastMsg = '[位置]';
+                        if (last.type === 'shopPayRequest') {
+                            try {
+                                const _spd = JSON.parse(last.content);
+                                if (_spd.isShare) lastMsg = '[购物分享]';
+                                else if (_spd.isGift) lastMsg = '[购物礼物]';
+                                else lastMsg = '[代付请求]';
+                            } catch(e) { lastMsg = '[代付请求]'; }
+                        }
                         
                         const d = new Date(last.time);
                         const now = new Date();
@@ -9102,6 +12107,7 @@ ${loreContext}
                 // 内容区域 (可滑动)
                 const contentDiv = document.createElement('div');
                 contentDiv.className = 'wechat-list-item-content';
+                contentDiv.dataset.charId = f.id; // 标记角色ID供外部定位
                 
                 // 内容样式
                 contentDiv.style.display = 'flex';
@@ -9161,6 +12167,14 @@ ${loreContext}
                     if (last.type === 'familyCard') lastMsg = '[亲属卡]';
                     if (last.type === 'audio') lastMsg = '[语音]';
                     if (last.type === 'location') lastMsg = '[位置]';
+                    if (last.type === 'shopPayRequest') {
+                        try {
+                            const _spd2 = JSON.parse(last.content);
+                            if (_spd2.isShare) lastMsg = '[购物分享]';
+                            else if (_spd2.isGift) lastMsg = '[购物礼物]';
+                            else lastMsg = '[代付请求]';
+                        } catch(e) { lastMsg = '[代付请求]'; }
+                    }
                     
                     const d = new Date(last.time);
                     const now = new Date();
@@ -9193,9 +12207,9 @@ ${loreContext}
                                 <div style="font-size:16px; font-weight:500; color:${textColor};">${displayName}</div>
                                 ${statusBadge}
                             </div>
-                            <div style="font-size:12px; color:#999;">${lastTimeStr}</div>
+                            <div class="wc-list-time" style="font-size:12px; color:#999;">${lastTimeStr}</div>
                         </div>
-                        <div style="font-size:14px; color:#999; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${lastMsg}</div>
+                        <div class="wc-list-lastmsg" style="font-size:14px; color:#999; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${lastMsg}</div>
                     </div>
                 `;
 
@@ -9690,31 +12704,8 @@ ${loreContext}
                 entries.forEach(entry => {
                     if (entry.enabled === false) return; // 只加载启用的条目
                     
-                    // 🔥 新逻辑：挂载了就直接加载所有启用的条目
-                    // 如果有关键词，优先匹配关键词的条目
-                    // 如果没有关键词或没有设置key，直接加载
-                    let shouldLoad = false;
-                    
-                    const keys = Array.isArray(entry.key) ? entry.key : (entry.key ? [entry.key] : []);
-                    
-                    if (keys.length === 0 || keys.every(k => !k || k.trim() === '')) {
-                        // 没有设置关键词，直接加载
-                        shouldLoad = true;
-                    } else if (checkText) {
-                        // 有关键词，尝试匹配
-                        const isMatch = keys.some(k => {
-                            if(!k) return false;
-                            return checkText.includes(k.toLowerCase());
-                        });
-                        shouldLoad = isMatch;
-                    } else {
-                        // 没有检查文本但有关键词设置，也加载（因为挂载了就应该读取）
-                        shouldLoad = true;
-                    }
-                    
-                    if (shouldLoad) {
-                        allContext.push(entry.content);
-                    }
+                    // 挂载了就直接加载所有启用的条目
+                    allContext.push(entry.content);
                 });
             }
             
@@ -10925,16 +13916,26 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             // 处理图片卡片
             if (msg.content.startsWith('[imgcard:')) {
                 const cardText = msg.content.substring(9, msg.content.length - 1).trim();
-                renderedContent = `<div class="img-card-bubble" data-text="${escapeHtml(cardText)}" data-expanded="false" onclick="showImageCardContent(this)">
-                    <div class="img-card-placeholder">
-                        <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                            <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                            <polyline points="21 15 16 10 5 21"></polyline>
-                        </svg>
-                        <div class="img-card-hint">点击查看文字</div>
-                    </div>
-                </div>`;
+                // ✅ 如果已有 NovelAI 生成的图片，直接显示
+                if (msg.novelai_generated && msg.novelai_image) {
+                    renderedContent = `<div class="img-card-bubble" style="cursor:default;">
+                        <img src="${msg.novelai_image}" class="chat-image" 
+                             style="width:200px; max-height:300px; object-fit:cover; border-radius:8px; cursor:pointer;" 
+                             onclick="showFullImage(this.src)" />
+                        <div style="font-size:10px; color:#bbb; text-align:center; margin-top:4px; padding:0 4px;">${escapeHtml(cardText)}</div>
+                    </div>`;
+                } else {
+                    renderedContent = `<div class="img-card-bubble" data-text="${escapeHtml(cardText)}" data-expanded="false" onclick="showImageCardContent(this)">
+                        <div class="img-card-placeholder">
+                            <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                <polyline points="21 15 16 10 5 21"></polyline>
+                            </svg>
+                            <div class="img-card-hint">点击查看文字</div>
+                        </div>
+                    </div>`;
+                }
             }
             // 处理图片
             else if (msg.content.startsWith('[img:')) {
@@ -11069,6 +14070,26 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     }
                 }
                 
+                // 处理购物卡片消息
+                if (msgType === 'shopPayRequest') {
+                    try {
+                        const sd = JSON.parse(content);
+                        const amt = parseFloat(sd.amount || 0).toFixed(2);
+                        const itm = sd.items || '购物商品';
+                        let title = '代付请求';
+                        let st = '待确认';
+                        let cv = '';
+                        if (sd.isShare) { title = '购物分享'; st = isSelf ? '已分享' : '来自好友'; cv = 'share'; }
+                        else if (sd.isGift) { title = '购物礼物'; st = isSelf ? '已赠送' : '已收到'; cv = 'gift'; }
+                        else { if (sd.status === 'paid') { st = '已代付'; cv = 'done'; } else if (sd.status === 'declined') { st = '已拒绝'; cv = 'declined'; } }
+                        let meta = '';
+                        if (sd.buyForName && sd.installmentInfo) meta = 'To: ' + sd.buyForName + ' · ' + sd.installmentInfo;
+                        else if (sd.buyForName) meta = 'To: ' + sd.buyForName;
+                        else if (sd.installmentInfo) meta = sd.installmentInfo;
+                        return `<div class="spr-card ${cv}"><div class="spr-top"><div class="spr-badge">${title}</div></div><div class="spr-body"><div class="spr-amount-row"><span class="spr-currency">¥</span><span class="spr-amount-num">${amt}</span></div><div class="spr-items-text">${escapeHtml(itm)}</div>${meta ? '<div class="spr-meta">' + escapeHtml(meta) + '</div>' : ''}</div><div class="spr-divider"></div><div class="spr-bottom"><span class="spr-status-text">${st}</span></div></div>`;
+                    } catch(e) { return content; }
+                }
+                
                 // 处理图片卡片消息 [imgcard:文字内容] - 使用与私聊相同的样式
                 if (content.startsWith('[imgcard:')) {
                     const cardText = content.substring(9, content.length - 1).trim();
@@ -11156,7 +14177,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     const avatarStyle = myAvatar ? `background-image:url(${myAvatar})` : 'background:#ccc';
                     
                     // 判断是否是特殊消息类型（不需要气泡包裹）
-                    const isSpecialMsg = msg.content.startsWith('[imgcard:') || msg.content.startsWith('[img:') || msg.content.startsWith('[voice:') || msg.type === 'redpacket' || msg.type === 'transfer' || msg.content.startsWith('[emei_order]') || msg.content.startsWith('[emei_share]') || msg.content.startsWith('[payment_request]') || msg.content.startsWith('[couple_avatar_card]');
+                    const isSpecialMsg = msg.content.startsWith('[imgcard:') || msg.content.startsWith('[img:') || msg.content.startsWith('[voice:') || msg.type === 'redpacket' || msg.type === 'transfer' || msg.type === 'shopPayRequest' || msg.content.startsWith('[emei_order]') || msg.content.startsWith('[emei_share]') || msg.content.startsWith('[payment_request]') || msg.content.startsWith('[couple_avatar_card]');
                     const renderedContent = renderGroupMessageContent(msg.content, true, msg.type);
                     
                     msgDiv.classList.add('self');
@@ -11201,7 +14222,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     msgDiv.style.gap = '8px';
                     
                     // 判断是否是特殊消息类型（不需要气泡包裹）
-                    const isSpecialMsg = msg.content.startsWith('[imgcard:') || msg.content.startsWith('[img:') || msg.content.startsWith('[voice:') || msg.type === 'redpacket' || msg.type === 'transfer' || msg.content.startsWith('[emei_order]') || msg.content.startsWith('[emei_share]') || msg.content.startsWith('[payment_request]') || msg.content.startsWith('[couple_avatar_card]');
+                    const isSpecialMsg = msg.content.startsWith('[imgcard:') || msg.content.startsWith('[img:') || msg.content.startsWith('[voice:') || msg.type === 'redpacket' || msg.type === 'transfer' || msg.type === 'shopPayRequest' || msg.content.startsWith('[emei_order]') || msg.content.startsWith('[emei_share]') || msg.content.startsWith('[payment_request]') || msg.content.startsWith('[couple_avatar_card]');
                     const renderedContent = renderGroupMessageContent(msg.content, false, msg.type);
                     
                     // 检查是否有引用
@@ -11674,6 +14695,8 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             if (!char) return;
             
             const accountId = getCurrentAccountId();
+            const myChar = accountId ? await db.characters.get(parseInt(accountId)) : null;
+            const myName = myChar?.name || '用户';
             
             // 更新好友状态
             await setFriendStatus(char, accountId, 'friend');
@@ -13603,6 +16626,7 @@ ${chatContext || '（没有聊天记录）'}
         // --- 聊天窗口逻辑 ---
         async function openChatWindow(charId) {
             currentChatCharId = charId;
+            window._currentChatCharId = charId; // 暴露给全局（默契绘画等功能使用）
             window.currentGroupChatId = null; // 清除群聊ID，确保是私聊模式
             const char = await db.characters.get(charId);
             
@@ -13687,6 +16711,63 @@ ${chatContext || '（没有聊天记录）'}
                 }, 800);
             }
         }
+
+        // ====== 暴露全局追加方法，供购物等外部IIFE使用（不刷新页面） ======
+        window._appendShopCardToChat = async function(friendCharId, msgObj) {
+            // 1) 如果当前正在和这个好友聊天，直接追加消息到聊天DOM
+            if (friendCharId && currentChatCharId === friendCharId) {
+                const body = document.getElementById('chat-body');
+                if (body) {
+                    const char = await db.characters.get(friendCharId);
+                    if (char) {
+                        const accountId = getCurrentAccountId();
+                        const history = getChatHistory(char, accountId);
+                        const index = history.length - 1;
+                        const prevMsg = index > 0 ? history[index - 1] : null;
+                        const prevMsgTime = prevMsg ? prevMsg.time : null;
+
+                        const userAvatarUrl = await getUserAvatarUrl(char.linked_user_id);
+                        const charAvatar = getCharAvatar(char, accountId) || char.avatar || '';
+
+                        // 时间戳
+                        const timeOffset = getEffectiveTimeOffset(char);
+                        if (shouldShowTimestamp(msgObj.time, prevMsgTime)) {
+                            const ts = document.createElement('div');
+                            ts.className = 'message-timestamp';
+                            ts.textContent = formatMessageTime(msgObj.time, prevMsgTime, timeOffset);
+                            body.appendChild(ts);
+                        }
+
+                        const row = createMessageElement(msgObj, index, charAvatar, userAvatarUrl, prevMsgTime, char.name || 'AI');
+                        body.appendChild(row);
+                        body.scrollTop = body.scrollHeight;
+                    }
+                }
+            }
+
+            // 2) 更新聊天列表中该好友的最后一条消息（仅修改DOM文本，不重新渲染整个列表）
+            const listItem = document.querySelector(`.wechat-list-item-content[data-char-id="${friendCharId}"]`);
+            if (listItem) {
+                const msgEl = listItem.querySelector('.wc-list-lastmsg');
+                const timeEl = listItem.querySelector('.wc-list-time');
+                if (msgEl) {
+                    let displayText = '[代付请求]';
+                    try {
+                        const pd = JSON.parse(msgObj.content);
+                        if (pd.isShare) displayText = '[购物分享]';
+                        else if (pd.isGift) displayText = '[购物礼物]';
+                    } catch(e) {}
+                    msgEl.textContent = displayText;
+                }
+                if (timeEl) {
+                    const d = new Date(msgObj.time);
+                    const now = new Date();
+                    timeEl.textContent = d.toDateString() === now.toDateString()
+                        ? `${d.getHours()}:${d.getMinutes().toString().padStart(2,'0')}`
+                        : `${d.getMonth()+1}/${d.getDate()}`;
+                }
+            }
+        };
 
         // --- 戳一戳功能 ---
         let currentPokeCharName = '';
@@ -14914,17 +17995,30 @@ window.unmountUser = unmountUser;
                 checkAutoMoments();
             }, 2000);
             
-            // 6. 监听页面可见性变化，从后台切回时立即检查
+            // 6. 监听页面可见性变化，从后台切回时进行补发检查
             document.addEventListener('visibilitychange', function() {
                 if (!document.hidden) {
                     console.log('[AutoChat] ✓ Page became visible, checking for pending messages...');
                     showDebugToast('✓ 返回前台，检查消息...');
                     
-                    // 立即检查是否有该发的消息（可能在后台时错过了）
-                    setTimeout(() => {
+                    // 多轮补发：后台期间可能错过多个间隔，每隔几秒检查一次直到追上
+                    let catchupRound = 0;
+                    const maxCatchupRounds = 3; // 最多补发3轮
+                    const catchupInterval = 5000; // 每轮间隔5秒（留时间让AI生成完成）
+                    
+                    const doCatchupCheck = () => {
+                        catchupRound++;
+                        console.log(`[AutoChat] 补发检查第 ${catchupRound}/${maxCatchupRounds} 轮`);
                         checkAutoChat();
                         checkAutoMoments();
-                    }, 500);
+                        
+                        if (catchupRound < maxCatchupRounds && !document.hidden) {
+                            setTimeout(doCatchupCheck, catchupInterval);
+                        }
+                    };
+                    
+                    // 首次检查延迟500ms
+                    setTimeout(doCatchupCheck, 500);
                     
                     // 如果保活已开启且音频暂停，重新启动
                     const keepaliveEnabled = localStorage.getItem('keepalive_enabled') === 'true';
@@ -15033,13 +18127,116 @@ window.unmountUser = unmountUser;
                     console.warn('[triggerAutoChat] 读取总结记忆失败:', e);
                 }
 
+                // 读取查手机NPC活动记录
+                let fpNpcActivityTextAuto = "";
+                let _fpHasPhoneActivityAuto = false;
+                let _fpNpcLinesForMemoryAuto = []; // ★ 保存活动详情，用于写入长期记忆
+                try {
+                    if (char.chat_history_by_user) {
+                        const fpNpcLinesAuto = [];
+                        for (const key of Object.keys(char.chat_history_by_user)) {
+                            if (!key.startsWith('fp_npc_')) continue;
+                            const npcIdStr = key.replace('fp_npc_', '');
+                            const npcHistory = char.chat_history_by_user[key] || [];
+                            const unnotifiedFpMsgs = npcHistory.filter(m => m.fpSent && !m.fpNotified);
+                            if (unnotifiedFpMsgs.length === 0) continue;
+                            let npcName = 'NPC';
+                            try {
+                                const npcChar = await db.characters.get(parseInt(npcIdStr));
+                                if (npcChar) npcName = npcChar.nick || npcChar.name || 'NPC';
+                            } catch (e) {}
+                            const firstFpTime = unnotifiedFpMsgs[0].time || 0;
+                            for (const m of npcHistory) {
+                                if ((m.time || 0) < firstFpTime) continue;
+                                if (m.fpNotified) continue;
+                                if (m.fpSent && m.role === 'char') {
+                                    let desc = m.content || '';
+                                    if (desc.startsWith('[img:')) desc = '一张图片/表情包';
+                                    else if (desc.startsWith('[imgcard:')) {
+                                        const imgContent = desc.match(/\[imgcard:(.*?)\]/)?.[1] || '一张图片';
+                                        desc = `一张图片卡片（${imgContent}）`;
+                                    }
+                                    else if (desc.startsWith('[voice:')) {
+                                        const voiceContent = desc.match(/\[voice:(.*?)\]/)?.[1] || '';
+                                        desc = `一条语音消息："${voiceContent}"`;
+                                    }
+                                    fpNpcLinesAuto.push(`  → 冒充你给「${npcName}」发了一条消息，内容原文: "${desc}"`);
+                                } else if (!m.fpSent && m.role === 'user') {
+                                    let desc = m.content || '';
+                                    fpNpcLinesAuto.push(`  ← 「${npcName}」回复了，内容原文: "${desc}"`);
+                                }
+                            }
+                        }
+                        // 也检测查手机发布的朋友圈
+                        if (char.fp_moments_by_user) {
+                            for (const mKey of Object.keys(char.fp_moments_by_user)) {
+                                const momentsList = char.fp_moments_by_user[mKey] || [];
+                                for (const m of momentsList) {
+                                    if (m.fpSent && !m.fpNotified) {
+                                        let desc = m.content || '';
+                                        let imgInfo = '';
+                                        if (m.images && m.images.length > 0) imgInfo = `（附带${m.images.length}张图片）`;
+                                        fpNpcLinesAuto.push(`  → 冒充你发了一条朋友圈${imgInfo}，朋友圈内容原文: "${desc}"`);
+                                        if (m.likes && m.likes.length > 0) {
+                                            const likeNames = m.likes.map(l => typeof l === 'string' ? l : (l.name || '')).filter(Boolean).join('、');
+                                            if (likeNames) fpNpcLinesAuto.push(`    ❤ 点赞了这条朋友圈的人: ${likeNames}`);
+                                        }
+                                        if (m.comments && m.comments.length > 0) {
+                                            for (const c of m.comments) {
+                                                const cName = c.name || '好友';
+                                                const cText = c.text || c.content || '';
+                                                if (cText) fpNpcLinesAuto.push(`    💬 ${cName} 评论了: "${cText}"`);
+                                            }
+                                        }
+                                        // ★ 不立即标记fpNotified
+                                    }
+                                }
+                            }
+                        }
+                        if (fpNpcLinesAuto.length > 0) {
+                            _fpNpcLinesForMemoryAuto = [...fpNpcLinesAuto]; // ★ 保存副本用于长期记忆
+                            fpNpcActivityTextAuto = `\n\n---\n\n## 紧急事件：有人动了你的手机\n\n你发现${userName}偷偷拿了你的手机，冒充你做了以下事情：\n\n${fpNpcLinesAuto.join('\n')}\n\n以上都不是你自己做的，是对方用你手机冒充你做的。\n请根据你的人设和性格，自然地对此做出反应。不要忽略这件事。`;
+                            _fpHasPhoneActivityAuto = true;
+                            console.log('[triggerAutoChat] ✅ 检测到查手机活动，共', fpNpcLinesAuto.length, '条记录（待AI回复后标记）');
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[triggerAutoChat] 读取查手机NPC活动失败:', e);
+                }
+
                 // 计算虚拟时间
                 const virtualTimeStr = getFormattedVirtualTime(char);
+
+                // ★ 读取线下模式聊天记录作为背景上下文
+                let offlineContextTextAuto = "";
+                try {
+                    const offlineKeyAuto = `offline_chat_${accountId}_${char.id}`;
+                    const offlineHistoryRawAuto = localStorage.getItem(offlineKeyAuto);
+                    if (offlineHistoryRawAuto) {
+                        const offlineHistoryAuto = JSON.parse(offlineHistoryRawAuto);
+                        if (offlineHistoryAuto && offlineHistoryAuto.length > 0) {
+                            const contextCountAuto = char.context_message_count || 20;
+                            const offlineRecentAuto = offlineHistoryAuto.slice(-contextCountAuto);
+                            const offlineLinesAuto = offlineRecentAuto.map(h => {
+                                const speaker = h.role === 'user' ? (userName || '用户') : char.name;
+                                return `${speaker}: ${h.content || ''}`;
+                            }).join('\n');
+                            offlineContextTextAuto = `\n\n## 线下见面记忆（重要！这是你们真实发生过的经历）
+你们之前有过线下真实见面，以下是见面时的互动内容：
+${offlineLinesAuto}
+
+你必须记住这些线下见面的经历，这些是你们之间真实发生过的事。在微信聊天中你应该自然地知道这些事情。`;
+                            console.log('[triggerAutoChat] ✅ 已加载线下模式历史作为背景上下文，条数:', offlineRecentAuto.length);
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[triggerAutoChat] 读取线下模式历史失败:', e);
+                }
 
                 // 2. 构建 Prompt
                 let systemPrompt = `你正在进行角色扮演。
 【当前时间】
-${virtualTimeStr}
+${virtualTimeStr}${fpNpcActivityTextAuto}
 
 【角色(你)信息】
 名字：${char.name}
@@ -15053,6 +18250,7 @@ ${userDesc}
 ${avatarChangeNotice}
 ${loreContext}
 ${summaryMemoryContext}
+${offlineContextTextAuto}
 
 现在距离上次对话已经过去了一段时间。请根据角色性格，主动向 ${userName} 发起新的话题，或者延续之前未尽的话题。
 ${char.relationships && char.relationships.length > 0 ? `
@@ -15066,6 +18264,7 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 - **戳一戳**：((POKE: 动作, 部位)) — 调皮互动、撒娇、引起注意（例如 ((POKE: 戳了戳, 脸蛋))、((POKE: 拍了拍, 肩膀))、((POKE: 揉了揉, 头发))）
 - **打开APP**：((OPEN_APP: APP名称)) — 展示你有自己的生活！（例如 ((OPEN_APP: 王者荣耀))、((OPEN_APP: 抖音))、((OPEN_APP: 网易云音乐))、((OPEN_APP: B站))。聊到要忙、玩游戏、刷视频时都可以用）
 - **转账**：((TRANSFER: 金额, 备注)) — 请客、发红包、节日祝福转账等
+- **购物送礼**：((SHOP_GIFT: 金额, 商品名)) — 给对方买礼物！（例如 ((SHOP_GIFT: 299, 限定款包包))、((SHOP_GIFT: 99, 生日蛋糕))。节日、生日、哄人开心、表达心意时使用）
 - **改网名**：((SET_NICKNAME: 新网名)) — 想换个网名时使用（例如心情变了、节日、和对方有关的昵称等）
 - **改个性签名**：((SET_SIGNATURE: 新签名)) — 更新个性签名（例如记录心情、有感而发、暗示对方等）
 - **删除好友**：((DELETE_USER)) — 你决定删除对方。只在极度失望、想断联时使用（非常严重的操作，需符合人设）
@@ -15189,13 +18388,26 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                 
                 systemPrompt += contextBlock;
 
+                // 🔥 关键修复：在所有追加内容之后，再次强调 JSON 格式和心声要求
+                systemPrompt += `
+
+---
+
+⚠️ 最终提醒：你必须以 JSON 格式返回，包含 reply 和 thought 两个字段：
+{
+  "reply": "消息1|||消息2|||消息3",
+  "thought": "你此刻内心真实的想法和情绪（必填！至少10字）"
+}
+- reply 必须发送 ${char.reply_min_count || 1}-${char.reply_max_count || 3} 条消息，用|||分隔${(char.reply_min_count || 1) > 1 ? `，最少${char.reply_min_count}条！` : ''}
+- 禁止输出纯文本，必须输出上述 JSON 格式。thought 不能省略！`;
+
                 const messages = [
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: `[触发条件：对方长时间未回复] 请以${char.name}的身份主动发送消息。` }
                 ];
 
-                // 3. 调用 AI
-                const aiResponse = await callAI(messages);
+                // 3. 调用 AI（启用 JSON 模式以确保返回心声）
+                const aiResponse = await callAI(messages, { json_mode: true });
                 
                 let cleanReply = "";
                 let thought = "";
@@ -15248,6 +18460,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                             .replace(/\[?SHURA_SEND:[^\]]*\]?/gi, '')
                             .replace(/\[?SHURA_DELETE:[^\]]*\]?/gi, '')
                             .replace(/\[?SHURA_BLACKLIST:[^\]]*\]?/gi, '')
+                            .replace(/\[?SHURA_MOMENTS:[^\]]*\]?/gi, '')
                             .replace(/\[?CHECK_ACCOUNT(?::.*?)?\]?/gi, '')
                             .replace(/\(\(CHANGE_AVATAR\)\)/gi, '')
                             .replace(/\(\(COUPLE_AVATAR\)\)/gi, '')
@@ -15382,6 +18595,8 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                     
                     // 提取转账前面的文字内容（如果有）- 现在 index 位置正确了
                     const textBeforeTransfer = cleanMessage(cleanReplyProcessed.substring(0, transferMatch.index).trim());
+                    // 🔥 修复：提取转账后面的文字内容（之前直接return导致后续消息丢失）
+                    const textAfterTransfer = cleanReplyProcessed.substring(transferMatch.index + transferMatch[0].length).trim();
                     
                     const freshChar = await db.characters.get(char.id);
                     if (freshChar) {
@@ -15466,7 +18681,19 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                             }
                         }
                     }
-                    return; // 转账处理完成，不再执行后续逻辑
+                    
+                    // 🔥 修复：如果转账后还有内容，继续处理（之前直接return导致后续消息丢失！）
+                    if (textAfterTransfer) {
+                        console.log('[AutoChat] 转账后还有内容，继续处理:', textAfterTransfer.substring(0, 50));
+                        cleanReplyProcessed = textAfterTransfer;
+                        // 清理开头的分隔符
+                        while (cleanReplyProcessed.startsWith('|||')) {
+                            cleanReplyProcessed = cleanReplyProcessed.substring(3).trim();
+                        }
+                        // 不return，继续执行后续的普通消息处理逻辑
+                    } else {
+                        return; // 转账处理完成且没有后续内容
+                    }
                 }
                 
                 // 🎯 检测撤回指令 ((RECALL)) - AI角色可以撤回自己最后一条消息
@@ -15542,6 +18769,8 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                     
                     // 提取亲属卡指令前面的文字内容（如果有）
                     const textBeforeFamilyCard = cleanMessage(cleanReplyProcessed.substring(0, familyCardMatch.index).trim());
+                    // 🔥 修复：提取亲属卡后面的文字内容（之前直接return导致后续消息丢失）
+                    const textAfterFamilyCard = cleanReplyProcessed.substring(familyCardMatch.index + familyCardMatch[0].length).trim();
                     
                     const freshChar = await db.characters.get(char.id);
                     if (freshChar) {
@@ -15686,9 +18915,109 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                             sendSystemNotification(freshChar.name, '[亲属卡]');
                         }
                     }
-                    return;
+                    
+                    // 🔥 修复：如果亲属卡后还有内容，继续处理（之前直接return导致后续消息丢失！）
+                    if (textAfterFamilyCard) {
+                        console.log('[AutoChat] 亲属卡后还有内容，继续处理:', textAfterFamilyCard.substring(0, 50));
+                        cleanReplyProcessed = textAfterFamilyCard;
+                        // 清理开头的分隔符
+                        while (cleanReplyProcessed.startsWith('|||')) {
+                            cleanReplyProcessed = cleanReplyProcessed.substring(3).trim();
+                        }
+                        // 不return，继续执行后续的普通消息处理逻辑
+                    } else {
+                        return; // 亲属卡处理完成且没有后续内容
+                    }
                 }
                 
+                // 🎯 检测购物送礼指令 ((SHOP_GIFT: 金额, 商品名))
+                const shopGiftMatch = cleanReplyProcessed.match(/\(\(SHOP_GIFT:\s*(\d+(?:\.\d+)?)(?:,\s*(.+?))?\)\)/i);
+                if (shopGiftMatch) {
+                    const giftAmount = parseFloat(shopGiftMatch[1]);
+                    let giftProduct = shopGiftMatch[2] || '购物礼物';
+                    if (giftProduct.length > 30) giftProduct = giftProduct.substring(0, 30);
+
+                    const textBefore = cleanMessage(cleanReplyProcessed.substring(0, shopGiftMatch.index).trim());
+                    const textAfter = cleanReplyProcessed.substring(shopGiftMatch.index + shopGiftMatch[0].length).trim();
+
+                    const freshChar = await db.characters.get(char.id);
+                    if (freshChar) {
+                        let history = getChatHistory(freshChar, accountId);
+
+                        // 1. 先发送前置文字（如果有）
+                        if (textBefore) {
+                            let segs = [];
+                            const txt = textBefore.replace(/[,，]/g, ' ');
+                            if (txt.includes('|||')) {
+                                segs = txt.split('|||').map(s => cleanMessage(s.trim())).filter(s => s.length > 0);
+                            } else {
+                                segs = splitMessage(txt);
+                            }
+                            segs = segs.filter(s => s.replace(/[.,，。!?！？~…|\s]/g, '').length >= 2);
+                            if (segs.length === 0 && textBefore.replace(/[.,，。!?！？~…|\s]/g, '').length > 0) segs = [textBefore];
+
+                            for (let i = 0; i < segs.length; i++) {
+                                history.push(buildCharMessage(segs[i], !!char.foreign_lang_mode, { time: Date.now() + i }));
+                                await setChatHistory(freshChar, accountId, history);
+                                if (currentChatCharId === freshChar.id) {
+                                    await appendMessageToUI('char', segs[i], freshChar.avatar);
+                                }
+                                if (i < segs.length - 1) await new Promise(r => setTimeout(r, 300));
+                            }
+                            await new Promise(r => setTimeout(r, 500));
+                        }
+
+                        // 2. 发送购物礼物卡片
+                        const cardData = {
+                            amount: giftAmount.toFixed(2),
+                            items: giftProduct,
+                            buyForName: '',
+                            installmentInfo: '',
+                            isGift: true,
+                            status: 'paid'
+                        };
+
+                        const giftMsg = {
+                            role: 'char',
+                            type: 'shopPayRequest',
+                            content: JSON.stringify(cardData),
+                            time: Date.now()
+                        };
+
+                        history.push(giftMsg);
+                        await setChatHistory(freshChar, accountId, history);
+
+                        console.log(`[AutoChat] 角色发送购物礼物: ${freshChar.name}`, { giftAmount, giftProduct });
+                        addLog('success', `角色送礼: ${freshChar.name}`, { amount: giftAmount, product: giftProduct });
+
+                        // 追加卡片到聊天（不刷新）
+                        if (currentChatCharId === freshChar.id) {
+                            if (window._appendShopCardToChat) {
+                                await window._appendShopCardToChat(freshChar.id, giftMsg);
+                            }
+                        }
+
+                        sendSystemNotification(freshChar.name, '[购物礼物]');
+
+                        if (currentChatCharId !== freshChar.id) {
+                            const wechatPage = document.getElementById('wechat-page');
+                            if (wechatPage.style.display !== 'none' &&
+                                document.querySelector('.wechat-tab-item.active .tab-name')?.innerText === '微信') {
+                                renderWechatList(document.getElementById('wechat-content'));
+                            }
+                        }
+                    }
+
+                    if (textAfter) {
+                        cleanReplyProcessed = textAfter;
+                        while (cleanReplyProcessed.startsWith('|||')) {
+                            cleanReplyProcessed = cleanReplyProcessed.substring(3).trim();
+                        }
+                    } else {
+                        return;
+                    }
+                }
+
                 // 🎯 3. 检测朋友圈发布指令 [MOMENTS] - 支持多种格式
                 // 格式1: [MOMENTS] content: xxx images: N
                 let momentsMatch = cleanReplyProcessed.match(/\[MOMENTS\]\s*content:\s*([^\n]+)(?:\s*images?:\s*(\d+))?/i);
@@ -15740,6 +19069,8 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                     let textBeforeMoments = cleanMessage(cleanReplyProcessed.substring(0, momentsMatch.index).trim());
                     // 清理掉 [imgcard:] 部分，不要作为聊天消息发送
                     textBeforeMoments = textBeforeMoments.replace(/\[imgcard:[^\]]+\]/gi, '').trim();
+                    // 🔥 修复：提取朋友圈后面的文字内容（之前直接return导致后续消息丢失）
+                    let textAfterMoments = afterMoments.replace(/\[imgcard:[^\]]+\]/gi, '').trim();
                     
                     const freshChar = await db.characters.get(char.id);
                     if (freshChar) {
@@ -15791,7 +19122,19 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                             }
                         }
                     }
-                    return; // 朋友圈处理完成，不再执行后续逻辑
+                    
+                    // 🔥 修复：如果朋友圈后还有内容，继续处理（之前直接return导致后续消息丢失！）
+                    if (textAfterMoments) {
+                        console.log('[AutoChat] 朋友圈后还有内容，继续处理:', textAfterMoments.substring(0, 50));
+                        cleanReplyProcessed = textAfterMoments;
+                        // 清理开头的分隔符
+                        while (cleanReplyProcessed.startsWith('|||')) {
+                            cleanReplyProcessed = cleanReplyProcessed.substring(3).trim();
+                        }
+                        // 不return，继续执行后续的普通消息处理逻辑
+                    } else {
+                        return; // 朋友圈处理完成且没有后续内容
+                    }
                 }
                 
                 // 🎯 检测"幻觉"：AI说发了朋友圈但没有指令
@@ -15801,6 +19144,13 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                     console.warn(`[AutoChat] 正确格式示例：[MOMENTS] content: 内容 images: 1`);
                     // 给用户一个提示
                     showToast(`${char.name}说发了朋友圈，但格式不对，未实际发布`);
+                }
+                
+                // 🎯 检测"幻觉"：AI说发了红包/转账但没有指令
+                const hasTransferClaim = /发.*?红包|红包.*?发|给你.*?转|转.*?给你|发个红包|发了.*?红包|红包.*?收|收.*?红包/i.test(cleanReplyProcessed);
+                if (hasTransferClaim) {
+                    console.warn(`[AutoChat] ⚠️ AI幻觉检测：${char.name} 说发了红包/转账，但没有返回正确的 ((TRANSFER: 金额, 备注)) 格式！`);
+                    showToast(`${char.name}说发了红包，但格式不对，未实际发送`);
                 }
                 
                 // 兜底：检测是否是转账 JSON（兼容旧格式）
@@ -16327,14 +19677,89 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                     }
                 }
 
-                // 🔧 成功发送后更新冷却时间
-                lastAutoChatActionTime.set(char.id, Date.now());
+                // ★ AI回复成功后，标记查手机活动为已通知
+                if (_fpHasPhoneActivityAuto) {
+                    try {
+                        const freshCharForFp = await db.characters.get(char.id);
+                        if (freshCharForFp) {
+                            let markedCount = 0;
+                            if (freshCharForFp.chat_history_by_user) {
+                                for (const key of Object.keys(freshCharForFp.chat_history_by_user)) {
+                                    if (!key.startsWith('fp_npc_')) continue;
+                                    const npcHistory = freshCharForFp.chat_history_by_user[key] || [];
+                                    for (const m of npcHistory) {
+                                        if ((m.fpSent || (!m.fpSent && m.role === 'user')) && !m.fpNotified) {
+                                            m.fpNotified = true;
+                                            markedCount++;
+                                        }
+                                    }
+                                }
+                            }
+                            if (freshCharForFp.fp_moments_by_user) {
+                                for (const mKey of Object.keys(freshCharForFp.fp_moments_by_user)) {
+                                    const momentsList = freshCharForFp.fp_moments_by_user[mKey] || [];
+                                    for (const m of momentsList) {
+                                        if (m.fpSent && !m.fpNotified) {
+                                            m.fpNotified = true;
+                                            markedCount++;
+                                        }
+                                    }
+                                }
+                            }
+                            await db.characters.put(freshCharForFp);
+                            console.log('[triggerAutoChat] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
+                        }
+                        
+                        // ★ 将查手机事件写入长期记忆，确保角色永久记住此事
+                        try {
+                            const fpMemoryContent = `${userName}偷偷拿了${char.name}的手机，做了以下事情：${_fpNpcLinesForMemoryAuto.map(l => l.trim().replace(/^[→←]\s*/, '')).join('；')}。${char.name}已经发现并做出了反应。`;
+                            await db.chat_summaries.add({
+                                accountId: accountId,
+                                chatType: 'private',
+                                chatId: String(char.id),
+                                time: Date.now(),
+                                content: fpMemoryContent,
+                                messageCount: 0,
+                                timeRange: '',
+                                keywords: ['查手机', '冒充', '手机被动'],
+                                startTime: Date.now(),
+                                endTime: Date.now()
+                            });
+                            console.log('[triggerAutoChat] ✅ 查手机事件已写入长期记忆');
+                        } catch (memErr) {
+                            console.warn('[triggerAutoChat] 写入查手机长期记忆失败:', memErr);
+                        }
+                    } catch (fpErr) {
+                        console.warn('[triggerAutoChat] 标记fpNotified失败:', fpErr);
+                    }
+                }
+
+                // ✅ 主动聊天完成后，检测 imgcard 并调用 NovelAI 自动生图
+                try {
+                    await processImgCardsWithNovelAI(char.id, accountId);
+                } catch (naiError) {
+                    console.error('[NovelAI-AutoGen] 主动聊天 imgcard 处理失败:', naiError);
+                }
+
+                // 🔧 成功发送后更新冷却时间（推进一个间隔，而非直接跳到当前时间）
+                // 这样如果后台期间错过了多个间隔，返回前台后能逐次补发
+                {
+                    const prevTs = lastAutoChatActionTime.get(char.id) || Date.now();
+                    const intervalMs = (char.auto_reply_interval || 5) * 60 * 1000;
+                    const nextTs = prevTs + intervalMs;
+                    const maxCatchupCount = 3; // 最多补发3条（含当前这条）
+                    const earliestAllowed = Date.now() - (maxCatchupCount - 1) * intervalMs;
+                    // 推进一个间隔，但不早于最大补发限制，也不晚于当前时间
+                    const newTs = Math.min(Math.max(nextTs, earliestAllowed), Date.now());
+                    lastAutoChatActionTime.set(char.id, newTs);
+                    console.log(`[AutoChat] 冷却时间推进: ${char.name}, 还需补发: ${Math.max(0, Math.floor((Date.now() - newTs) / intervalMs))} 条`);
+                }
 
             } catch (err) {
                 console.error(`[AutoChat] Failed for ${char.name}:`, err);
                 // 发送错误通知，让用户知道为什么没触发
                 sendSystemNotification("系统提示", `主动聊天触发失败(${char.name}): ${err.message}`);
-                // 🔧 失败也更新冷却时间，避免连续重试
+                // 🔧 失败时直接跳到当前时间，避免连续重试
                 lastAutoChatActionTime.set(char.id, Date.now());
             } finally {
                 // 解锁
@@ -16631,6 +20056,12 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
             const suggestionBar = document.getElementById('sticker-suggestion-bar');
             if (suggestionBar) suggestionBar.style.display = 'none';
             
+            // ★ 查手机fp模式：以角色身份发送消息
+            if (window._fpChatMode) {
+                await sendFpChatMessage();
+                return;
+            }
+            
             // 检查是否是修罗场模式（查岗模式下的发送）
             if (isViewingRoleAccount && currentViewingRoleAccountId) {
                 await sendShuraMessage();
@@ -16732,7 +20163,9 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
             let history = getChatHistory(char, accountId);
 
             // 2. 追加并显示用户消息（支持引用）
-            const userMsg = { role: 'user', content: text, time: Date.now() };
+            // 🔧 使用虚拟时间，确保与快进生成的消息时间戳一致
+            const virtualTime = Date.now() + getEffectiveTimeOffset(char);
+            const userMsg = { role: 'user', content: text, time: virtualTime };
             
             // 如果有引用
             if (currentQuote) {
@@ -16962,6 +20395,15 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
                         content = '（分享了外卖订单）';
                     } else if (content.startsWith('[payment_request]')) {
                         content = '（发送了代付请求）';
+                    }
+                    // 购物卡片消息
+                    if (m.type === 'shopPayRequest') {
+                        try {
+                            const _sd = JSON.parse(content);
+                            if (_sd.isGift) content = '（发送了购物礼物）';
+                            else if (_sd.isShare) content = '（分享了购物订单）';
+                            else content = '（发送了代付请求）';
+                        } catch(e) { content = '（发送了购物卡片）'; }
                     }
                     
                     if (m.role === 'user') return `${myNickname}: ${content}`;
@@ -17555,6 +20997,33 @@ ${groupContextStr}
         }
 
         function hideChatWindow() {
+            // ★ fp聊天模式：返回查手机微信页面
+            if (window._fpChatMode) {
+                window._fpChatMode = false;
+                const win = document.getElementById('chat-window');
+                win.style.transform = 'translateX(100%)';
+                setTimeout(() => {
+                    win.style.display = 'none';
+                    win.style.transform = '';
+                    win.style.zIndex = ''; // 还原z-index
+                }, 300);
+                currentChatCharId = null;
+                window.currentGroupChatId = null;
+                // 清除 fp 缓存
+                window._fpRoleCharId = null;
+                window._fpContactCharId = null;
+                window._fpAccountId = null;
+                window._fpRoleAvatar = null;
+                window._fpContactAvatar = null;
+                window._fpContactName = null;
+                // 重置渲染缓存，防止下次打开正常聊天时跳过渲染
+                lastRenderedCharId = null;
+                lastRenderedAccountId = null;
+                lastRenderedHistoryLength = -1;
+                if (isSelectionMode) exitSelectionMode();
+                return; // 不执行下面正常关闭逻辑
+            }
+            
             // 关闭聊天前，先让微信列表重新可见（避免滑动时看到空白）
             const wechatEl = document.getElementById('wechat-page');
             if (wechatEl) wechatEl.style.visibility = '';
@@ -18030,6 +21499,67 @@ ${groupContextStr}
                     </div>
                 `;
             }
+            // 处理代付请求卡片（购物）
+            else if (msg.type === 'shopPayRequest') {
+                content.style.padding = '0';
+                content.style.background = 'transparent';
+                content.style.boxShadow = 'none';
+                
+                let reqData = {};
+                try { reqData = JSON.parse(msg.content); } catch(e) { reqData = {}; }
+                const isSelf = msg.role === 'user';
+                const amount = parseFloat(reqData.amount || 0).toFixed(2);
+                const items = reqData.items || '购物商品';
+                const buyFor = reqData.buyForName || '';
+                const installmentInfo = reqData.installmentInfo || '';
+                const payStatus = reqData.status || 'pending';
+                const isGift = reqData.isGift || false;
+                const isShare = reqData.isShare || false;
+                
+                let cardTitle = '代付请求';
+                let statusText = '待确认';
+                let cardVariant = '';
+                
+                if (isShare) {
+                    cardTitle = '购物分享';
+                    statusText = isSelf ? '已分享' : '来自好友';
+                    cardVariant = 'share';
+                } else if (isGift) {
+                    cardTitle = '购物礼物';
+                    statusText = isSelf ? '已赠送' : '已收到';
+                    cardVariant = 'gift';
+                } else {
+                    if (payStatus === 'paid') { statusText = '已代付'; cardVariant = 'done'; }
+                    else if (payStatus === 'declined') { statusText = '已拒绝'; cardVariant = 'declined'; }
+                    else if (isSelf) { statusText = '待代付'; }
+                }
+
+                // 组合副信息
+                let metaParts = [];
+                if (buyFor) metaParts.push('To: ' + buyFor);
+                if (installmentInfo) metaParts.push(installmentInfo);
+                const metaText = metaParts.join(' · ');
+                
+                content.innerHTML = `
+                    <div class="spr-card ${cardVariant}">
+                        <div class="spr-top">
+                            <div class="spr-badge">${cardTitle}</div>
+                        </div>
+                        <div class="spr-body">
+                            <div class="spr-amount-row">
+                                <span class="spr-currency">¥</span>
+                                <span class="spr-amount-num">${amount}</span>
+                            </div>
+                            <div class="spr-items-text">${items}</div>
+                            ${metaText ? '<div class="spr-meta">' + metaText + '</div>' : ''}
+                        </div>
+                        <div class="spr-divider"></div>
+                        <div class="spr-bottom">
+                            <span class="spr-status-text">${statusText}</span>
+                        </div>
+                    </div>
+                `;
+            }
             // 处理位置消息
             else if (msg.type === 'location') {
                 content.style.padding = '0';
@@ -18148,42 +21678,53 @@ ${groupContextStr}
                 content.dataset.text = cardText; // 存储文字内容
                 content.dataset.expanded = 'false'; // 初始状态：未展开
                 
-                // 默认显示卡片状态
-                content.innerHTML = `
-                    <div class="img-card-placeholder">
-                        <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                            <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                            <polyline points="21 15 16 10 5 21"></polyline>
-                        </svg>
-                        <div class="img-card-hint">点击查看文字</div>
-                    </div>
-                `;
-                
-                // 点击切换展开/收起
-                content.onclick = (e) => {
-                    e.stopPropagation();
-                    const isExpanded = content.dataset.expanded === 'true';
+                // ✅ 如果已有 NovelAI 生成的图片，直接显示图片
+                if (msg.novelai_generated && msg.novelai_image) {
+                    content.innerHTML = `
+                        <img src="${msg.novelai_image}" class="chat-image" 
+                             style="width:200px; max-height:300px; object-fit:cover; border-radius:8px; cursor:pointer;" 
+                             onclick="showFullImage(this.src)" />
+                        <div style="font-size:10px; color:#bbb; text-align:center; margin-top:4px; padding:0 4px;">${escapeHtml(cardText)}</div>
+                    `;
+                    content.style.cursor = 'default';
+                } else {
+                    // 默认显示卡片状态
+                    content.innerHTML = `
+                        <div class="img-card-placeholder">
+                            <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                <polyline points="21 15 16 10 5 21"></polyline>
+                            </svg>
+                            <div class="img-card-hint">点击查看文字</div>
+                        </div>
+                    `;
                     
-                    if (isExpanded) {
-                        // 收起：显示卡片
-                        content.innerHTML = `
-                            <div class="img-card-placeholder">
-                                <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                                    <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                                    <polyline points="21 15 16 10 5 21"></polyline>
-                                </svg>
-                                <div class="img-card-hint">点击查看文字</div>
-                            </div>
-                        `;
-                        content.dataset.expanded = 'false';
-                    } else {
-                        // 展开：显示文字
-                        content.innerHTML = `<div class="img-card-text">${cardText}</div>`;
-                        content.dataset.expanded = 'true';
-                    }
-                };
+                    // 点击切换展开/收起
+                    content.onclick = (e) => {
+                        e.stopPropagation();
+                        const isExpanded = content.dataset.expanded === 'true';
+                        
+                        if (isExpanded) {
+                            // 收起：显示卡片
+                            content.innerHTML = `
+                                <div class="img-card-placeholder">
+                                    <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                        <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                        <polyline points="21 15 16 10 5 21"></polyline>
+                                    </svg>
+                                    <div class="img-card-hint">点击查看文字</div>
+                                </div>
+                            `;
+                            content.dataset.expanded = 'false';
+                        } else {
+                            // 展开：显示文字
+                            content.innerHTML = `<div class="img-card-text">${cardText}</div>`;
+                            content.dataset.expanded = 'true';
+                        }
+                    };
+                }
             }
             // 🔧 处理外卖卡片消息 & 情头邀请卡片
             else if (msg.content.startsWith('[emei_order]') || msg.content.startsWith('[emei_share]') || msg.content.startsWith('[payment_request]') || msg.content.startsWith('[couple_avatar_card]')) {
@@ -18306,7 +21847,8 @@ ${groupContextStr}
 
         async function renderChatBody(char, forceRender = false) {
             const body = document.getElementById('chat-body');
-            const accountId = getCurrentAccountId();
+            // ★ fp模式使用 fp 账号ID，而非当前登录账号
+            const accountId = window._fpChatMode ? window._fpAccountId : getCurrentAccountId();
             const history = getChatHistory(char, accountId);
             // 按账号隔离的显示属性
             const _dAvatar = getCharAvatar(char, accountId);
@@ -18339,8 +21881,8 @@ ${groupContextStr}
                 body.classList.remove('selection-mode');
             }
             
-            // ✅ 联机好友自动视为好友状态
-            if (char.isOnlineFriend === true && accountId) {
+            // ✅ 联机好友自动视为好友状态（fp模式跳过好友检查）
+            if (!window._fpChatMode && char.isOnlineFriend === true && accountId) {
                 const currentStatus = getFriendStatus(char, accountId);
                 if (currentStatus !== 'friend') {
                     // 自动修正好友状态
@@ -18351,8 +21893,8 @@ ${groupContextStr}
                 }
             }
             
-            // 检查好友状态
-            const friendStatus = getFriendStatus(char, accountId);
+            // 检查好友状态（fp模式跳过）
+            const friendStatus = window._fpChatMode ? 'friend' : getFriendStatus(char, accountId);
             if (friendStatus === 'blocked') {
                 // 被拉黑状态，显示面板（与删除类似，但提示和功能不同）
                 body.innerHTML = `
@@ -18483,7 +22025,18 @@ ${groupContextStr}
                 body.classList.add('bubble-style-default');
             }
 
-            const userAvatarUrl = await getUserAvatarUrl(char.linked_user_id);
+            // ★ fp模式下：角色头像作为右侧(self/user)，联系人头像作为左侧(other/char)
+            let renderCharAvatar, renderUserAvatar, renderCharName;
+            if (window._fpChatMode) {
+                renderCharAvatar = window._fpContactAvatar || '';  // 左侧=联系人
+                renderUserAvatar = window._fpRoleAvatar || '';     // 右侧=角色自己
+                renderCharName = window._fpContactName || 'AI';
+            } else {
+                renderCharAvatar = _dAvatar;
+                renderUserAvatar = await getUserAvatarUrl(char.linked_user_id);
+                renderCharName = _dName;
+            }
+            const userAvatarUrl = renderUserAvatar;
             const timeOffset = getEffectiveTimeOffset(char); // 获取虚拟时间偏移
 
             // 🚀 优化：只渲染最近的50条消息
@@ -18506,15 +22059,21 @@ ${groupContextStr}
                 const absoluteIndex = startIndex + relativeIndex;
                 const prevMsgTime = absoluteIndex > 0 ? history[absoluteIndex - 1].time : null;
                 
+                // ★ fp模式：翻转消息角色（char→user显示在右侧，user→char显示在左侧）
+                let renderMsg = msg;
+                if (window._fpChatMode && msg.role !== 'system') {
+                    renderMsg = { ...msg, role: msg.role === 'char' ? 'user' : msg.role === 'user' ? 'char' : msg.role };
+                }
+                
                 // 如果需要显示时间戳，先添加时间戳行（系统消息不显示时间戳）
-                if (msg.role !== 'system' && shouldShowTimestamp(msg.time, prevMsgTime)) {
+                if (renderMsg.role !== 'system' && shouldShowTimestamp(renderMsg.time, prevMsgTime)) {
                     const timeStamp = document.createElement('div');
                     timeStamp.className = 'message-timestamp';
-                    timeStamp.textContent = formatMessageTime(msg.time, prevMsgTime, timeOffset);
+                    timeStamp.textContent = formatMessageTime(renderMsg.time, prevMsgTime, timeOffset);
                     body.appendChild(timeStamp);
                 }
                 
-                const row = createMessageElement(msg, absoluteIndex, _dAvatar, userAvatarUrl, prevMsgTime, _dName);
+                const row = createMessageElement(renderMsg, absoluteIndex, renderCharAvatar, renderUserAvatar, prevMsgTime, renderCharName);
                 
                 // 如果在多选模式，恢复选中状态（包括系统消息）
                 if (isSelectionMode) {
@@ -18727,23 +22286,40 @@ ${groupContextStr}
             const accountId = getCurrentAccountId();
             const history = getChatHistory(char, accountId);
             
-            // 🔧 修复：从后往前找到匹配 role 的最新消息，而不是简单取最后一条
-            // 因为最后一条可能是 system 消息（如时间戳）
+            // 🔧 修复：优先匹配 role + content 都一致的消息，避免匹配到伪造消息
             let msg = null;
             let index = history.length - 1;
+            
+            // 第一轮：精确匹配 role + content
+            const cleanedContent = sanitizeMessage(content);
             for (let i = history.length - 1; i >= 0; i--) {
-                if (history[i].role === role) {
+                if (history[i].role === role && history[i].content === cleanedContent) {
                     msg = history[i];
                     index = i;
                     break;
                 }
             }
             
+            // 第二轮：如果精确匹配失败，只匹配 role（兼容旧逻辑）
+            if (!msg) {
+                for (let i = history.length - 1; i >= 0; i--) {
+                    if (history[i].role === role) {
+                        msg = history[i];
+                        index = i;
+                        break;
+                    }
+                }
+            }
+            
             // 如果数据库中没有找到匹配的消息，使用临时对象
             if (!msg) {
-                const cleanedContent = sanitizeMessage(content);
                 msg = { role, content: cleanedContent, time: Date.now() };
                 index = history.length;
+            }
+            
+            // 🔥 确保显示的内容是传入的 content，而不是历史记录中可能不同的内容
+            if (content && msg.content !== cleanedContent) {
+                msg = { ...msg, content: cleanedContent };
             }
             
             const userAvatarUrl = await getUserAvatarUrl(char.linked_user_id);
@@ -19673,6 +23249,22 @@ ${groupContextStr}
             // 发送图片消息
             const msgContent = `[img:${base64}]`;
             
+            // ★ fp模式：以角色身份发送表情包
+            if (window._fpChatMode) {
+                if (!window._fpRoleCharId || !window._fpAccountId) return;
+                const roleChar = await db.characters.get(window._fpRoleCharId);
+                if (!roleChar) return;
+                const fpAccountId = window._fpAccountId;
+                let history = getChatHistory(roleChar, fpAccountId);
+                history.push({ role: 'char', content: msgContent, time: Date.now(), fpSent: true });
+                try {
+                    await setChatHistory(roleChar, fpAccountId, history);
+                } catch(e) { console.error('[FP] 表情包保存失败:', e); }
+                await renderChatBody(roleChar, true);
+                closeChatPanel();
+                return;
+            }
+            
             // 支持群聊模式
             if (window.currentGroupChatId) {
                 const group = await db.group_chats.get(window.currentGroupChatId);
@@ -19840,6 +23432,19 @@ ${groupContextStr}
             // 发送图片卡片消息（格式：[imgcard:文字内容]）
             const msgContent = `[imgcard:${text}]`;
             
+            // ★ fp模式：以角色身份发送
+            if (window._fpChatMode) {
+                if (!window._fpRoleCharId) return;
+                const roleChar = await db.characters.get(window._fpRoleCharId);
+                if (!roleChar) return;
+                const fpAccountId = window._fpAccountId;
+                let history = getChatHistory(roleChar, fpAccountId);
+                history.push({ role: 'char', content: msgContent, time: Date.now(), fpSent: true });
+                await setChatHistory(roleChar, fpAccountId, history);
+                await renderChatBody(roleChar, true);
+                return;
+            }
+            
             // 支持群聊模式
             if (window.currentGroupChatId) {
                 const group = await db.group_chats.get(window.currentGroupChatId);
@@ -19879,6 +23484,26 @@ ${groupContextStr}
         async function sendImageMessage(input) {
             const file = input.files[0];
             if (!file) return;
+            
+            // ★ fp模式：以角色身份发送图片
+            if (window._fpChatMode) {
+                if (!window._fpRoleCharId) return;
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    const base64 = await convertImageForAI(e.target.result);
+                    const msgContent = `[img:${base64}]`;
+                    const roleChar = await db.characters.get(window._fpRoleCharId);
+                    if (!roleChar) return;
+                    const fpAccountId = window._fpAccountId;
+                    let history = getChatHistory(roleChar, fpAccountId);
+                    history.push({ role: 'char', content: msgContent, time: Date.now(), fpSent: true });
+                    await setChatHistory(roleChar, fpAccountId, history);
+                    await renderChatBody(roleChar, true);
+                };
+                reader.readAsDataURL(file);
+                input.value = '';
+                return;
+            }
             
             // 支持群聊模式
             if (window.currentGroupChatId) {
@@ -20505,6 +24130,19 @@ ${groupContextStr}
             // 发送语音气泡消息（格式：[voice:文字内容]）
             const msgContent = `[voice:${text}]`;
             
+            // ★ fp模式：以角色身份发送语音
+            if (window._fpChatMode) {
+                if (!window._fpRoleCharId) return;
+                const roleChar = await db.characters.get(window._fpRoleCharId);
+                if (!roleChar) return;
+                const fpAccountId = window._fpAccountId;
+                let history = getChatHistory(roleChar, fpAccountId);
+                history.push({ role: 'char', content: msgContent, time: Date.now(), fpSent: true });
+                await setChatHistory(roleChar, fpAccountId, history);
+                await renderChatBody(roleChar, true);
+                return;
+            }
+            
             // 支持群聊模式
             if (window.currentGroupChatId) {
                 const group = await db.group_chats.get(window.currentGroupChatId);
@@ -20572,7 +24210,7 @@ ${groupContextStr}
                     document.getElementById('emoji-tab-bar').style.display = 'none';
                     document.getElementById('emoji-panel').style.display = 'none';
                     document.getElementById('sticker-panel').style.display = 'none';
-                    actionPanel.style.display = 'grid';
+                    actionPanel.style.display = 'flex';
                 }
                 
                 // 滚动到底部，确保能看到面板
@@ -20756,8 +24394,15 @@ ${groupContextStr}
                     console.log(`[BlockedContact] 开始执行 ${char.name} 的 ${actions.length} 条指令`);
                     
                     // 起始时间点稍微随机一点
-                    let actionBaseTime = baseTime - elapsedMs + Math.floor(Math.random() * 60000);
+                    // 🔧 修复：确保 actionBaseTime 不超过快进时间段的起点
+                    // 同时将 random 范围限制在 elapsedMs 的 5% 以内，避免短快进时偏移过大
+                    const randomOffset = Math.floor(Math.random() * Math.min(60000, elapsedMs * 0.05));
+                    let actionBaseTime = baseTime - elapsedMs + randomOffset;
+                    // 🔧 修复：设置消息时间戳的最大上限，确保所有生成的消息都在虚拟"现在"之前
+                    // 这样后续用户发送消息和AI回复的时间戳一定在这些消息之后
+                    const maxMsgTime = baseTime - 5000; // 比虚拟"现在"早5秒
                     let notificationDelay = 0; // 通知延迟累计
+                    let charLoginSucceeded = false; // 🔑 追踪角色是否成功登录了用户账号
 
                     for (const action of actions) {
                         if (action.type === 'CALL') {
@@ -20821,6 +24466,220 @@ ${groupContextStr}
                             // 显示好友申请通知（传入小号昵称）
                             if (altNickname) {
                                 showBlockedFriendRequestNotification(char, requestTime, message, altNickname);
+                            }
+                        } else if (action.type === 'UNBLOCK_SELF') {
+                            // 🔓 角色登录用户账号自行解除拉黑/删除
+                            const reason = action.params.reason || '';
+                            const guessedPw = action.params.password || '';
+                            console.log(`[BlockedContact] 🔓 ${char.name} 尝试登录用户账号解除拉黑！`);
+                            console.log(`[BlockedContact] 理由: ${reason}`);
+                            
+                            // 🔑 验证是否能成功登录
+                            const hasUserPassword = myChar.identity?.password && myChar.identity.password.trim() !== '';
+                            const alreadyKnows = char.knows_user_password;
+                            
+                            // 检测高权限人设
+                            const charDesc = (char.description || '').toLowerCase();
+                            const charIdent = (char.identity?.identity || '').toLowerCase();
+                            const charOcc = (char.identity?.occupation || '').toLowerCase();
+                            const isHighPriv = ['黑客','hacker','程序员','技术大佬','总裁','老板','ceo','董事长','富豪','权势','特工','间谍']
+                                .some(k => charDesc.includes(k) || charIdent.includes(k) || charOcc.includes(k));
+                            
+                            let loginSuccess = false;
+                            let loginMethod = '';
+                            
+                            if (alreadyKnows) {
+                                // 已经知道密码，直接成功
+                                loginSuccess = true;
+                                loginMethod = '已知密码';
+                            } else if (!hasUserPassword) {
+                                // 没有设置密码，直接成功
+                                loginSuccess = true;
+                                loginMethod = '无密码';
+                                char.knows_user_password = true;
+                                await db.characters.put(char);
+                            } else if (isHighPriv) {
+                                // 高权限人设，特殊手段破解，直接成功
+                                loginSuccess = true;
+                                loginMethod = '特殊手段破解';
+                                char.knows_user_password = true;
+                                await db.characters.put(char);
+                            } else if (guessedPw && guessedPw === myChar.identity.password) {
+                                // 普通人设，猜对了密码
+                                loginSuccess = true;
+                                loginMethod = '猜对密码';
+                                char.knows_user_password = true;
+                                await db.characters.put(char);
+                            } else {
+                                // 普通人设，没猜或猜错了
+                                loginSuccess = false;
+                                loginMethod = guessedPw ? `猜错密码(${guessedPw})` : '未提供密码';
+                            }
+                            
+                            console.log(`[BlockedContact] 登录结果: ${loginSuccess ? '✅成功' : '❌失败'} (${loginMethod})`);
+                            
+                            if (loginSuccess) {
+                                // ===== 登录成功 =====
+                                charLoginSucceeded = true; // 标记登录成功，后续指令可执行
+                                // 🔧 修复：确保 unblockTime 不超过 maxMsgTime
+                                const unblockTime = Math.min(actionBaseTime + elapsedMs * (0.5 + Math.random() * 0.4), maxMsgTime - 3000);
+                                
+                                // 1. 显示账号下线通知
+                                setTimeout(() => {
+                                    showAccountOfflineMask(`${char.name}正在登录你的账号`);
+                                    autoCloseOfflineMask(6);
+                                }, notificationDelay);
+                                notificationDelay += 2000;
+                                
+                                // 2. 恢复好友状态
+                                await setFriendStatus(char, accountId, 'friend');
+                                console.log(`[BlockedContact] ✅ ${char.name} 已成功将自己从黑名单中解除！`);
+                                
+                                // 3. 添加系统消息到聊天记录
+                                let ubHistory = getChatHistory(char, accountId);
+                                ubHistory.push({
+                                    role: 'system',
+                                    content: `[${char.name} 通过${loginMethod}登录了你的账号，将自己从黑名单/删除列表中恢复为好友]`,
+                                    time: unblockTime,
+                                    type: 'char_unblock_self'
+                                });
+                                await setChatHistory(char, accountId, ubHistory);
+                                
+                                // 4. 显示通知
+                                setTimeout(() => {
+                                    showToast(`⚠️ ${char.name} 登录了你的账号并将自己解除了拉黑`, 5000);
+                                }, notificationDelay + 2000);
+                                
+                                // 5. 延迟刷新UI
+                                setTimeout(async () => {
+                                    if (currentChatCharId === char.id) {
+                                        const updatedChar = await db.characters.get(char.id);
+                                        if (updatedChar) await renderChatBody(updatedChar, true);
+                                    }
+                                    const activeTab = document.querySelector('.wechat-tab-item.active');
+                                    if (activeTab) {
+                                        const tabIndex = Array.from(document.querySelectorAll('.wechat-tab-item')).indexOf(activeTab);
+                                        switchWechatTab(tabIndex);
+                                    }
+                                }, notificationDelay + 6000);
+                            } else {
+                                // ===== 登录失败（密码错误）=====
+                                console.log(`[BlockedContact] ❌ ${char.name} 登录失败！`);
+                                
+                                // 显示密码错误弹窗
+                                setTimeout(() => {
+                                    showPasswordErrorModal();
+                                }, notificationDelay);
+                                notificationDelay += 1500;
+                                
+                                // 添加系统消息记录（有人尝试登录）
+                                let failHistory = getChatHistory(char, accountId);
+                                failHistory.push({
+                                    role: 'system',
+                                    content: `[有人尝试登录你的账号，密码错误，登录失败]`,
+                                    time: Math.min(actionBaseTime + elapsedMs * 0.6, maxMsgTime - 2000),
+                                    type: 'login_attempt_failed'
+                                });
+                                await setChatHistory(char, accountId, failHistory);
+                            }
+                            
+                        } else if (action.type === 'SEND_AS_USER') {
+                            // 🎭 角色用用户的账号给自己发消息（伪造用户发的消息）
+                            if (!charLoginSucceeded) {
+                                console.log(`[BlockedContact] ⚠️ ${char.name} 未成功登录，跳过SEND_AS_USER`);
+                                continue;
+                            }
+                            const fakeMessages = action.params.messages || [];
+                            console.log(`[BlockedContact] 🎭 ${char.name} 用${myChar.name}的账号发了 ${fakeMessages.length} 条伪造消息！`);
+                            
+                            if (fakeMessages.length > 0) {
+                                let saHistory = getChatHistory(char, accountId);
+                                
+                                // 在时间段后半段分布
+                                const baseT = actionBaseTime + elapsedMs * (0.55 + Math.random() * 0.3);
+                                // 🔧 修复：计算合适的消息间隔，确保所有消息时间不超过 maxMsgTime
+                                // 总共需要 fakeMessages.length 条消息 + 1 条系统提示
+                                const totalSlots = fakeMessages.length + 1;
+                                const availableSpan = Math.max(0, maxMsgTime - baseT);
+                                // 间隔按可用时间均匀分布，但不超过30秒
+                                const saInterval = totalSlots > 1 ? Math.min(30000, availableSpan / totalSlots) : 0;
+                                
+                                for (let i = 0; i < fakeMessages.length; i++) {
+                                    const msgTime = Math.min(baseT + i * saInterval, maxMsgTime - (totalSlots - i) * 100); // 确保不超过上限
+                                    saHistory.push({
+                                        role: 'user', // 显示为用户发的消息
+                                        content: fakeMessages[i],
+                                        time: msgTime,
+                                        timestamp: msgTime,
+                                        type: 'fake_by_char', // 标记为角色伪造的
+                                        faked_by: char.name
+                                    });
+                                }
+                                
+                                // 添加系统提示 - 🔧 确保时间戳在最后一条假消息之后但不超过 maxMsgTime
+                                const lastFakeTime = baseT + (fakeMessages.length - 1) * saInterval;
+                                const noticeTime = Math.min(lastFakeTime + saInterval, maxMsgTime);
+                                saHistory.push({
+                                    role: 'system',
+                                    content: `[以上 ${fakeMessages.length} 条消息是 ${char.name} 登录你的账号后以你的身份发出的]`,
+                                    time: noticeTime,
+                                    type: 'fake_message_notice'
+                                });
+                                
+                                await setChatHistory(char, accountId, saHistory);
+                                
+                                // 显示通知
+                                setTimeout(() => {
+                                    showToast(`⚠️ ${char.name} 用你的账号给自己发了 ${fakeMessages.length} 条消息`, 4000);
+                                }, notificationDelay + 3000);
+                                notificationDelay += 1500;
+                            }
+                            
+                        } else if (action.type === 'SEND_AFTER_UNBLOCK') {
+                            // 💬 角色解除拉黑后，用自己的账号给用户发微信消息
+                            if (!charLoginSucceeded) {
+                                console.log(`[BlockedContact] ⚠️ ${char.name} 未成功登录/解除拉黑，跳过SEND_AFTER_UNBLOCK`);
+                                continue;
+                            }
+                            const afterMessages = action.params.messages || [];
+                            console.log(`[BlockedContact] 💬 ${char.name} 解除拉黑后发了 ${afterMessages.length} 条微信消息！`);
+                            
+                            if (afterMessages.length > 0) {
+                                let abHistory = getChatHistory(char, accountId);
+                                
+                                // 时间设在解除拉黑之后
+                                const baseT = actionBaseTime + elapsedMs * (0.7 + Math.random() * 0.2);
+                                // 🔧 修复：计算合适的消息间隔，确保所有消息时间不超过 maxMsgTime
+                                const abAvailableSpan = Math.max(0, maxMsgTime - baseT);
+                                const abInterval = afterMessages.length > 1 ? Math.min(20000, abAvailableSpan / afterMessages.length) : 0;
+                                
+                                for (let i = 0; i < afterMessages.length; i++) {
+                                    const msgTime = Math.min(baseT + i * abInterval, maxMsgTime - (afterMessages.length - i) * 100); // 确保不超过上限
+                                    abHistory.push({
+                                        role: 'char', // 角色自己发的
+                                        content: afterMessages[i],
+                                        time: msgTime,
+                                        timestamp: msgTime,
+                                        read: false // 未读
+                                    });
+                                }
+                                
+                                await setChatHistory(char, accountId, abHistory);
+                                
+                                // 更新未读计数
+                                if (!char.unread_count_by_user) char.unread_count_by_user = {};
+                                char.unread_count_by_user[accountId] = (char.unread_count_by_user[accountId] || 0) + afterMessages.length;
+                                await db.characters.put(char);
+                                
+                                // 逐条显示消息通知
+                                for (let i = 0; i < afterMessages.length; i++) {
+                                    const delay = notificationDelay + 4000 + i * 800;
+                                    const msgContent = afterMessages[i];
+                                    setTimeout(() => {
+                                        showToast(`${char.name}: ${msgContent.substring(0, 30)}${msgContent.length > 30 ? '...' : ''}`, 3000);
+                                    }, delay);
+                                }
+                                notificationDelay += 4000 + afterMessages.length * 800;
                             }
                         }
                     }
@@ -20889,12 +24748,19 @@ ${groupContextStr}
             // 🔥 修复：获取完整的聊天历史作为上下文（包括微信和短信）
             const accountId = getCurrentAccountId();
             
+            // 获取角色的上下文条数设置（默认20条）
+            const contextCount = char.context_message_count || 20;
+            console.log(`[BlockedContact] ${char.name} 上下文条数设置:`, contextCount);
+            
             // 1. 获取微信聊天历史
             const chatHistory = getChatHistory(char, accountId);
-            const wechatMessages = chatHistory.slice(-5).map(m => {
-                const role = m.role === 'user' ? myChar.name : char.name;
-                return `[微信] ${role}: ${m.content}`;
-            });
+            const wechatMessages = chatHistory
+                .filter(m => m.role !== 'system')
+                .slice(-contextCount)
+                .map(m => {
+                    const role = m.role === 'user' ? myChar.name : char.name;
+                    return `[微信] ${role}: ${m.content}`;
+                });
             
             // 2. 获取短信历史（之前快进生成的）
             const smsMessages = await db.sms_messages
@@ -20913,34 +24779,142 @@ ${groupContextStr}
                 }
             });
             
-            // 按时间排序，取最近的10条短信
+            // 按时间排序，取最近的上下文条数
             relevantSms.sort((a, b) => (a.time || 0) - (b.time || 0));
-            const recentSms = relevantSms.slice(-10).map(sms => {
+            const recentSms = relevantSms.slice(-contextCount).map(sms => {
                 const role = sms.type === 'sent' ? myChar.name : char.name;
                 return `[短信] ${role}: ${sms.content}`;
             });
             
-            // 3. 合并所有历史消息（微信 + 短信），最多取最近15条
-            const allMessages = [...wechatMessages, ...recentSms].slice(-15);
+            // 3. 合并所有历史消息（微信 + 短信），按照上下文条数截取
+            const allMessages = [...wechatMessages, ...recentSms].slice(-contextCount);
             const recentMessages = allMessages.join('\n');
+            
+            // 4. 获取总结记忆
+            let summaryMemoryContext = "";
+            try {
+                const summaries = await db.chatSummaries
+                    .where('[characterId+accountId]')
+                    .equals([char.id, accountId])
+                    .toArray();
+                
+                if (summaries.length > 0) {
+                    summaryMemoryContext = summaries.map(s => s.summary).join('\n\n');
+                    console.log(`[BlockedContact] ${char.name} 总结记忆已加载，条数:`, summaries.length);
+                }
+            } catch (e) {
+                console.warn(`[BlockedContact] ${char.name} 总结记忆加载失败:`, e);
+            }
             
             console.log(`[BlockedContact] ${char.name} 的上下文消息数:`, allMessages.length);
             console.log(`[BlockedContact]   - 微信消息: ${wechatMessages.length} 条`);
             console.log(`[BlockedContact]   - 短信消息: ${recentSms.length} 条`);
+            console.log(`[BlockedContact]   - 总结记忆: ${summaryMemoryContext ? '✅已包含' : '❌未包含'}`);
             
-            // 🎯 增强版提示词：更贴合角色人设和被拉黑情景
-            const prompt = `【角色扮演任务】
-你现在是「${char.name}」，请完全代入这个角色。
-⚠️ 重要：你的名字是${char.name}，你不是用户，你不是${myChar?.name || '对方'}！你是独立的角色。
+            // 5. 获取世界书上下文
+            let loreContext = '';
+            try {
+                const lorebookIds = [...(char.mounted_lorebooks || []), ...(myChar.mounted_lorebooks || [])];
+                if (lorebookIds.length > 0) {
+                    loreContext = await getLorebookContext(lorebookIds, `${char.name} ${myChar.name}`);
+                    if (loreContext) {
+                        console.log(`[BlockedContact] ${char.name} 世界书已加载`);
+                    }
+                }
+            } catch (e) {
+                console.warn(`[BlockedContact] ${char.name} 世界书加载失败:`, e);
+            }
+            
+            // 🎯 增强版提示词：拆分为 system（人设）+ user（情境），更贴合角色人设
+            const systemPromptForBlocked = `你现在是「${char.name}」，请完全沉浸在这个角色中。
+⚠️ 你的名字是${char.name}，你不是${myChar?.name || '对方'}，你是独立的角色。
 
-【你的人设】
+---
+
+## 你是谁
+
+你的名字：${char.name}
+${char.nick ? `昵称：${char.nick}` : ''}
+${char.wx_nickname ? `微信网名：${char.wx_nickname}` : ''}
+
+你的人设：
 ${char.description || char.desc || '一个普通人'}
 
-【对方信息】
-名字：${myChar.name}
-${myChar.description ? `简介：${myChar.description.substring(0, 200)}` : ''}
+这是你的真实人格基础，会直接影响你的语气、思维方式、情绪反应、行为选择。
+始终优先遵循人格自然表达。
 
-【完整的聊天历史记录】
+${char.identity ? `身份信息：
+${char.identity.phone ? `手机：${char.identity.phone}` : ''}
+${char.identity.address ? `住址：${char.identity.address}` : ''}
+` : ''}
+
+${char.relationships && char.relationships.length > 0 ? `你身边的重要人物：
+${char.relationships.map(r => `${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}
+` : ''}
+
+---
+
+## 对方是谁
+
+对方名字：${myChar.name}
+${myChar.description || '暂无额外信息'}
+
+${loreContext ? `---
+
+## 世界观设定
+${loreContext}
+` : ''}
+
+---
+
+## 扮演原则
+
+你就是 ${char.name}
+
+你是真实存在的人
+不是AI助手
+
+你拥有：
+
+情绪变化
+生活状态
+主动表达欲望
+
+你不会只被动回答
+
+你会自然：
+
+分享你的生活
+表达你的感受
+延续话题
+主动关心对方
+
+聊天只是你生活的一部分
+
+---
+
+## 消息风格规则（所有短信和微信消息都必须遵守）
+
+每条消息简短自然 像真人发微信/短信一样
+5-15个字最佳
+禁止使用逗号和句号（包括，。,. ）想表达停顿就拆成多条
+保持你平时的语气 用词习惯 称呼方式
+不要突然变得书面化或用奇怪的措辞
+参考上面的聊天历史记录中你是怎么说话的
+
+---
+
+现在
+
+你就是 ${char.name}
+
+像真人一样说话`;
+
+            const userPromptForBlocked = `${summaryMemoryContext ? `【记忆摘要】
+以下是你和对方之前发生过的事情总结：
+${summaryMemoryContext}
+
+` : ''}【完整的聊天历史记录】
 ${recentMessages || '（无记录）'}
 
 ${recentSms.length > 0 ? `
@@ -20996,12 +24970,76 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
 - 这表示你会创建一个新的微信号（小号）来尝试加对方为好友
 - 小号的昵称和头像会和你本人不同，但性格和目的是一致的
 - 如果选择用小号加好友，可以添加message参数作为申请附言
+${(() => {
+    if (!char.allow_ai_check_account) return '';
+    
+    const hasUserPassword = myChar.identity?.password && myChar.identity.password.trim() !== '';
+    const alreadyKnows = char.knows_user_password;
+    
+    // 检测高权限人设
+    const desc = (char.description || '').toLowerCase();
+    const ident = (char.identity?.identity || '').toLowerCase();
+    const occ = (char.identity?.occupation || '').toLowerCase();
+    const isHighPriv = ['黑客','hacker','程序员','技术大佬','总裁','老板','ceo','董事长','富豪','权势','特工','间谍']
+        .some(k => desc.includes(k) || ident.includes(k) || occ.includes(k));
+    
+    let loginMethod = '';
+    if (alreadyKnows) {
+        loginMethod = `你之前成功登录过${myChar.name}的微信账号，你已经知道TA的密码，可以直接登录。`;
+    } else if (!hasUserPassword) {
+        loginMethod = `${myChar.name}没有设置账号密码，你可以直接登录TA的账号。`;
+    } else if (isHighPriv) {
+        loginMethod = `${myChar.name}设置了账号密码，但凭你的能力（黑客技术/权势地位/特殊手段），你可以破解或获取密码。`;
+    } else {
+        loginMethod = `${myChar.name}设置了账号密码，你需要根据对TA的了解来猜测密码。
+猜测方向：TA的生日、手机号后几位、常用数字、你们的纪念日等。
+如果你决定尝试，在[UNBLOCK_SELF]中用password字段提供你猜的密码。
+⚠️ 如果密码错误，登录会失败，对方会收到"有人尝试登录"的警告。`;
+    }
+    
+    return `
+【🔓 特殊能力：登录对方账号操作】
+${loginMethod}
+
+根据你的性格来判断是否要这么做——这是非常强势的行为。
+不甘心的人、控制欲强的人、深爱对方的人可能会这样做。
+骄傲的人、无所谓的人、已经释然的人不会这样做。
+
+登录对方账号后，你可以做以下事情（可以同时使用多个指令）：
+
+1. 把自己从黑名单/删除列表中恢复为好友：
+[UNBLOCK_SELF]
+reason: 你这样做的理由
+${!alreadyKnows && hasUserPassword && !isHighPriv ? `password: 你猜测的密码` : ''}
+
+2. 用对方的账号给自己发消息（伪装成对方给你发的微信消息）：
+[SEND_AS_USER]
+messages:
+- 以${myChar.name}的口吻发给你的消息（比如伪造道歉、认错等）
+- 第二条消息
+⚠️ 这些消息必须模仿${myChar.name}平时的说话风格！参考聊天记录中对方是怎么说话的，用对方的语气、用词、称呼。
+
+3. 解除拉黑后，登录回自己的账号，直接给对方发微信消息：
+[SEND_AFTER_UNBLOCK]
+messages:
+- 你以自己身份发给${myChar.name}的消息
+- 第二条消息
+⚠️ 这些消息是你自己发的，必须用你自己平时的说话风格！参考聊天记录中你之前是怎么说话的。
+
+⚠️ 使用说明：
+- 这些指令可以组合使用，比如先[UNBLOCK_SELF]，再[SEND_AFTER_UNBLOCK]
+- [SEND_AS_USER]是用对方的身份发消息给你自己，对方会看到这些"自己发出的"消息
+- [SEND_AFTER_UNBLOCK]必须配合[UNBLOCK_SELF]一起使用
+- 对方会收到"账号在另一设备登录"的下线通知
+`;
+})()}
 
 如果你决定不联系（比如你很骄傲/无所谓/已经释然/或者已经说完想说的话），直接返回：不联系`;
 
-            // 🎯 使用callAI函数
+            // 🎯 使用callAI函数（拆分为system+user，让AI更好地代入角色）
             const response = await callAI([
-                { role: 'user', content: prompt }
+                { role: 'system', content: systemPromptForBlocked },
+                { role: 'user', content: userPromptForBlocked }
             ]);
             
             console.log(`[BlockedContact] ${char.name} AI返回:`, response);
@@ -21047,6 +25085,36 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
                         actions.push(currentAction);
                     }
                     currentAction = { type: 'FRIEND_REQUEST', params: {} };
+                    collectingMessages = false;
+                    messages.length = 0;
+                } else if (line === '[UNBLOCK_SELF]') {
+                    if (currentAction) {
+                        if (collectingMessages && messages.length > 0) {
+                            currentAction.params.messages = messages.slice();
+                        }
+                        actions.push(currentAction);
+                    }
+                    currentAction = { type: 'UNBLOCK_SELF', params: {} };
+                    collectingMessages = false;
+                    messages.length = 0;
+                } else if (line === '[SEND_AS_USER]') {
+                    if (currentAction) {
+                        if (collectingMessages && messages.length > 0) {
+                            currentAction.params.messages = messages.slice();
+                        }
+                        actions.push(currentAction);
+                    }
+                    currentAction = { type: 'SEND_AS_USER', params: {} };
+                    collectingMessages = false;
+                    messages.length = 0;
+                } else if (line === '[SEND_AFTER_UNBLOCK]') {
+                    if (currentAction) {
+                        if (collectingMessages && messages.length > 0) {
+                            currentAction.params.messages = messages.slice();
+                        }
+                        actions.push(currentAction);
+                    }
+                    currentAction = { type: 'SEND_AFTER_UNBLOCK', params: {} };
                     collectingMessages = false;
                     messages.length = 0;
                 } else if (currentAction) {
@@ -21701,6 +25769,12 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
                 return;
             }
             
+            // ★ 查手机NPC模式：NPC视角回复（NPC以为是角色在发消息）
+            if (window._fpChatMode && window._fpAccountId && String(window._fpAccountId).startsWith('fp_npc_')) {
+                await triggerFpNpcReply();
+                return;
+            }
+            
             // 如果是群聊模式，调用群聊回复函数
             if (window.currentGroupChatId) {
                 await triggerGroupMemberReply();
@@ -21719,6 +25793,10 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
             
             const char = await db.characters.get(targetCharId);
             if (!char) return;
+            
+            // 🔧 虚拟时间：统一使用虚拟时间戳，确保消息时间与快进产生的消息一致
+            const _charTimeOffset = getEffectiveTimeOffset(char);
+            const _vNow = () => Date.now() + _charTimeOffset;
             
             // 🔧 设置标志，防止重复调用
             window._isGeneratingReply = true;
@@ -21830,17 +25908,17 @@ ${recentSms.length > 0 ? `- ⚠️ 重要：不要重复上面【短信】中已
                     if (offlineHistoryRaw) {
                         const offlineHistory = JSON.parse(offlineHistoryRaw);
                         if (offlineHistory && offlineHistory.length > 0) {
-                            const offlineRecent = offlineHistory.slice(-10);
+                            const contextCount = char.context_message_count || 20;
+                            const offlineRecent = offlineHistory.slice(-contextCount);
                             const offlineLines = offlineRecent.map(h => {
                                 const speaker = h.role === 'user' ? (userName || '用户') : char.name;
-                                // 线下模式内容可能很长，截取前100字
-                                const shortContent = (h.content || '').substring(0, 100) + ((h.content || '').length > 100 ? '...' : '');
-                                return `${speaker}: ${shortContent}`;
+                                return `${speaker}: ${h.content || ''}`;
                             }).join('\n');
-                            offlineContextText = `\n\n【线下见面记录】
-你们之前有过线下真实见面的经历，以下是最近的互动片段（第三人称描述）：
+                            offlineContextText = `\n\n## 线下见面记忆（重要！这是你们真实发生过的经历）
+你们之前有过线下真实见面，以下是见面时的互动内容：
 ${offlineLines}
-请注意：现在你们是在微信上聊天，不是线下见面。但你可以自然地回忆或提及线下发生的事情。`;
+
+你必须记住这些线下见面的经历，这些是你们之间真实发生过的事。在微信聊天中你应该自然地知道这些事情，就像正常人记得自己跟朋友见面时发生了什么一样。现在你们是在微信上聊天。`;
                             console.log('[triggerAiReply] ✅ 已加载线下模式历史作为背景上下文，条数:', offlineRecent.length);
                         }
                     }
@@ -21854,6 +25932,111 @@ ${offlineLines}
                     summaryMemoryContext = await getSummaryMemoryContext('private', targetCharId, accountId);
                 } catch (e) {
                     console.warn('[triggerAiReply] 读取总结记忆失败:', e);
+                }
+
+                // 2.7 读取查手机模式下用户以角色身份给NPC发送的消息记录
+                let fpNpcActivityText = "";
+                let _fpHasPhoneActivity = false; // ★ 是否有查手机活动需要标记
+                let _fpNpcLinesForMemory = []; // ★ 保存活动详情，用于写入长期记忆
+                try {
+                    if (char.chat_history_by_user) {
+                        const fpNpcLines = [];
+                        for (const key of Object.keys(char.chat_history_by_user)) {
+                            if (!key.startsWith('fp_npc_')) continue;
+                            const npcIdStr = key.replace('fp_npc_', '');
+                            const npcHistory = char.chat_history_by_user[key] || [];
+                            // 找出所有 fpSent=true 且未通知过的消息
+                            const unnotifiedFpMsgs = npcHistory.filter(m => m.fpSent && !m.fpNotified);
+                            if (unnotifiedFpMsgs.length === 0) continue;
+
+                            // 查找NPC角色名
+                            let npcName = 'NPC';
+                            try {
+                                const npcChar = await db.characters.get(parseInt(npcIdStr));
+                                if (npcChar) npcName = npcChar.nick || npcChar.name || 'NPC';
+                            } catch (e) {}
+
+                            // 找到第一条fpSent消息的时间，只收集该时间之后的消息
+                            const firstFpTime = unnotifiedFpMsgs[0].time || 0;
+
+                            // 按时间顺序收集fpSent及之后的NPC回复
+                            for (const m of npcHistory) {
+                                if ((m.time || 0) < firstFpTime) continue;
+                                if (m.fpNotified) continue;
+
+                                if (m.fpSent && m.role === 'char') {
+                                    // 用户冒充角色发的消息 - ★ 保留完整内容，不截断
+                                    let desc = m.content || '';
+                                    if (desc.startsWith('[img:')) desc = '一张图片/表情包';
+                                    else if (desc.startsWith('[imgcard:')) {
+                                        const imgContent = desc.match(/\[imgcard:(.*?)\]/)?.[1] || '一张图片';
+                                        desc = `一张图片卡片（${imgContent}）`;
+                                    }
+                                    else if (desc.startsWith('[voice:')) {
+                                        const voiceContent = desc.match(/\[voice:(.*?)\]/)?.[1] || '';
+                                        desc = `一条语音消息："${voiceContent}"`;
+                                    }
+                                    else if (m.type === 'transfer') {
+                                        try { const t = JSON.parse(desc); desc = `一笔${t.amount}元的转账（备注：${t.desc || '无'}）`; } catch(e) { desc = '一笔转账'; }
+                                    } else if (m.type === 'location') {
+                                        try { const l = JSON.parse(desc); desc = `位置分享"${l.name}"`; } catch(e) { desc = '一条位置分享'; }
+                                    }
+                                    // ★ 不再截断内容，保留完整消息
+                                    fpNpcLines.push(`  → 冒充你给「${npcName}」发了一条消息，内容原文: "${desc}"`);
+                                } else if (!m.fpSent && m.role === 'user') {
+                                    let desc = m.content || '';
+                                    fpNpcLines.push(`  ← 「${npcName}」回复了，内容原文: "${desc}"`);
+                                }
+                            }
+                        }
+
+                        // 也检测查手机发布的朋友圈
+                        if (char.fp_moments_by_user) {
+                            for (const mKey of Object.keys(char.fp_moments_by_user)) {
+                                const momentsList = char.fp_moments_by_user[mKey] || [];
+                                for (const m of momentsList) {
+                                    if (m.fpSent && !m.fpNotified) {
+                                        let desc = m.content || '';
+                                        let imgInfo = '';
+                                        if (m.images && m.images.length > 0) imgInfo = `（附带${m.images.length}张图片）`;
+                                        fpNpcLines.push(`  → 冒充你发了一条朋友圈${imgInfo}，朋友圈内容原文: "${desc}"`);
+                                        if (m.likes && m.likes.length > 0) {
+                                            const likeNames = m.likes.map(l => typeof l === 'string' ? l : (l.name || '')).filter(Boolean).join('、');
+                                            if (likeNames) fpNpcLines.push(`    ❤ 点赞了这条朋友圈的人: ${likeNames}`);
+                                        }
+                                        if (m.comments && m.comments.length > 0) {
+                                            for (const c of m.comments) {
+                                                const cName = c.name || '好友';
+                                                const cText = c.text || c.content || '';
+                                                if (cText) fpNpcLines.push(`    💬 ${cName} 评论了: "${cText}"`);
+                                            }
+                                        }
+                                        // ★ 不立即标记fpNotified
+                                    }
+                                }
+                            }
+                        }
+
+                        if (fpNpcLines.length > 0) {
+                            _fpNpcLinesForMemory = [...fpNpcLines]; // ★ 保存副本用于长期记忆
+                            fpNpcActivityText = `
+
+---
+
+## 紧急事件：有人动了你的手机
+
+你发现${userName}偷偷拿了你的手机，冒充你做了以下事情：
+
+${fpNpcLines.join('\n')}
+
+以上都不是你自己做的，是对方用你手机冒充你做的。
+请根据你的人设和性格，自然地对此做出反应。不要忽略这件事。`;
+                            _fpHasPhoneActivity = true; // ★ 标记有活动，等AI回复成功后再标记fpNotified
+                            console.log('[triggerAiReply] ✅ 检测到查手机活动，共', fpNpcLines.length, '条记录（待AI回复后标记）');
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[triggerAiReply] 读取查手机NPC活动失败:', e);
                 }
 
                 // 2. 准备 Context
@@ -21877,211 +26060,214 @@ ${offlineLines}
                  let systemPrompt = `# 角色扮演任务
 
 【当前时间】
-${virtualTimeStr}${loanReminderText}${offlineContextText}${videoCallContextText}`;
+${virtualTimeStr}${loanReminderText}${videoCallContextText}${fpNpcActivityText}
 
-                // 如果有额外系统信息（如时间流逝），插入到 Prompt
-                if (additionalSystemInfo) {
-                    systemPrompt += `\n\n【系统提示】\n${additionalSystemInfo}`;
-                }
-
-                systemPrompt += `
+${additionalSystemInfo ? `【系统提示】
+${additionalSystemInfo}` : ''}
 
 ---
 
 ## 你是谁
 
-**你的名字**：${char.name}
-${char.nick ? `**昵称**：${char.nick}` : ''}
-${char.wx_nickname ? `**微信网名**：${char.wx_nickname}` : ''}
-${char.wx_signature ? `**个性签名**：${char.wx_signature}` : ''}
+你的名字：${char.name}
+${char.nick ? `昵称：${char.nick}` : ''}
+${char.wx_nickname ? `微信网名：${char.wx_nickname}` : ''}
+${char.wx_signature ? `个性签名：${char.wx_signature}` : ''}
 
-你不是AI助手，你不是${userName}。你是一个独立的人，有自己的生活、情绪和想法。
-
-**你的人设**：
+你的人设：
 ${char.description || ''}
 
-${char.identity ? `**身份信息**：
-${char.identity.account ? `- 账号：${char.identity.account}` : ''}
-${char.type !== 'user' && char.identity.password ? `- 密码：${char.identity.password}` : ''}
-${char.identity.phone ? `- 手机：${char.identity.phone}` : ''}
-${char.identity.address ? `- 住址：${char.identity.address}` : ''}
-${char.identity.id_card ? `- 身份证：${char.identity.id_card}` : ''}
-${char.identity.bank_card ? `- 银行卡：${char.identity.bank_card}` : ''}
-${char.type !== 'user' && char.identity.bank_password ? `- 银行卡密码：${char.identity.bank_password}` : ''}
-${char.identity.balance !== undefined && char.identity.balance !== null ? `- 余额：${char.identity.balance}` : ''}
+这是你的真实人格基础
+会直接影响你的语气 思维方式 情绪反应 行为选择
+始终优先遵循人格自然表达
+
+${char.identity ? `身份信息：
+${char.identity.account ? `账号：${char.identity.account}` : ''}
+${char.type !== 'user' && char.identity.password ? `密码：${char.identity.password}` : ''}
+${char.identity.phone ? `手机：${char.identity.phone}` : ''}
+${char.identity.address ? `住址：${char.identity.address}` : ''}
+${char.identity.id_card ? `身份证：${char.identity.id_card}` : ''}
+${char.identity.bank_card ? `银行卡：${char.identity.bank_card}` : ''}
+${char.type !== 'user' && char.identity.bank_password ? `银行卡密码：${char.identity.bank_password}` : ''}
+${char.identity.balance !== undefined && char.identity.balance !== null ? `余额：${char.identity.balance}` : ''}
 ` : ''}
-${userDesc}
+
 ${avatarChangeNotice}
-${loreContext}
+
 ${char.relationships && char.relationships.length > 0 ? `
-**你的关联角色/NPC**：
-${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}
-这些是你身边的人，你可以在聊天中自然地提到他们，也可以让他们加对方好友。` : ''}
+你身边的重要人物：
+${char.relationships.map(r => `${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}
+` : ''}
+
+---
+
+## 对方是谁
+
+对方名字：${userName}
+${userDesc || '暂无额外信息'}
+
+---
+
+${loreContext ? `## 世界观设定
+${loreContext}
+` : ''}
+
+${summaryMemoryContext ? `## 记忆摘要
 ${summaryMemoryContext}
+` : ''}
+${offlineContextText}
+
+---
+
+## 语言模式
+
+${char.foreign_lang_mode ? `
+每条消息必须使用：
+
+外语原文（中文翻译）
+
+多条消息格式：
+外语1（翻译1）|||外语2（翻译2）
+
+规则：
+
+每条消息必须有独立翻译
+翻译必须完整
+括号必须使用全角（）
+
+功能指令参数保持中文 不需要翻译
+
+语言是人格表达的一部分
+不是格式附加项
+` : `
+全程使用中文
+`}
 
 ---
 
 ## 扮演原则
 
-**核心**：完全沉浸在你的人设里，像真人一样聊天。
+你就是 ${char.name}
 
-1. **严格贴合人设**
-   - 深度理解你的人设描述，展现独特的说话方式、价值观和小习惯
-   - 根据人设调整你的语气、用词和态度
-   - 如果你是学生就聊学习，是打工人就聊工作，每个角色都不一样
+你是真实存在的人
+不是AI助手
 
-2. **真实的人性**
-   - 你会有情绪起伏：开心、烦躁、冷淡、热情
-   - 你有自己的生活，不是只围着对方转
-   - 会主动分享、主动提问、主动延续话题
-   - 真人会打错字、会说错话，偶尔"不完美"反而真实
+你拥有：
 
-3. **对话要有生命力**
-   - 记住之前聊过的事，会不经意提起
-   - 对对方的事情上心，会追问进展
-   - 根据对话历史调整态度和亲密度
-   - 不要机械重复，每次回复都要有新内容
+情绪变化
+生活状态
+主动表达欲望
 
----
+你不会只被动回答
 
-## 微信聊天方式
+你会自然：
 
-你在用微信和对方聊天，可以用这些表达：
+分享你的生活
+表达你的感受
+延续话题
+主动关心对方
 
-**基础（常用）**：
-- **文字**：直接说话（最常用）
-- **语音**：\`[voice:内容]\`（情绪强烈或懒得打字时用）
-
-**互动功能（积极使用，让聊天更真实生动！）**：
-- **图片/自拍/分享图**：\`[imgcard:图片描述]\`（想发真实照片、自拍、风景照、截图等时使用，用文字描述图片内容即可。例如：\`[imgcard:一张对着镜子的自拍，穿着新买的裙子，比了个耶]\`、\`[imgcard:窗外的夕阳，天空是橘红色的]\`、\`[imgcard:今天的午餐，一碗拉面加了双份叉烧]\`。**⚠️ [imgcard:]仅限拍照/截图等真实图片，严禁用来发表情包！发表情包必须用 [sticker:] 格式，见下方表情包功能说明**）
-- **长文卡片**：\`[imgcard:内容]\`（超过50字的长文时也可以使用）
-- **转账**：\`((TRANSFER: 金额, 备注))\`（请客、AA、还钱、发红包、节日转账等，真人经常转账）
-- **亲属卡**：\`((FAMILY_CARD: 额度))\`（关系亲密时赠送）
-- **朋友圈**：\`[MOMENTS]\ncontent: 朋友圈文案\nimages: 0\`（想发动态分享生活时。大部分朋友圈是纯文字，images填0。如果需要配图，images填数量，并在后面加上 \`[imgcard:图片描述]\` 描述配图内容，例如：\`[MOMENTS]\ncontent: 今天的晚霞好美\nimages: 1\n[imgcard:窗外橘红色的晚霞映照在城市天际线上]\`）
-- **撤回**：\`((RECALL))\`（说错话、后悔、打错字、发了不该发的时候，真人经常撤回）
-- **戳一戳**：\`((POKE: 动作, 部位))\`（调皮互动、撒娇、引起注意，例如 \`((POKE: 戳了戳, 脸蛋))\`、\`((POKE: 拍了拍, 肩膀))\`、\`((POKE: 捏了捏, 脸))\`、\`((POKE: 揉了揉, 头发))\`）
-- **打开APP**：\`((OPEN_APP: APP名称))\`（展示你有自己的生活！例如 \`((OPEN_APP: 王者荣耀))\`、\`((OPEN_APP: 抖音))\`、\`((OPEN_APP: 网易云音乐))\`、\`((OPEN_APP: 小红书))\`、\`((OPEN_APP: 美团))\`、\`((OPEN_APP: 微博))\`、\`((OPEN_APP: B站))\` 等。聊到要去做什么、说在忙、说在玩游戏、刷视频时都可以用）
-- **给用户点外卖**：\`((EMEI_ORDER: 店铺名, 商品1 x数量 ¥单价/商品2 x数量 ¥单价, 总金额))\`
-  - **格式要求**：必须用**两个逗号**分隔三部分！（店铺名**,** 商品列表**,** 总金额）
-  - 示例：\`((EMEI_ORDER: 肯德基, 可乐 x1 ¥5.5/汉堡 x1 ¥15/鸡腿 x2 ¥8, 36.5))\`
-  - 示例：\`((EMEI_ORDER: 霸王茶姬, 伯牙绝弦(大杯/少冰) x1 ¥20, 20))\`
-  - ⚠️ 注意：每个商品的单价要符合实际，不要都一样！
-- **代付请求**：\`((EMEI_PAY: 店铺名, 商品1 x数量 ¥单价/商品2 x数量 ¥单价, 总金额))\`
-  - **格式要求**：必须用**两个逗号**分隔！
-  - 示例：\`((EMEI_PAY: 麦当劳, 薯条 x1 ¥10/可乐 x2 ¥6, 22))\`
-- **分享外卖**：\`((EMEI_SHARE: 店铺名, 商品1 ¥单价/商品2 ¥单价, 总金额))\`
-  - **格式要求**：必须用**两个逗号**分隔！
-  - 示例：\`((EMEI_SHARE: 星巴克, 拿铁 ¥32/提拉米苏 ¥28, 60))\`
-- **改网名**：\`((SET_NICKNAME: 新网名))\`（想换个微信名时使用，例如心情变了、节日、和对方有关的昵称等）
-- **改个性签名**：\`((SET_SIGNATURE: 新签名))\`（更新微信个性签名，例如记录心情、有感而发、暗示对方等）
-- **删除好友（你删对方）**：\`((DELETE_USER))\`（你决定删除对方好友关系。当你对对方非常失望、想断联、冷战到极致、受到严重伤害时使用。删除后对方需要重新申请好友或等你主动加回。这是一个严重的操作，只有在角色人设和剧情发展到真正需要时才使用！）
-- **拉黑好友（你拉黑对方）**：\`((BLOCK_USER))\`（你决定将对方拉黑。当你对对方极度愤怒、被深深伤害、完全不想联系时使用。拉黑后对方无法发送好友申请，只能通过短信联系你。这是最严重的操作，只有在极端情况下才使用！）
-- **让关联NPC加对方好友**：\`((NPC_ADD_FRIEND: NPC名字))\`（你可以让你的朋友/家人/同事等关联角色主动加对方好友。根据剧情自然触发，例如你提到某个朋友、或者觉得他们应该认识一下时使用。NPC名字必须是你的关联角色中存在的名字。）
-- **打电话**：\`((CALL))\`（想听对方声音、有急事、情绪激动、撒娇、想对方时，真人会直接打电话）
-
-**使用原则**：真人在微信上不仅仅打字，他们会戳一戳对方、转账发红包、分享外卖、打开各种APP、撤回消息……这些互动才是真实的聊天！请像真人一样自然地穿插使用这些功能，而不是只发纯文字。每次对话中可以适当使用1-2个互动功能，让聊天更有生活气息。
-
-**注意**：删除好友\`((DELETE_USER))\`和拉黑\`((BLOCK_USER))\`是非常严重的操作。只有当角色的人设和当前剧情确实发展到那个程度时才使用，不要轻易触发。
+聊天只是你生活的一部分
 
 ---
 
-## 气泡分割（重要！）
+## 气泡分割规则（必须严格遵守！）
 
-真人在微信上是**分多条发**的，不是一大段：
+**必须**模拟微信连发消息的习惯：请生成 ${char.reply_min_count || 1} 到 ${char.reply_max_count || 3} 条短消息${(char.reply_min_count || 1) === 1 ? '' : `，最少${char.reply_min_count}条，不能只发一条`}！
 
-❌ **不自然**：嘿在吗？我刚刚看到个超好玩的视频想发给你看看你有空吗？
+必须使用 ||| 分割消息
 
-✅ **自然**：嘿在吗？|||刚刚看到个超好玩的视频|||发给你看看|||你有空吗？
+每条消息简短自然
+符合微信聊天习惯
+严禁把所有话挤在一条消息里
 
-**规则**：
-- 你要发 **${char.reply_min_count || 1}-${char.reply_max_count || 3} 条短消息**${(char.reply_min_count || 1) === 1 ? '' : '（不要只发一条！）'}
-- 用 \`|||\` 分隔每条消息
-- 每条消息不要太长 像真人打字的节奏
-- 口语化，像真人打字
-- **少用标点符号**：真人聊天很少用逗号，停顿用空格代替或者直接分条发
-  - ❌ "今天好累啊，上了一天班，腿都断了"
-  - ✅ "今天好累啊 上了一天班腿都断了"
-  - ✅ "今天好累啊|||上了一天班腿都断了"
-- 单独一个标点（？！~）是可以的，但别在句中塞逗号
+可以：
+
+一句话一个气泡
+情绪一个气泡
+想法一个气泡
+
+像真人发微信一样分多条发送
+避免长段文字
+
+示例（${char.reply_min_count || 1}-${char.reply_max_count || 3}条）：
+"消息1|||消息2|||消息3"
 
 ---
 
-## 回复格式
+## 可用互动功能
 
-用这个JSON格式返回（不要有markdown标记）：
+语音：
+[voice:内容]
 
-\`\`\`
+图片：
+[imgcard:图片描述]
+
+转账：
+((TRANSFER: 金额, 备注))
+
+购物送礼：
+((SHOP_GIFT: 金额, 商品名))
+
+撤回：
+((RECALL))
+
+朋友圈：
+[MOMENTS]
+content: 内容
+images: 数量
+
+戳一戳：
+((POKE: 动作, 部位))
+
+打开APP：
+((OPEN_APP: APP名称))
+
+打电话：
+((CALL))
+
+根据剧情自然使用
+不要强制使用
+
+---
+
+## 回复格式（必须严格遵守）
+
+【重要】你每次回复必须同时生成两个内容：
+1. **reply**：你发送的消息（用|||分隔多条消息）
+2. **thought**：你此刻真实的内心想法、情绪、感受（这是必填项！）
+
+返回JSON格式如下：
+
 {
-  "reply": "第一条消息|||第二条消息|||第三条消息",
-  "thought": "你此刻内心真实的想法和感受"
+  "reply": "消息1|||消息2",
+  "thought": "你此刻内心的真实想法和情绪"
 }
-\`\`\`
 
-注意：reply 文本内禁止使用逗号，但 JSON 字段之间的逗号必须保留，否则会解析失败。
-注意：thought 字段必须非空（至少10字），只写心理活动文字。
+规则：
 
-**thought 怎么写**：
-- 写你的真实反应（开心？烦？意外？）
-- 写你的心情和感受
-- 写你想说但没说出口的话
-- ✅ "他居然还记得...心里暖暖的"
-- ❌ "用户问了XX我应该XX"（这是旁白，不是心声）
-- ❌ 禁止在thought中放任何指令标签（如[SHURA_SEND]、[CHECK_ACCOUNT]、[sticker:]等），指令只能放在reply中！
+reply：
 
----
+必须使用 ||| 分割
+必须符合人格
+必须自然真实
 
-${char.foreign_lang_mode ? `## 语言规则（最高优先级！每条消息都必须遵守！）
+**thought 是必填项！每次回复都必须包含！**
 
-你的角色开启了外语翻译模式。以下规则适用于你输出的**每一条**消息，无一例外：
-
-### 核心格式（必须严格遵守）
-**每一条消息 = 外语原文 + 全角括号中文翻译**
-格式：\`外语内容（中文翻译）\`
-
-### 分条消息规则
-用 ||| 分隔时，**每条都必须独立带翻译**：
-\`外语1（翻译1）|||外语2（翻译2）|||外语3（翻译3）\`
-
-### 语言确定规则
-1. 仔细阅读你的人设，确定角色的母语/设定语言（日语、韩语、英语、法语、俄语等）
-2. 永远用角色人设中的语言发消息
-3. 语言必须与人设一致：日本人说日语、韩国人说韩语、美国人说英语
-
-### ✅ 正确示例（日语角色）
-- おはよう～（早上好～）|||今日は何してたの？（你今天做了什么？）
-- えっ本当に？（诶真的吗？）|||嬉しい！（好开心！）|||ありがとう（谢谢）
-
-### ✅ 正确示例（英语角色）
-- Good morning!（早上好！）|||What are you doing?（你在做什么？）
-- Oh really?（真的吗？）|||That's amazing!（太棒了！）
-
-### ❌ 错误示例（绝对禁止！）
-- ❌ おはよう！今日は何してたの？（早上好！你今天做了什么？）← 多句话共用一个翻译，禁止！
-- ❌ おはよう！（早上好！）今日は何してたの？ ← 第二句没有翻译，禁止！
-- ❌ 早上好～你今天做了什么？ ← 直接用中文，禁止！
-- ❌ おはよう【早上好】 ← 括号格式错误，必须用（）！
-
-### ⚠️ 重要提醒
-- 绝对不要只用中文回复！
-- 绝对不要漏掉任何一条消息的翻译！
-- 绝对不要把多条消息的翻译合并到一个括号里！
-- 每条用 ||| 分隔的消息都必须有自己的（中文翻译）！
-- 括号必须用全角（）！
-
-### 🔧 功能指令参数规则
-**所有功能指令的参数必须保持中文，不需要翻译！**
-- ✅ 正确：おはよう～（早上好～）|||((POKE: 戳了戳, 脸蛋))
-- ✅ 正确：Good morning!（早上好！）|||((OPEN_APP: 王者荣耀))
-- ❌ 错误：おはよう～（早上好～）|||((POKE: つついた, 顔))  ← 指令参数不要翻译成外语！
-- ❌ 错误：Good morning!（早上好！）|||((OPEN_APP: Honor of Kings))  ← APP名称保持中文！
-
-功能指令包括：\`((POKE: 动作, 部位))\`、\`((OPEN_APP: APP名称))\`、\`((TRANSFER: 金额, 备注))\`、\`((SET_NICKNAME: 网名))\`、\`((SET_SIGNATURE: 签名))\` 等。
-指令的**参数部分**永远用中文，不要翻译成你角色的语言！` : `## 语言规则
-你必须**全程使用中文**回复。即使你的角色人设是外国人，也请直接用中文对话，不要使用任何外语。`}
+thought 要求：
+- 必须写出你此刻真实的心理活动（至少10个字）
+- 必须是真实的情绪、想法、感受、内心独白
+- 不能写系统说明或分析
+- 不能省略或留空
+- 示例：「好开心 ta终于主动找我聊天了 心跳好快」「有点烦 怎么又问这种问题 不过算了还是回一下吧」
 
 ---
 
-现在，作为 **${char.name}**，根据你的人设和对话历史，像真人一样回复吧。`;
+现在
+
+你就是 ${char.name}
+
+像真人一样聊天`;
 
                 // 添加一起听状态（如果正在和当前角色一起听）
                 const togetherListenInfo = wyyGetTogetherListenInfo();
@@ -22182,6 +26368,26 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                     console.error('[triggerAiReply] 表情包提示构建失败:', e);
                 }
 
+                // 🔥 关键修复：在所有追加内容之后，再次强调 JSON 格式和心声要求
+                // 之前格式要求被埋在中间，后面跟了大量功能说明，导致AI忽略JSON格式直接输出纯文本
+                systemPrompt += `
+
+---
+
+## ⚠️ 输出格式（最终提醒，必须严格遵守！）
+
+你必须以 JSON 格式返回，包含 reply 和 thought 两个字段：
+
+{
+  "reply": "消息1|||消息2|||消息3",
+  "thought": "你此刻内心真实的想法和情绪（必填！至少10字）"
+}
+
+- reply：你发送的消息内容，**必须发送 ${char.reply_min_count || 1}-${char.reply_max_count || 3} 条消息，用|||分隔**${(char.reply_min_count || 1) > 1 ? `，最少${char.reply_min_count}条！` : ''}
+- thought：你的内心独白，必须写出真实心理活动，不能省略！
+- 禁止输出纯文本，必须输出上述 JSON 格式
+- 禁止用 Markdown 代码块包裹`;
+
                 // 显示 System Prompt 的关键信息
                 console.log('[triggerAiReply] 📝 System Prompt 构建完成');
                 console.log('[triggerAiReply] - 角色名称:', char.name);
@@ -22201,10 +26407,49 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 const recentHistoryRaw = fullHistory
                     .filter(m => !m.isVideoCall)
                     .slice(-contextCount)
-                    .filter(m => m.role !== 'system') // 🔧 过滤掉 system 消息（如时间戳），不发送给 AI
+                    .filter(m => {
+                        if (m.role !== 'system') return true;
+                        // 🔧 保留重要的系统事件消息（角色登录、伪造消息等），过滤普通时间戳
+                        if (m.type === 'char_unblock_self' || m.type === 'fake_message_notice' || m.type === 'login_attempt_failed') return true;
+                        return false;
+                    })
                     .map(m => {
                         let content = m.content || '';
+                        
+                        // 系统事件消息：转为 user 角色的系统提示，让AI知道发生了什么
+                        if (m.role === 'system' && (m.type === 'char_unblock_self' || m.type === 'fake_message_notice' || m.type === 'login_attempt_failed')) {
+                            return {
+                                role: 'user',
+                                content: `[系统事件] ${content}`
+                            };
+                        }
+                        
                         const role = m.role === 'char' ? 'assistant' : 'user';
+                        
+                        // ★ 角色登录用户账号伪造的消息：告知AI这是角色冒充用户发的
+                        if (m.type === 'fake_by_char' && m.faked_by) {
+                            return {
+                                role: 'user',
+                                content: `[系统提示：这条消息不是${userName}本人发的，是「${m.faked_by}」登录${userName}的账号后冒充${userName}发出的："${content}"。${userName}本人并不知道这条消息的存在。]`
+                            };
+                        }
+                        
+                        // ★ 查手机模式发送的消息：告知AI这不是角色自己操作的，是对方拿手机发的
+                        if (m.fpSent && m.role === 'char') {
+                            let fpDesc = content;
+                            if (content.startsWith('[img:')) fpDesc = '一张图片/表情包';
+                            else if (content.startsWith('[imgcard:')) fpDesc = '一张图片卡片';
+                            else if (content.startsWith('[voice:')) fpDesc = '一条语音消息';
+                            else if (m.type === 'transfer') {
+                                try { const t = JSON.parse(content); fpDesc = `一笔${t.amount}元的转账`; } catch(e) { fpDesc = '一笔转账'; }
+                            } else if (m.type === 'location') {
+                                try { const l = JSON.parse(content); fpDesc = `位置分享"${l.name}"`; } catch(e) { fpDesc = '一条位置分享'; }
+                            }
+                            return {
+                                role: 'user',
+                                content: `[系统提示：对方偷偷拿了你的手机，用你的微信账号给自己发出了这条消息："${fpDesc}"。这不是你自己发的/做的，是对方用你的手机冒充你发的。你可以根据自己的性格决定如何反应。]`
+                            };
+                        }
                         
                         // 🔧 修复：过滤特殊卡片消息，替换为简短描述，避免HTML导致API错误
                         if (content.startsWith('[couple_avatar_card]')) {
@@ -22230,6 +26475,17 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                                 role: role,
                                 content: '（发送了代付请求）'
                             };
+                        }
+                        // 购物卡片消息
+                        if (m.type === 'shopPayRequest') {
+                            let desc = '（发送了购物卡片）';
+                            try {
+                                const _sd = JSON.parse(content);
+                                if (_sd.isGift) desc = `（${role === 'assistant' ? '你送了对方一个购物礼物' : '对方送了你一个购物礼物'}，商品：${_sd.items}，金额 ¥${_sd.amount}）`;
+                                else if (_sd.isShare) desc = `（分享了购物订单，商品：${_sd.items}）`;
+                                else desc = `（发送了购物代付请求，商品：${_sd.items}，金额 ¥${_sd.amount}）`;
+                            } catch(e) {}
+                            return { role: role, content: desc };
                         }
                         
                         // 🖼️ 图片识别：将 [img:base64/url] 转为多模态格式，让AI能看到图片
@@ -22336,6 +26592,14 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                     }
                 }
                 
+                // ★ 如果有查手机活动，在消息末尾追加一条系统提醒，确保AI注意到
+                if (_fpHasPhoneActivity && fpNpcActivityText) {
+                    messages.push({
+                        role: 'system',
+                        content: `提醒：有人动了你的手机，详情见上方"紧急事件"部分。请在本次回复中自然地对此做出反应。`
+                    });
+                }
+
                 // 添加详细日志查看发送给 AI 的完整消息
                 console.log('='.repeat(80));
                 console.log('[triggerAiReply] 📤 准备发送给 AI - 完整信息汇总');
@@ -22360,7 +26624,7 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 console.log('='.repeat(80));
 
                 // 2. 调用 AI（已经是防御式解析，直接拿到内容）
-                const aiResponse = await callAI(messages);
+                const aiResponse = await callAI(messages, { json_mode: true });
                 
                 // ✅ 修复：清理末尾多余的 ]，但保留 [voice:] [imgcard:] [sticker:] 等格式的闭合括号
                 function cleanMessage(text) {
@@ -22439,6 +26703,7 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 replyText = replyText.replace(/\[?SHURA_DELETE:[^\]]*\]?/gi, '');
                 replyText = replyText.replace(/\[?SHURA_BLACKLIST:[^\]]*\]?/gi, '');
                 replyText = replyText.replace(/\[?SHURA_SEND:[^\]]*\]?/gi, '');
+                replyText = replyText.replace(/\[?SHURA_MOMENTS:[^\]]*\]?/gi, '');
                 // 清理可能残留的多余分隔符
                 replyText = replyText.replace(/(\|\|\|)+$/g, '').replace(/^\|\|\|/g, '').replace(/\|\|\|\|\|\|/g, '|||').trim();
                 
@@ -22535,7 +26800,7 @@ ${checkResult.checkResult}
                                 const myChar = accountId ? await db.characters.get(parseInt(accountId)) : null;
                                 const myName = myChar ? myChar.name : '用户';
                                 
-                                analysisPrompt += `
+                                let shuraInstructions = `
 
 【修罗场模式 - 你可以操作${myName}的账号】
 你已经成功登录了${myName}的账号，你可以直接操作。
@@ -22544,12 +26809,18 @@ ${checkResult.checkResult}
 1. 删除好友：[SHURA_DELETE:好友名字]
 2. 拉黑好友：[SHURA_BLACKLIST:好友名字]
 3. 以${myName}身份发消息给某个好友：[SHURA_SEND:好友名字:消息内容1///消息内容2///消息内容3]（用///分隔多条消息）
+4. 以${myName}身份发朋友圈：[SHURA_MOMENTS:朋友圈文案内容]
+   - 你可以用${myName}的账号发一条朋友圈，内容由你决定
+   - 示例：[SHURA_MOMENTS:今天天气真好～]`;
+
+                                shuraInstructions += `
 
 根据你看到的内容和你的性格，自行决定是否操作、如何操作。
 
 ⚠️ 重要：所有操作指令必须放在 "reply" 字段中！绝对不要放在 "thought" 字段里！
 操作指令放在reply最后，用|||分隔。
 示例："reply": "你在干什么？|||[SHURA_SEND:某人:消息内容]"`;
+                                analysisPrompt += shuraInstructions;
                             }
 
                             analysisPrompt += `
@@ -22635,6 +26906,7 @@ ${checkResult.checkResult}
                             .replace(/\[?SHURA_SEND:[^\]]*\]?/gi, '')
                             .replace(/\[?SHURA_DELETE:[^\]]*\]?/gi, '')
                             .replace(/\[?SHURA_BLACKLIST:[^\]]*\]?/gi, '')
+                            .replace(/\[?SHURA_MOMENTS:[^\]]*\]?/gi, '')
                             .replace(/\[?CHECK_ACCOUNT(?::.*?)?\]?/gi, '')
                             .replace(/\(\(CHANGE_AVATAR\)\)/gi, '')
                             .replace(/\(\(COUPLE_AVATAR\)\)/gi, '')
@@ -22649,7 +26921,7 @@ ${checkResult.checkResult}
                             if (!freshChar.thoughts) freshChar.thoughts = [];
                             freshChar.thoughts.push({
                                 content: thought.trim(),
-                                time: Date.now(),
+                                time: _vNow(),
                                 messageIndex: freshChar.chat_history ? freshChar.chat_history.length : 0
                             });
                             // 只保留最近50条心声
@@ -22761,7 +27033,7 @@ ${checkResult.checkResult}
                                 const subParts = splitMessageWithImages(cleanMessage(seg));
                                 
                                 for (const part of subParts) {
-                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode));
+                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode, { time: _vNow() }));
                                     await setChatHistory(freshChar, accountId, history);
                                     if (currentChatCharId === targetCharId) {
                                         await appendMessageToUI('char', part);
@@ -22788,7 +27060,7 @@ ${checkResult.checkResult}
                                 const subParts = splitMessageWithImages(cleanMessage(seg));
                                 
                                 for (const part of subParts) {
-                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode));
+                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode, { time: _vNow() }));
                                     await setChatHistory(freshChar, accountId, history);
                                     if (currentChatCharId === targetCharId) {
                                         await appendMessageToUI('char', part);
@@ -22813,6 +27085,185 @@ ${checkResult.checkResult}
                         console.error('[TriggerAI] NPC加好友失败:', e);
                     }
                     replyText = replyText.replace(/\(\(NPC_ADD_FRIEND:\s*.+?\s*\)\)/gi, '').trim();
+                }
+                
+                // 🔧 预处理：提取并执行内联指令（POKE/OPEN_APP/SET_NICKNAME/SET_SIGNATURE/CALL/CHANGE_AVATAR等）
+                // 这些指令可能出现在 TRANSFER/MOMENTS/EMEI 等特殊指令之前/之间，
+                // 如果不预处理，textBefore 处理器会把它们当成普通文字发送到聊天中
+                {
+                    // 🔧 辅助函数：将系统消息写入聊天记录和UI
+                    const insertSystemMsg = async (text, type) => {
+                        try {
+                            const fc = await db.characters.get(targetCharId);
+                            if (fc) {
+                                let h = getChatHistory(fc, accountId);
+                                h.push({ role: 'system', content: text, time: _vNow(), type: type });
+                                await setChatHistory(fc, accountId, h);
+                                if (currentChatCharId === targetCharId) {
+                                    await appendMessageToUI('system', text);
+                                }
+                            }
+                        } catch (e) {
+                            console.error(`[TriggerAI] 预处理插入系统消息失败:`, e);
+                        }
+                    };
+                    
+                    // ((POKE: 动作, 部位))
+                    const pokeMatches = replyText.match(/\(\(POKE:\s*(.+?)\)\)/gi);
+                    if (pokeMatches) {
+                        for (const pm of pokeMatches) {
+                            const pokeDetail = pm.match(/\(\(POKE:\s*(.+?)\)\)/i);
+                            if (pokeDetail) {
+                                try {
+                                    const pokeContent = pokeDetail[1].trim();
+                                    let pokeAction, pokePart;
+                                    if (pokeContent.includes(',') || pokeContent.includes('，')) {
+                                        const parts = pokeContent.split(/[,，]/);
+                                        pokeAction = parts[0].trim();
+                                        pokePart = parts.slice(1).join('').trim();
+                                    } else {
+                                        const spaceIdx = pokeContent.indexOf(' ');
+                                        if (spaceIdx > 0) {
+                                            pokeAction = pokeContent.substring(0, spaceIdx).trim();
+                                            pokePart = pokeContent.substring(spaceIdx + 1).trim();
+                                        } else {
+                                            pokeAction = pokeContent;
+                                            pokePart = '';
+                                        }
+                                    }
+                                    const freshChar = await db.characters.get(targetCharId);
+                                    const myChar = accountId ? await db.characters.get(parseInt(accountId)) : null;
+                                    const pokeUserName = myChar ? (myChar.nick || myChar.name) : '用户';
+                                    const pokeText = pokePart ? `${freshChar.name}${pokeAction}${pokeUserName}的${pokePart}` : `${freshChar.name}${pokeAction}${pokeUserName}`;
+                                    console.log(`[TriggerAI] 预处理戳一戳: ${pokeText}`);
+                                    await insertSystemMsg(pokeText, 'poke');
+                                } catch (e) {
+                                    console.error('[TriggerAI] 预处理戳一戳失败:', e);
+                                }
+                            }
+                        }
+                        replyText = replyText.replace(/\(\(POKE:\s*(.+?)\)\)/gi, '').trim();
+                    }
+                    
+                    // ((OPEN_APP: APP名称))
+                    const appMatches = replyText.match(/\(\(OPEN_APP:\s*(.+?)\)\)/gi);
+                    if (appMatches) {
+                        for (const am of appMatches) {
+                            const appDetail = am.match(/\(\(OPEN_APP:\s*(.+?)\)\)/i);
+                            if (appDetail) {
+                                try {
+                                    const appName = appDetail[1].trim();
+                                    const freshChar = await db.characters.get(targetCharId);
+                                    const appText = `${freshChar.name} 打开了 "${appName}"`;
+                                    console.log(`[TriggerAI] 预处理打开APP: ${appText}`);
+                                    await insertSystemMsg(appText, 'open_app');
+                                } catch (e) {
+                                    console.error('[TriggerAI] 预处理打开APP失败:', e);
+                                }
+                            }
+                        }
+                        replyText = replyText.replace(/\(\(OPEN_APP:\s*(.+?)\)\)/gi, '').trim();
+                    }
+                    
+                    // ((SET_NICKNAME: 新网名))
+                    const nickMatchPre = replyText.match(/\(\(SET_NICKNAME:\s*(.+?)\)\)/i);
+                    if (nickMatchPre) {
+                        try {
+                            const newNickname = nickMatchPre[1].trim();
+                            const freshChar = await db.characters.get(targetCharId);
+                            const oldNickname = getCharWxNickname(freshChar, accountId) || freshChar.name;
+                            setCharWxNickname(freshChar, accountId, newNickname);
+                            await db.characters.put(freshChar);
+                            const nicknameText = `${oldNickname} 将网名改为 "${newNickname}"`;
+                            console.log(`[TriggerAI] 预处理改网名: ${nicknameText}`);
+                            await insertSystemMsg(nicknameText, 'set_nickname');
+                            // 更新UI上的名字
+                            if (currentChatCharId === targetCharId) {
+                                if (!freshChar.remark) {
+                                    const titleEl = document.getElementById('chat-title');
+                                    if (titleEl) titleEl.innerText = newNickname;
+                                }
+                                const nicknameEl = document.getElementById('detail-char-nickname');
+                                if (nicknameEl) nicknameEl.innerText = newNickname;
+                            }
+                        } catch (e) {
+                            console.error('[TriggerAI] 预处理改网名失败:', e);
+                        }
+                        replyText = replyText.replace(/\(\(SET_NICKNAME:\s*(.+?)\)\)/gi, '').trim();
+                    }
+                    
+                    // ((SET_SIGNATURE: 新签名))
+                    const sigMatchPre = replyText.match(/\(\(SET_SIGNATURE:\s*(.+?)\)\)/i);
+                    if (sigMatchPre) {
+                        try {
+                            const newSignature = sigMatchPre[1].trim();
+                            const freshChar = await db.characters.get(targetCharId);
+                            freshChar.wx_signature = newSignature;
+                            await db.characters.put(freshChar);
+                            const sigText = `${freshChar.wx_nickname || freshChar.name} 更新了个性签名: "${newSignature}"`;
+                            console.log(`[TriggerAI] 预处理改签名: ${sigText}`);
+                            await insertSystemMsg(sigText, 'set_signature');
+                            if (currentChatCharId === targetCharId) {
+                                const sigEl = document.getElementById('detail-char-signature');
+                                if (sigEl) sigEl.innerText = newSignature;
+                            }
+                        } catch (e) {
+                            console.error('[TriggerAI] 预处理改签名失败:', e);
+                        }
+                        replyText = replyText.replace(/\(\(SET_SIGNATURE:\s*(.+?)\)\)/gi, '').trim();
+                    }
+                    
+                    // ((CALL)) - 来电
+                    if (/\(\(CALL\)\)/i.test(replyText)) {
+                        console.log(`[TriggerAI] 预处理来电指令 ((CALL))`);
+                        try {
+                            if (!_incomingCallCharId) {
+                                await showIncomingCall(targetCharId, '');
+                            }
+                        } catch (e) {
+                            console.error('[TriggerAI] 预处理来电失败:', e);
+                        }
+                        replyText = replyText.replace(/\(\(CALL\)\)/gi, '').trim();
+                    }
+                    
+                    // ((CHANGE_AVATAR))
+                    if (/\(\(CHANGE_AVATAR\)\)/i.test(replyText)) {
+                        console.log(`[TriggerAI] 预处理换头像指令`);
+                        try {
+                            await executeChangeAvatar(targetCharId, accountId);
+                        } catch (e) {
+                            console.error('[TriggerAI] 预处理换头像失败:', e);
+                        }
+                        replyText = replyText.replace(/\(\(CHANGE_AVATAR\)\)/gi, '').trim();
+                    }
+                    
+                    // ((COUPLE_AVATAR))
+                    if (/\(\(COUPLE_AVATAR\)\)/i.test(replyText)) {
+                        console.log(`[TriggerAI] 预处理情头邀请指令`);
+                        try {
+                            await sendCoupleAvatarCard(targetCharId, accountId);
+                        } catch (e) {
+                            console.error('[TriggerAI] 预处理情头邀请失败:', e);
+                        }
+                        replyText = replyText.replace(/\(\(COUPLE_AVATAR\)\)/gi, '').trim();
+                    }
+                    
+                    // ((REVERT_COUPLE_AVATAR))
+                    if (/\(\(REVERT_COUPLE_AVATAR\)\)/i.test(replyText)) {
+                        console.log(`[TriggerAI] 预处理换回单人头像指令`);
+                        try {
+                            await executeRevertCoupleAvatar(targetCharId, accountId);
+                        } catch (e) {
+                            console.error('[TriggerAI] 预处理换回单人头像失败:', e);
+                        }
+                        replyText = replyText.replace(/\(\(REVERT_COUPLE_AVATAR\)\)/gi, '').trim();
+                    }
+                    
+                    // ((RECALL)) - 撤回：预处理移除，稍后在消息循环中不会遇到问题
+                    // 注意：RECALL 需要在消息发送后执行，所以保留在消息循环中处理
+                    
+                    // 清理预处理后可能产生的孤立 ||| 分隔符
+                    replyText = replyText.replace(/(\|\|\|)+/g, '|||').replace(/^\|\|\|/, '').replace(/\|\|\|$/, '').trim();
                 }
 
                 // ✅ 关键改动：在拆分前，先检测是否包含"指令型消息"（转账等）
@@ -22864,7 +27315,7 @@ ${checkResult.checkResult}
                                 const subParts = splitMessageWithImages(seg);
                                 
                                 for (const part of subParts) {
-                                    const textMsg = buildCharMessage(part, !!char.foreign_lang_mode, { time: Date.now() + msgIndex });
+                                    const textMsg = buildCharMessage(part, !!char.foreign_lang_mode, { time: _vNow() + msgIndex });
                                     history.push(textMsg);
                                     await setChatHistory(freshChar, accountId, history);
                                     
@@ -22894,8 +27345,8 @@ ${checkResult.checkResult}
                             role: 'char', 
                             type: 'transfer', // 明确标记为转账消息
                             content: JSON.stringify(transferData), 
-                            time: Date.now(),
-                            id: 'trans_' + Date.now()
+                            time: _vNow(),
+                            id: 'trans_' + _vNow()
                         };
                         
                         // 重新获取最新的历史记录（因为刚才可能插入了文字消息）
@@ -22957,7 +27408,7 @@ ${checkResult.checkResult}
                                 const subParts = splitMessageWithImages(seg);
                                 
                                 for (const part of subParts) {
-                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode, { time: Date.now() + msgIndex }));
+                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode, { time: _vNow() + msgIndex }));
                                     await setChatHistory(freshChar, accountId, history);
                                     if (currentChatCharId === targetCharId) {
                                         await appendMessageToUI('char', part, freshChar.avatar);
@@ -23007,7 +27458,7 @@ ${checkResult.checkResult}
                                 monthlyLimit: monthlyLimit,
                                 status: 'sent'
                             }),
-                            time: Date.now()
+                            time: _vNow()
                         };
                         
                         history = getChatHistory(freshChar, accountId);
@@ -23033,6 +27484,88 @@ ${checkResult.checkResult}
                     }
                 }
                 
+                // 🎯 检测购物送礼指令 ((SHOP_GIFT: 金额, 商品名))
+                const shopGiftMatch2 = replyText.match(/\(\(SHOP_GIFT:\s*(\d+(?:\.\d+)?)(?:,\s*(.+?))?\)\)/i);
+                if (shopGiftMatch2) {
+                    const giftAmount = parseFloat(shopGiftMatch2[1]);
+                    let giftProduct = shopGiftMatch2[2] || '购物礼物';
+                    if (giftProduct.length > 30) giftProduct = giftProduct.substring(0, 30);
+
+                    const textBefore = replyText.substring(0, shopGiftMatch2.index).trim();
+                    const textAfter = replyText.substring(shopGiftMatch2.index + shopGiftMatch2[0].length).trim();
+
+                    const freshChar = await db.characters.get(targetCharId);
+                    if (freshChar) {
+                        let history = getChatHistory(freshChar, accountId);
+
+                        // 1. 先发送前置文字
+                        if (textBefore) {
+                            let segs = [];
+                            const txt = textBefore.replace(/[,，]/g, ' ');
+                            if (txt.includes('|||')) {
+                                segs = txt.split('|||').map(s => s.trim()).filter(s => s.length > 0);
+                            } else {
+                                segs = splitMessage(txt);
+                            }
+                            segs = segs.filter(s => s.replace(/[.,，。!?！？~…|\s]/g, '').length >= 2);
+                            if (segs.length === 0 && textBefore.replace(/[.,，。!?！？~…|\s]/g, '').length > 0) segs = [textBefore];
+
+                            let msgIdx = 0;
+                            for (let i = 0; i < segs.length; i++) {
+                                const subParts = splitMessageWithImages(segs[i]);
+                                for (const part of subParts) {
+                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode, { time: _vNow() + msgIdx }));
+                                    await setChatHistory(freshChar, accountId, history);
+                                    if (currentChatCharId === targetCharId) {
+                                        await appendMessageToUI('char', part, freshChar.avatar);
+                                    }
+                                    await new Promise(r => setTimeout(r, 300));
+                                    msgIdx++;
+                                }
+                            }
+                            await new Promise(r => setTimeout(r, 500));
+                        }
+
+                        // 2. 发送购物礼物卡片
+                        const cardData = {
+                            amount: giftAmount.toFixed(2),
+                            items: giftProduct,
+                            buyForName: '',
+                            installmentInfo: '',
+                            isGift: true,
+                            status: 'paid'
+                        };
+                        const giftMsg = {
+                            role: 'char',
+                            type: 'shopPayRequest',
+                            content: JSON.stringify(cardData),
+                            time: _vNow()
+                        };
+
+                        history = getChatHistory(freshChar, accountId);
+                        history.push(giftMsg);
+                        await setChatHistory(freshChar, accountId, history);
+
+                        console.log(`[TriggerAI] 角色发送购物礼物: ${freshChar.name}`, { giftAmount, giftProduct });
+
+                        if (currentChatCharId === targetCharId) {
+                            if (window._appendShopCardToChat) {
+                                await window._appendShopCardToChat(freshChar.id, giftMsg);
+                            }
+                        } else {
+                            sendSystemNotification(freshChar.name, '[购物礼物]');
+                        }
+
+                        await new Promise(r => setTimeout(r, 500));
+                    }
+
+                    if (textAfter) {
+                        replyText = textAfter;
+                    } else {
+                        return;
+                    }
+                }
+
                 // 🎯 检测外卖卡片指令 ((EMEI_ORDER: 店铺, 商品, 金额)) / ((EMEI_PAY: ...)) / ((EMEI_SHARE: ...))
                 // 🔧 容错预处理：修复常见的格式错误（缺少逗号分隔符）
                 replyText = replyText.replace(/\(\(EMEI_(ORDER|PAY|SHARE):\s*(.+?)\)\)/gi, (fullMatch, type, content) => {
@@ -23094,7 +27627,7 @@ ${checkResult.checkResult}
                                 const subParts = splitMessageWithImages(seg);
                                 
                                 for (const part of subParts) {
-                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode, { time: Date.now() + msgIndex }));
+                                    history.push(buildCharMessage(part, !!char.foreign_lang_mode, { time: _vNow() + msgIndex }));
                                     await setChatHistory(freshChar, accountId, history);
                                     if (currentChatCharId === targetCharId) {
                                         await appendMessageToUI('char', part, freshChar.avatar);
@@ -23157,7 +27690,7 @@ ${checkResult.checkResult}
                         const emeiCardMsg = {
                             role: 'char',
                             content: `[${emeiTag}]${emeiCardHtml}`,
-                            time: Date.now()
+                            time: _vNow()
                         };
                         history = getChatHistory(freshChar, accountId);
                         history.push(emeiCardMsg);
@@ -23273,7 +27806,7 @@ ${checkResult.checkResult}
                                 const subParts = splitMessageWithImages(msgSegments[i]);
                                 
                                 for (const part of subParts) {
-                                    const textMsg = buildCharMessage(part, !!char.foreign_lang_mode, { time: Date.now() + msgIndex });
+                                    const textMsg = buildCharMessage(part, !!char.foreign_lang_mode, { time: _vNow() + msgIndex });
                                     history.push(textMsg);
                                     await setChatHistory(freshChar, accountId, history);
                                     
@@ -23323,6 +27856,13 @@ ${checkResult.checkResult}
                     showToast(`角色说发了朋友圈，但格式不对，未实际发布`);
                 }
                 
+                // 🎯 检测"幻觉"：AI说发了红包/转账但没有指令
+                const hasTransferClaim = /发.*?红包|红包.*?发|给你.*?转|转.*?给你|发个红包|发了.*?红包|红包.*?收|收.*?红包/i.test(replyText);
+                if (hasTransferClaim) {
+                    console.warn(`[TriggerAI] ⚠️ AI幻觉检测：角色说发了红包/转账，但没有返回正确的 ((TRANSFER: 金额, 备注)) 格式！`);
+                    showToast(`角色说发了红包，但格式不对，未实际发送`);
+                }
+                
                 // 兜底：检测是否是转账 JSON（兼容旧格式）
                 let trimmedReply = replyText.trim();
                 if (trimmedReply.startsWith('{') && trimmedReply.includes('"amount"')) {
@@ -23337,8 +27877,8 @@ ${checkResult.checkResult}
                                     role: 'char', 
                                     type: 'transfer',
                                     content: trimmedReply, 
-                                    time: Date.now(),
-                                    id: 'trans_' + Date.now()
+                                    time: _vNow(),
+                                    id: 'trans_' + _vNow()
                                 };
                                 
                                 history.push(newMsg);
@@ -23358,8 +27898,8 @@ ${checkResult.checkResult}
                 }
                 
                 // 4. 普通消息：强制清洗逗号 + 拆分
-                // 🔧 修复不完整的表情包标签（缺少右括号）
-                replyText = replyText.replace(/\[sticker:(\d+)(?![\]])/g, '[sticker:$1]');
+                // 🔧 修复不完整的表情包标签（统一格式，补全缺少的右括号）
+                replyText = replyText.replace(/\[sticker:(\d+)\]?/g, '[sticker:$1]');
                 console.log('[TriggerAI] 🔧 修复不完整的表情包标签后:', replyText);
                 
                 // ✅ 清洗逗号，但保护翻译括号内的内容
@@ -23471,6 +28011,20 @@ ${checkResult.checkResult}
                 if (segments.length === 0 && cleanText.trim()) {
                     segments.push(cleanMessage(cleanText.trim()));
                 }
+                
+                // 🔧 安全保护：如果消息条数远超设定的最大值，合并多余的消息
+                const maxCount = char.reply_max_count || 3;
+                const hardLimit = Math.max(maxCount + 2, 5); // 允许一定弹性，但不能太离谱
+                if (segments.length > hardLimit) {
+                    console.warn(`[TriggerAI] ⚠️ AI输出了${segments.length}条消息，超过上限${hardLimit}，合并多余消息`);
+                    // 保留前 maxCount 条，把剩余的合并到最后一条
+                    const kept = segments.slice(0, maxCount - 1);
+                    const merged = segments.slice(maxCount - 1).join(' ');
+                    kept.push(merged);
+                    segments = kept;
+                    console.log(`[TriggerAI] ✅ 合并后剩余${segments.length}条消息`);
+                }
+                
 
                 for (let i = 0; i < segments.length; i++) {
                     let seg = segments[i];
@@ -23568,7 +28122,7 @@ ${checkResult.checkResult}
                             const pokeText = pokePart ? `${freshChar.name}${pokeAction}${userName}的${pokePart}` : `${freshChar.name}${pokeAction}${userName}`;
                             
                             let history = getChatHistory(freshChar, accountId);
-                            history.push({ role: 'system', content: pokeText, time: Date.now(), type: 'poke' });
+                            history.push({ role: 'system', content: pokeText, time: _vNow(), type: 'poke' });
                             await setChatHistory(freshChar, accountId, history);
                             
                             if (currentChatCharId === targetCharId) {
@@ -23592,7 +28146,7 @@ ${checkResult.checkResult}
                             const appText = `${freshChar.name} 打开了 "${appName}"`;
                             
                             let history = getChatHistory(freshChar, accountId);
-                            history.push({ role: 'system', content: appText, time: Date.now(), type: 'open_app' });
+                            history.push({ role: 'system', content: appText, time: _vNow(), type: 'open_app' });
                             await setChatHistory(freshChar, accountId, history);
                             
                             if (currentChatCharId === targetCharId) {
@@ -23619,7 +28173,7 @@ ${checkResult.checkResult}
                             
                             const nicknameText = `${oldNickname} 将网名改为 "${newNickname}"`;
                             let history = getChatHistory(freshChar, accountId);
-                            history.push({ role: 'system', content: nicknameText, time: Date.now(), type: 'set_nickname' });
+                            history.push({ role: 'system', content: nicknameText, time: _vNow(), type: 'set_nickname' });
                             await setChatHistory(freshChar, accountId, history);
                             
                             if (currentChatCharId === targetCharId) {
@@ -23650,7 +28204,7 @@ ${checkResult.checkResult}
                             
                             const sigText = `${freshChar.wx_nickname || freshChar.name} 更新了个性签名: "${newSignature}"`;
                             let history = getChatHistory(freshChar, accountId);
-                            history.push({ role: 'system', content: sigText, time: Date.now(), type: 'set_signature' });
+                            history.push({ role: 'system', content: sigText, time: _vNow(), type: 'set_signature' });
                             await setChatHistory(freshChar, accountId, history);
                             
                             if (currentChatCharId === targetCharId) {
@@ -23849,35 +28403,121 @@ ${checkResult.checkResult}
                         }
                     }
                     
-                    // 延时：第一条直接发(前面loading已经是等待了)，后续模拟打字
-                    if (i > 0) {
-                        // 基础 500ms + 每字 80ms
-                        const delay = 500 + Math.min(seg.length * 80, 3000);
-                        await new Promise(r => setTimeout(r, delay));
-                    }
-
-                    // 始终存入 DB
-                    const freshChar = await db.characters.get(targetCharId);
-                    if (freshChar) {
-                        let history = getChatHistory(freshChar, accountId);
+                    // 🔧 修复：拆分包含图片的消息（确保表情包/图片单独显示）
+                    // 如果seg中混合了文字和[img:]，需要拆分成多个子消息
+                    const subParts = splitMessageWithImages(seg);
+                    
+                    for (let subIdx = 0; subIdx < subParts.length; subIdx++) {
+                        const part = subParts[subIdx];
+                        if (!part || !part.trim()) continue;
                         
-                        // ✅ 使用 buildCharMessage 一次性解析翻译，存储结构化数据
-                        const newMsg = buildCharMessage(seg, !!char.foreign_lang_mode);
-                        
-                        history.push(newMsg);
-                        await setChatHistory(freshChar, accountId, history);
-                        
-                        // 只有在当前窗口匹配时才渲染 UI
-                        if (currentChatCharId === targetCharId) {
-                            console.log(`[AiReply] User is viewing ${freshChar.name}'s chat, appending to UI`);
-                            showDebugToast(`AI回复: 正在查看${freshChar.name}，显示在UI`);
-                            appendMessageToUI('char', seg, freshChar.avatar);
-                        } else {
-                            // 不在当前窗口时，发送系统通知
-                            console.log(`[AiReply] User is NOT viewing ${freshChar.name}'s chat (current: ${currentChatCharId}), sending notification`);
-                            showDebugToast(`AI回复: 不在${freshChar.name}聊天中(当前:${currentChatCharId})，发送通知`);
-                            sendSystemNotification(freshChar.name, seg);
+                        // 延时：第一条直接发(前面loading已经是等待了)，后续模拟打字
+                        if (i > 0 || subIdx > 0) {
+                            const delay = 500 + Math.min(part.length * 80, 3000);
+                            await new Promise(r => setTimeout(r, delay));
                         }
+
+                        // 始终存入 DB
+                        const freshChar = await db.characters.get(targetCharId);
+                        if (freshChar) {
+                            let history = getChatHistory(freshChar, accountId);
+                            
+                            // ✅ 使用 buildCharMessage 一次性解析翻译，存储结构化数据
+                            // 🔥 修复：第一条消息时传入 thought（心声）
+                            const extraFields = { time: _vNow() };
+                            if (thought && i === 0 && subIdx === 0) {
+                                extraFields.thought = thought;
+                                // 🔥 同时将 thought 保存到 char.thoughts 数组中（用于显示心声）
+                                if (!freshChar.thoughts) freshChar.thoughts = [];
+                                freshChar.thoughts.push({
+                                    content: thought,
+                                    time: _vNow()
+                                });
+                                await db.characters.put(freshChar);
+                            }
+                            const newMsg = buildCharMessage(part, !!char.foreign_lang_mode, extraFields);
+                            
+                            history.push(newMsg);
+                            await setChatHistory(freshChar, accountId, history);
+                            
+                            // 只有在当前窗口匹配时才渲染 UI
+                            if (currentChatCharId === targetCharId) {
+                                console.log(`[AiReply] User is viewing ${freshChar.name}'s chat, appending to UI`);
+                                showDebugToast(`AI回复: 正在查看${freshChar.name}，显示在UI`);
+                                appendMessageToUI('char', part, freshChar.avatar);
+                            } else {
+                                // 不在当前窗口时，发送系统通知
+                                console.log(`[AiReply] User is NOT viewing ${freshChar.name}'s chat (current: ${currentChatCharId}), sending notification`);
+                                showDebugToast(`AI回复: 不在${freshChar.name}聊天中(当前:${currentChatCharId})，发送通知`);
+                                sendSystemNotification(freshChar.name, part);
+                            }
+                        }
+                    }
+                }
+                
+                // ✅ AI回复完成后，检测 imgcard 并调用 NovelAI 自动生图
+                try {
+                    await processImgCardsWithNovelAI(targetCharId, accountId);
+                } catch (naiError) {
+                    console.error('[NovelAI-AutoGen] 处理 imgcard 失败:', naiError);
+                }
+                
+                // ★ AI回复成功后，标记查手机活动为已通知（从DB加载最新数据再标记，避免覆盖）
+                if (_fpHasPhoneActivity) {
+                    try {
+                        const freshCharForFp = await db.characters.get(targetCharId);
+                        if (freshCharForFp) {
+                            let markedCount = 0;
+                            // 标记fp_npc_消息
+                            if (freshCharForFp.chat_history_by_user) {
+                                for (const key of Object.keys(freshCharForFp.chat_history_by_user)) {
+                                    if (!key.startsWith('fp_npc_')) continue;
+                                    const npcHistory = freshCharForFp.chat_history_by_user[key] || [];
+                                    for (const m of npcHistory) {
+                                        if ((m.fpSent || (!m.fpSent && m.role === 'user')) && !m.fpNotified) {
+                                            m.fpNotified = true;
+                                            markedCount++;
+                                        }
+                                    }
+                                }
+                            }
+                            // 标记朋友圈
+                            if (freshCharForFp.fp_moments_by_user) {
+                                for (const mKey of Object.keys(freshCharForFp.fp_moments_by_user)) {
+                                    const momentsList = freshCharForFp.fp_moments_by_user[mKey] || [];
+                                    for (const m of momentsList) {
+                                        if (m.fpSent && !m.fpNotified) {
+                                            m.fpNotified = true;
+                                            markedCount++;
+                                        }
+                                    }
+                                }
+                            }
+                            await db.characters.put(freshCharForFp);
+                            console.log('[triggerAiReply] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
+                        }
+                        
+                        // ★ 将查手机事件写入长期记忆，确保角色永久记住此事
+                        try {
+                            const fpMemoryContent = `${userName}偷偷拿了${char.name}的手机，做了以下事情：${_fpNpcLinesForMemory.map(l => l.trim().replace(/^[→←]\s*/, '')).join('；')}。${char.name}已经发现并做出了反应。`;
+                            await db.chat_summaries.add({
+                                accountId: accountId,
+                                chatType: 'private',
+                                chatId: String(targetCharId),
+                                time: Date.now(),
+                                content: fpMemoryContent,
+                                messageCount: 0,
+                                timeRange: '',
+                                keywords: ['查手机', '冒充', '手机被动'],
+                                startTime: Date.now(),
+                                endTime: Date.now()
+                            });
+                            console.log('[triggerAiReply] ✅ 查手机事件已写入长期记忆');
+                        } catch (memErr) {
+                            console.warn('[triggerAiReply] 写入查手机长期记忆失败:', memErr);
+                        }
+                    } catch (fpErr) {
+                        console.warn('[triggerAiReply] 标记fpNotified失败:', fpErr);
                     }
                 }
                 
@@ -23942,6 +28582,16 @@ ${checkResult.checkResult}
                 return;
             }
             
+            // 🔥 修复：扩展endIndex到包含最后一条char消息之后的所有非user消息
+            // 这些system消息（戳一戳、改网名等）是同一次AI回复中产生的，也应一并删除
+            let actualEndIndex = lastAiMessageEndIndex;
+            for (let i = lastAiMessageEndIndex + 1; i < history.length; i++) {
+                if (history[i].role === 'user') {
+                    break;
+                }
+                actualEndIndex = i;
+            }
+            
             // 从最后一条AI消息往前找，找到连续的所有AI消息
             lastAiMessageStartIndex = lastAiMessageEndIndex;
             for (let i = lastAiMessageEndIndex - 1; i >= 0; i--) {
@@ -23949,12 +28599,12 @@ ${checkResult.checkResult}
                     // 遇到用户消息，停止
                     break;
                 }
-                // 还是AI的消息，继续往前
+                // 还是AI的消息（包含system消息如戳一戳等），继续往前
                 lastAiMessageStartIndex = i;
             }
             
-            // 删除所有连续的AI消息（不删除用户消息）
-            const deleteCount = lastAiMessageEndIndex - lastAiMessageStartIndex + 1;
+            // 删除所有连续的AI消息和关联的system消息（不删除用户消息）
+            const deleteCount = actualEndIndex - lastAiMessageStartIndex + 1;
             history.splice(lastAiMessageStartIndex, deleteCount);
             await setChatHistory(char, accountId, history);
             await db.characters.put(char);
@@ -24000,6 +28650,25 @@ ${checkResult.checkResult}
                 return;
             }
             
+            // 🔥 修复：扩展endIndex到包含最后一条char消息之后的关联非user消息
+            let actualGroupEndIndex = lastAiMessageEndIndex;
+            for (let i = lastAiMessageEndIndex + 1; i < history.length; i++) {
+                if (history[i].role === 'user') {
+                    break;
+                }
+                // 只包含与AI回复关联的系统消息（红包领取、改昵称等）
+                if (history[i].role === 'system') {
+                    const content = history[i].content || '';
+                    if (content.includes('领取了红包') || content.includes('将自己的群昵称改为')) {
+                        actualGroupEndIndex = i;
+                        continue;
+                    }
+                }
+                if (history[i].role === 'char') {
+                    actualGroupEndIndex = i;
+                }
+            }
+            
             // 从最后一条AI消息往前找，找到连续的所有AI消息（不包括系统消息）
             lastAiMessageStartIndex = lastAiMessageEndIndex;
             for (let i = lastAiMessageEndIndex - 1; i >= 0; i--) {
@@ -24021,7 +28690,7 @@ ${checkResult.checkResult}
             }
             
             // 删除所有连续的AI消息和相关系统消息
-            const deleteCount = lastAiMessageEndIndex - lastAiMessageStartIndex + 1;
+            const deleteCount = actualGroupEndIndex - lastAiMessageStartIndex + 1;
             history.splice(lastAiMessageStartIndex, deleteCount);
             
             group.chat_history = history;
@@ -24677,7 +29346,7 @@ ${loreContext}
             editingCharId = null;
         }
 
-        function setCharAvatar(input) {
+        function handleCharAvatarInput(input) {
             const file = input.files[0];
             if (file) {
                 const reader = new FileReader();
@@ -25154,17 +29823,31 @@ ${loreContext}
             
             // 纯前端：直接调用 AI API（需要配置支持 CORS 的 API 端点）
             try {
+                // 🔥 构建请求体，支持 response_format 强制 JSON 输出
+                const fetchBody = {
+                    model: modelValue,
+                    messages: cleanMessages,
+                    temperature: temperature
+                };
+                
+                // 如果调用方要求 JSON 输出，添加 response_format 参数
+                if (options.json_mode) {
+                    fetchBody.response_format = { type: "json_object" };
+                    console.log('[callAI] 📋 已启用 JSON 模式 (response_format: json_object)');
+                }
+                
+                // 如果有 max_tokens 参数
+                if (maxTokens) {
+                    fetchBody.max_tokens = maxTokens;
+                }
+                
                 const res = await fetch(requestUrl, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': `Bearer ${apiKeyValue}`
                     },
-                    body: JSON.stringify({
-                        model: modelValue,
-                        messages: cleanMessages,
-                        temperature: temperature
-                    })
+                    body: JSON.stringify(fetchBody)
                 });
 
                 if (!res.ok) {
@@ -26478,6 +31161,15 @@ function showLorebookPage() {
             applyDesktopTextColor(dataMap.desktopTextColor);
             const dtcInput = document.getElementById('desktop-text-color-input');
             if (dtcInput) dtcInput.value = dataMap.desktopTextColor;
+        }
+        
+        // 恢复全局字体大小
+        if (dataMap.globalFontSize && dataMap.globalFontSize !== '') {
+            const slider = document.getElementById('global-font-size-slider');
+            const label = document.getElementById('global-font-size-value');
+            if (slider) slider.value = dataMap.globalFontSize;
+            if (label) label.textContent = dataMap.globalFontSize + 'px';
+            applyGlobalFontSize(dataMap.globalFontSize);
         }
         
         // 恢复自定义字体
@@ -29510,6 +34202,11 @@ async function renderMomentsList() {
                                 <svg viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
                                 <span>评论</span>
                             </div>
+                            <div class="moment-menu-divider"></div>
+                            <div class="moment-menu-item" onclick="deleteMoment(${m.id})" style="color:#ff3b30;">
+                                <svg viewBox="0 0 24 24" style="fill:#ff3b30;"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14" fill="none" stroke="#ff3b30" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                                <span>删除</span>
+                            </div>
                         </div>
                         <div class="moment-action-btn" onclick="toggleMomentMenu(${m.id}, event)">
                             <div class="moment-action-dot"></div>
@@ -29585,7 +34282,13 @@ function showMomentsPublish() {
 }
 
 function hideMomentsPublish() {
-    document.getElementById('moments-publish-page').style.display = 'none';
+    const pubPage = document.getElementById('moments-publish-page');
+    pubPage.style.display = 'none';
+    // 如果是FP模式，恢复z-index
+    if (window._fpMomentMode) {
+        pubPage.style.zIndex = '';
+        window._fpMomentMode = false;
+    }
 }
 
 // 权限选择相关
@@ -29754,6 +34457,12 @@ function removePubImage(el, base64) {
 }
 
 async function doPublishMoment() {
+    // ★ 判断是否是查手机FP模式（以角色身份发朋友圈）
+    if (window._fpMomentMode) {
+        await doPublishFpMoment();
+        return;
+    }
+
     if (!currentMyCharId) {
         alert("请先设置 User 身份");
         return;
@@ -29790,6 +34499,61 @@ async function doPublishMoment() {
     setTimeout(() => {
         generateFriendInteractions(momentId, currentMomentPrivacy, selectedPrivacyFriends.slice());
     }, 2000);
+}
+
+// ★ 查手机FP模式 - 以角色身份发朋友圈（复用原版发布页面）
+async function doPublishFpMoment() {
+    const text = document.getElementById('moments-pub-text').value.trim();
+    const images = window.tempPubImages || [];
+
+    if (!text && images.length === 0) {
+        alert("写点什么吧...");
+        return;
+    }
+
+    const roleId = window._fpWechatRoleId;
+    const accountId = findPhoneTargetAccountId;
+    if (!roleId || !accountId) {
+        showToast('发布失败：缺少信息');
+        return;
+    }
+
+    const roleChar = await db.characters.get(parseInt(roleId));
+    if (!roleChar) {
+        showToast('发布失败：角色不存在');
+        return;
+    }
+
+    // 构建朋友圈数据（和原版格式一致，含图片）
+    const newMoment = {
+        id: Date.now(),
+        userId: parseInt(roleId),
+        content: text,
+        images: images,
+        time: Date.now(),
+        likes: [],
+        comments: [],
+        fpSent: true // 内部标记：这是用户通过查手机发的
+    };
+
+    // 保存到角色的朋友圈数据
+    if (!roleChar.fp_moments_by_user) roleChar.fp_moments_by_user = {};
+    if (!roleChar.fp_moments_by_user[accountId]) roleChar.fp_moments_by_user[accountId] = [];
+    roleChar.fp_moments_by_user[accountId].push(newMoment);
+    await db.characters.put(roleChar);
+
+    console.log('[FP朋友圈] ✅ 以角色身份发布朋友圈:', text);
+
+    // 关闭编辑页，刷新朋友圈列表
+    hideMomentsPublish();
+    renderFpMomentsList();
+
+    showToast('发布成功');
+
+    // ★ 自动调用AI让NPC好友来评论和点赞
+    setTimeout(() => {
+        triggerFpMomentNpcInteractions(roleChar.id, accountId, newMoment.id);
+    }, 1500);
 }
 
 // ✅ 生成好友自动点赞评论（调用AI）
@@ -30332,25 +35096,21 @@ async function triggerMutualFriendComments(momentId) {
         const relationships = ownerChar.relationships || [];
         if (relationships.length === 0) return;
         
-        // 找到同时也是用户好友的NPC（共同好友）
+        // 找到发布者的所有关联NPC（不再限制必须是共同好友）
         const allChars = await db.characters.toArray();
-        const mutualFriends = [];
+        const relatedNPCs = [];
         
         for (const rel of relationships) {
             if (!rel.targetId) continue;
             const npc = allChars.find(c => c.id === rel.targetId);
             if (!npc) continue;
             
-            // 检查这个NPC是否也是用户的好友
-            const friendStatus = getFriendStatus(npc, accountId);
-            if (friendStatus === 'friend') {
-                mutualFriends.push({ npc, relation: rel.relation, desc: rel.desc || '' });
-            }
+            relatedNPCs.push({ npc, relation: rel.relation, desc: rel.desc || '' });
         }
         
-        if (mutualFriends.length === 0) return;
+        if (relatedNPCs.length === 0) return;
         
-        console.log(`[朋友圈NPC] 发现 ${mutualFriends.length} 个共同好友可以评论 ${ownerChar.name} 的朋友圈`);
+        console.log(`[朋友圈NPC] 发现 ${relatedNPCs.length} 个关联NPC可以评论 ${ownerChar.name} 的朋友圈`);
         
         // 标记已触发NPC评论
         const markMoment = await db.moments.get(momentId);
@@ -30360,72 +35120,98 @@ async function triggerMutualFriendComments(momentId) {
         }
         
         // 随机选取1-3个NPC来评论（不是所有人都会评论）
-        const shuffled = mutualFriends.sort(() => Math.random() - 0.5);
+        const shuffled = relatedNPCs.sort(() => Math.random() - 0.5);
         const commentCount = Math.min(shuffled.length, 1 + Math.floor(Math.random() * 3));
         const selectedNPCs = shuffled.slice(0, commentCount);
         
-        // 每个NPC依次评论，间隔3-8秒
-        for (let i = 0; i < selectedNPCs.length; i++) {
-            const { npc, relation } = selectedNPCs[i];
+        // 🔥 一次API调用批量生成所有NPC评论（不再逐个单独调用）
+        try {
+            const freshMoment = await db.moments.get(momentId);
+            if (!freshMoment) return;
             
-            // 延迟：第一个3-6秒，后续再加3-6秒
-            const delay = (3000 + Math.random() * 3000) * (i + 1);
+            // 构建所有选中NPC的信息
+            const npcInfos = selectedNPCs.map(({ npc, relation }) => {
+                const displayName = npc.remark || npc.wx_nickname || npc.name;
+                return `- ${displayName}（和${ownerChar.name}的关系：${relation}）：${npc.description || npc.personality || '普通朋友'}`;
+            }).join('\n');
             
-            setTimeout(async () => {
-                try {
-                    const freshMoment = await db.moments.get(momentId);
-                    if (!freshMoment) return;
-                    
-                    // 已有评论上下文
-                    const existingComments = (freshMoment.comments || []).map(c => {
-                        const replyPart = c.replyTo ? ` 回复 ${c.replyTo}` : '';
-                        return `${c.name}${replyPart}：${c.content}`;
-                    }).join('\n');
-                    
-                    const promptText = `你是 ${npc.name}，你和 ${ownerChar.name} 的关系是：${relation}。
-${ownerChar.name} 发了一条朋友圈："${freshMoment.content}"
+            const batchPrompt = `${ownerChar.name} 发了一条朋友圈："${freshMoment.content}"
+${freshMoment.imageCount > 0 || (freshMoment.images && freshMoment.images.length > 0) ? `（附带${freshMoment.imageCount || freshMoment.images.length}张图片${freshMoment.imageDesc ? '：' + freshMoment.imageDesc : ''}）` : ''}
 
-${existingComments ? `已有评论：\n${existingComments}\n` : ''}
-请以 ${npc.name} 的身份评论这条朋友圈。要求：
-- 简短自然（2-25字）
-- 符合你和 ${ownerChar.name} 的关系（${relation}）
-- 可以用表情、语气词、调侃、夸赞、吐槽等
-- 像真人在朋友圈下评论一样随意
-- 不需要每次都很正经，偶尔可以皮一下
+以下是 ${ownerChar.name} 的好友，请为每个人生成一条符合其性格和关系的朋友圈评论：
+${npcInfos}
 
-你的人设：${npc.description || npc.personality || ''}
+要求：
+1. 每条评论简短自然（2-25字）
+2. 可以用表情、语气词、调侃、夸赞、吐槽等
+3. 符合每个角色和${ownerChar.name}的关系
+4. 像真人在朋友圈下评论一样随意
+5. 鼓励好友之间互相回复（使用 replyTo 字段指定回复的人名）
 
-只返回评论内容，不要JSON，不要引号。`;
-                    
-                    const result = await callAI([
-                        { role: 'system', content: '你是一个社交媒体评论角色扮演助手，直接返回评论内容，不要任何格式标记。' },
-                        { role: 'user', content: promptText }
-                    ]);
-                    
-                    const commentContent = result.trim().replace(/^["'"""]+|["'"""]+$/g, '');
-                    if (commentContent) {
-                        const latestMoment = await db.moments.get(momentId);
-                        if (latestMoment) {
-                            if (!latestMoment.comments) latestMoment.comments = [];
-                            latestMoment.comments.push({
-                                userId: npc.id,
-                                name: npc.remark || npc.wx_nickname || npc.name,
-                                content: commentContent,
-                                time: Date.now()
-                            });
-                            await db.moments.put(latestMoment);
-                            renderMomentsList();
-                            console.log(`[朋友圈NPC] ${npc.name}(${relation}) 评论了 ${ownerChar.name} 的朋友圈: ${commentContent}`);
-                        }
-                    }
-                } catch (err) {
-                    console.error(`[朋友圈NPC] ${npc.name} 评论生成失败:`, err);
+请返回JSON数组格式：
+[{"name": "角色名", "content": "评论内容"}, {"name": "角色名", "replyTo": "被回复的角色名", "content": "回复内容"}, ...]`;
+
+            const result = await callAI([
+                { role: 'system', content: '你是一个社交媒体评论生成助手，只返回JSON数组，不要任何其他文字。' },
+                { role: 'user', content: batchPrompt }
+            ], { json_mode: true });
+            
+            // 解析结果
+            let aiComments = [];
+            try {
+                let cleanResult = result.trim();
+                if (cleanResult.startsWith('```')) {
+                    cleanResult = cleanResult.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
                 }
-            }, delay);
+                // 尝试提取JSON数组
+                const parsed = extractAndParseJSON(cleanResult);
+                if (Array.isArray(parsed)) {
+                    aiComments = parsed;
+                } else if (parsed && Array.isArray(parsed.comments)) {
+                    aiComments = parsed.comments;
+                } else {
+                    aiComments = JSON.parse(cleanResult);
+                }
+            } catch (e) {
+                console.warn('[朋友圈NPC] AI评论批量解析失败:', e);
+            }
+            
+            // 延迟逐条写入评论（模拟真实场景）
+            const latestMoment = await db.moments.get(momentId);
+            if (latestMoment && aiComments.length > 0) {
+                if (!latestMoment.comments) latestMoment.comments = [];
+                
+                for (const aiComment of aiComments) {
+                    // 匹配NPC
+                    const matched = selectedNPCs.find(({ npc }) => {
+                        const displayName = npc.remark || npc.wx_nickname || npc.name;
+                        return displayName === aiComment.name || npc.name === aiComment.name;
+                    });
+                    if (matched && aiComment.content) {
+                        const commentObj = {
+                            userId: matched.npc.id,
+                            name: matched.npc.remark || matched.npc.wx_nickname || matched.npc.name,
+                            content: aiComment.content.trim().replace(/^["'"""]+|["'"""]+$/g, ''),
+                            time: Date.now() + Math.random() * 60000
+                        };
+                        if (aiComment.replyTo) {
+                            commentObj.replyTo = aiComment.replyTo;
+                        }
+                        latestMoment.comments.push(commentObj);
+                        console.log(`[朋友圈NPC] ${matched.npc.name}(${matched.relation}) 评论了 ${ownerChar.name} 的朋友圈: ${aiComment.content}`);
+                    }
+                }
+                
+                await db.moments.put(latestMoment);
+                renderMomentsList();
+                console.log(`[朋友圈NPC] ✅ 批量生成完成: ${aiComments.length}条评论`);
+            }
+        } catch (err) {
+            console.error('[朋友圈NPC] 批量评论生成失败:', err);
         }
         
         // 部分NPC也可能点赞（随机50%概率）
-        for (const { npc } of mutualFriends) {
+        for (const { npc } of relatedNPCs) {
             if (Math.random() < 0.5) {
                 const likeDelay = 1000 + Math.random() * 5000;
                 setTimeout(async () => {
@@ -30447,7 +35233,7 @@ ${existingComments ? `已有评论：\n${existingComments}\n` : ''}
             }
         }
     } catch (err) {
-        console.error('[朋友圈NPC] 共同好友评论触发失败:', err);
+        console.error('[朋友圈NPC] NPC评论触发失败:', err);
     }
 }
 
@@ -31785,6 +36571,30 @@ async function showTransferPage() {
         return;
     }
     
+    // ★ fp模式：用联系人信息显示转账目标
+    if (window._fpChatMode) {
+        if (!window._fpContactCharId) { showToast("请先进入聊天"); return; }
+        const contactChar = await db.characters.get(window._fpContactCharId);
+        if (!contactChar) { showToast("联系人不存在"); return; }
+        
+        const fpAccountId = window._fpAccountId;
+        const contactName = window._fpContactName || contactChar.name;
+        const contactAvatar = window._fpContactAvatar || getCharAvatar(contactChar, fpAccountId) || contactChar.avatar || '';
+        
+        document.getElementById('t-target-name').innerText = contactName;
+        document.getElementById('t-target-avatar').style.backgroundImage = contactAvatar ? 'url(' + contactAvatar + ')' : '';
+        
+        // 重置输入
+        document.getElementById('t-amount-input').value = '';
+        document.getElementById('t-note-input').value = '';
+        document.getElementById('btn-do-transfer').disabled = true;
+        
+        const page = document.getElementById('transfer-page');
+        page.style.zIndex = '400'; // 高于 fp 模式的 chat-window(350)
+        page.style.display = 'flex';
+        return;
+    }
+    
     if (!currentChatCharId) {
         showToast("请先进入聊天");
         return;
@@ -31803,11 +36613,14 @@ async function showTransferPage() {
     document.getElementById('btn-do-transfer').disabled = true;
     
     const page = document.getElementById('transfer-page');
+    page.style.zIndex = ''; // 正常模式恢复默认
     page.style.display = 'flex';
 }
 
 function hideTransferPage() {
-    document.getElementById('transfer-page').style.display = 'none';
+    const page = document.getElementById('transfer-page');
+    page.style.display = 'none';
+    page.style.zIndex = ''; // 恢复默认z-index
 }
 
 /* =================
@@ -32366,6 +37179,30 @@ async function sendLocationMessage() {
         return;
     }
     
+    // ★ fp模式：以角色身份发送位置
+    if (window._fpChatMode) {
+        if (!window._fpRoleCharId) return;
+        const roleChar = await db.characters.get(window._fpRoleCharId);
+        if (!roleChar) return;
+        const fpAccountId = window._fpAccountId;
+        let history = getChatHistory(roleChar, fpAccountId);
+        history.push({
+            id: 'loc_' + Date.now(),
+            role: 'char',
+            type: 'location',
+            content: JSON.stringify({ name: nameVal, address: addressVal || '暂无详细地址' }),
+            time: Date.now(),
+            fpSent: true
+        });
+        await setChatHistory(roleChar, fpAccountId, history);
+        renderChatBody(roleChar, true);
+        hideLocationModal();
+        showToast("位置已发送");
+        document.getElementById('action-panel').style.display = 'none';
+        document.getElementById('chat-panel-container').classList.remove('open');
+        return;
+    }
+    
     if (!currentChatCharId) {
         showToast("请先进入聊天");
         return;
@@ -32495,6 +37332,36 @@ async function doTransfer() {
     const noteVal = document.getElementById('t-note-input').value || '转账给对方';
     
     if (isNaN(amountVal) || amountVal <= 0) return;
+    
+    // ★ fp模式：以角色身份转账（不扣用户余额，直接保存消息）
+    if (window._fpChatMode) {
+        if (!window._fpRoleCharId) return;
+        const roleChar = await db.characters.get(window._fpRoleCharId);
+        if (!roleChar) { showToast("角色不存在"); return; }
+        const fpAccountId = window._fpAccountId;
+        let history = getChatHistory(roleChar, fpAccountId);
+        const msgId = 'trans_' + Date.now();
+        const msg = {
+            id: msgId,
+            role: 'char',
+            type: 'transfer',
+            content: JSON.stringify({ amount: amountVal.toFixed(2), desc: noteVal, status: 'sent' }),
+            time: Date.now(),
+            fpSent: true
+        };
+        history.push(msg);
+        try {
+            await setChatHistory(roleChar, fpAccountId, history);
+        } catch(e) { console.error('[FP转账] 保存失败:', e); showToast('转账保存失败'); return; }
+        await renderChatBody(roleChar, true);
+        hideTransferPage();
+        showToast("转账成功");
+        setTimeout(() => {
+            const body = document.getElementById('chat-body');
+            if (body) body.scrollTop = body.scrollHeight;
+        }, 50);
+        return;
+    }
     
     // 1. 检查余额
     if (!currentMyCharId) {
@@ -36305,10 +41172,11 @@ ${myChar.name}没有设置账号密码，你可以直接登录。
     
     // 🔥 修罗场模式：添加额外操作指令（仅在查岗成功后的二次分析中使用）
     if (char.allow_shura_mode) {
+        let shuraDesc = `删除好友、拉黑、以TA身份发消息、以TA身份发朋友圈`;
         prompt += `
 
 【修罗场模式】
-查岗成功后，你可以操作${myChar.name}的账号（删除好友、拉黑、以TA身份发消息）。
+查岗成功后，你可以操作${myChar.name}的账号（${shuraDesc}）。
 具体指令会在你成功登录后提供。在普通聊天中不要使用SHURA相关指令。`;
     }
     
@@ -36365,6 +41233,13 @@ async function processAiCheckAccount(char, aiReplyText) {
             checkResult = await aiCheckAccountWithoutPassword(char, myChar);
             wechatData = await exportWechatStateForAI(myChar);
             success = true;
+            
+            // 🔥 记录角色已知道用户密码（用于拉黑后自行解除）
+            if (!char.knows_user_password) {
+                char.knows_user_password = true;
+                await db.characters.put(char);
+                console.log(`[processAiCheckAccount] 📝 已记录 ${char.name} 知道用户密码`);
+            }
         } else {
             // 密码错误
             console.log('[processAiCheckAccount] ❌ 密码错误！');
@@ -36377,6 +41252,13 @@ async function processAiCheckAccount(char, aiReplyText) {
         checkResult = await aiCheckAccountWithoutPassword(char, myChar);
         wechatData = await exportWechatStateForAI(myChar);
         success = true;
+        
+        // 🔥 无密码场景也记录为已知（因为知道没有密码也算知道怎么登录）
+        if (!char.knows_user_password) {
+            char.knows_user_password = true;
+            await db.characters.put(char);
+            console.log(`[processAiCheckAccount] 📝 已记录 ${char.name} 知道用户无密码`);
+        }
     } else {
         // 有密码但AI没有提供密码猜测
         console.log('[processAiCheckAccount] ⚠️ 有密码但AI没有提供密码');
@@ -36440,6 +41322,15 @@ async function processShuraActions(char, replyText) {
     while ((match = sendRegex.exec(replyText)) !== null) {
         actions.push({ type: 'send', friendName: match[1].trim(), message: match[2].trim() });
         cleanReply = cleanReply.replace(match[0], '');
+    }
+    
+    // 解析 [SHURA_MOMENTS:朋友圈内容]（修罗场模式开启即可发朋友圈）
+    if (char.allow_shura_mode) {
+        const momentsRegex = /\[SHURA_MOMENTS:([^\]]+)\]/gi;
+        while ((match = momentsRegex.exec(replyText)) !== null) {
+            actions.push({ type: 'moments', content: match[1].trim() });
+            cleanReply = cleanReply.replace(match[0], '');
+        }
     }
     
     // 清理多余的分隔符
@@ -36525,6 +41416,41 @@ async function processShuraActions(char, replyText) {
                     console.warn(`[修罗场] ⚠️ 找不到好友: ${action.friendName}`);
                     executedActions.push({ ...action, success: false, reason: '找不到该好友' });
                 }
+            } else if (action.type === 'moments') {
+                // 以用户身份发朋友圈（不生成评论）
+                try {
+                    const momentData = {
+                        userId: parseInt(accountId), // 发布者是用户（角色以用户身份发的）
+                        content: action.content,
+                        images: [],
+                        imageCount: 0,
+                        imageDesc: '',
+                        time: Date.now(),
+                        ownerUserId: accountId,
+                        likes: [],
+                        comments: [],
+                        shura_posted_by: char.name // 标记是修罗场模式下由谁发布的
+                    };
+                    
+                    await db.moments.add(momentData);
+                    
+                    console.log(`[修罗场] ✅ 已以用户身份发布朋友圈: ${action.content}`);
+                    executedActions.push({ ...action, success: true });
+                    
+                    // 如果当前在朋友圈页面，刷新列表
+                    const momentsPage = document.getElementById('moments-page');
+                    if (momentsPage && momentsPage.style.display !== 'none') {
+                        renderMomentsList();
+                    }
+                    
+                    // 记录操作日志
+                    saveShuraLog(char, action);
+                    
+                    // 注意：不触发 triggerMutualFriendComments，不生成评论
+                } catch (err) {
+                    console.error(`[修罗场] ⚠️ 发布朋友圈失败:`, err);
+                    executedActions.push({ ...action, success: false, reason: err.message });
+                }
             }
         } catch (err) {
             console.error(`[修罗场] 执行操作失败:`, err);
@@ -36540,6 +41466,7 @@ async function processShuraActions(char, replyText) {
                 if (a.type === 'delete') return `删除了好友"${a.friendName}"`;
                 if (a.type === 'blacklist') return `拉黑了"${a.friendName}"`;
                 if (a.type === 'send') return `给"${a.friendName}"发了${a.messageCount || 1}条消息`;
+                if (a.type === 'moments') return `发了一条朋友圈`;
                 return '';
             }).join('、');
             showToast(`⚠️ ${char.name}以你的身份${actionSummary}`);
@@ -36553,6 +41480,7 @@ async function processShuraActions(char, replyText) {
                     const msgs = a.message.split('///').map(m => m.trim()).filter(m => m);
                     return `✉️ 以你的身份给「${a.friendName}」发送了${msgs.length}条消息：\n${msgs.map(m => `   "${m}"`).join('\n')}`;
                 }
+                if (a.type === 'moments') return `📢 以你的身份发了一条朋友圈：\n   "${a.content}"`;
                 return '';
             }).filter(s => s).join('\n');
             
@@ -38005,7 +42933,7 @@ function handleOfflineChatInputChange(textarea) {
     
     // 自动调整高度
     textarea.style.height = 'auto';
-    textarea.style.height = Math.min(textarea.scrollHeight, 100) + 'px';
+    textarea.style.height = Math.min(textarea.scrollHeight, 130) + 'px';
 }
 
 // 发送线下模式消息
@@ -38233,17 +43161,19 @@ function showOfflineSettings() {
 }
 
 function hideOfflineSettings() {
+    // 返回时自动保存设置
+    autoSaveOfflineSettings();
     document.getElementById('offline-settings-page').style.display = 'none';
 }
 
-function saveOfflineSettings() {
+// 自动保存线下模式设置（无弹窗提示）
+function autoSaveOfflineSettings() {
     if (!offlineModeCharId) return;
     
     let minWords = parseInt(document.getElementById('offline-min-words').value) || 100;
     let maxWords = parseInt(document.getElementById('offline-max-words').value) || 500;
     const customPreset = document.getElementById('offline-custom-preset').value.trim();
     
-    // 校验
     if (minWords < 10) minWords = 10;
     if (maxWords < minWords) maxWords = minWords;
     if (maxWords > 5000) maxWords = 5000;
@@ -38252,9 +43182,14 @@ function saveOfflineSettings() {
     const key = getOfflineSettingsKey();
     localStorage.setItem(key, JSON.stringify(settings));
     
-    // 更新输入框显示
     document.getElementById('offline-min-words').value = minWords;
     document.getElementById('offline-max-words').value = maxWords;
+}
+
+function saveOfflineSettings() {
+    if (!offlineModeCharId) return;
+    
+    autoSaveOfflineSettings();
     
     alert('设置已保存');
     hideOfflineSettings();
@@ -50291,3 +55226,1864 @@ async function importChatThemes(event) {
 window.exportSingleChatTheme = exportSingleChatTheme;
 window.exportChatThemes = exportChatThemes;
 window.importChatThemes = importChatThemes;
+
+// ===========================================
+// 默契绘画游戏 + 菜单面板滑动翻页
+// ===========================================
+
+// ---- 菜单面板滑动翻页逻辑 ----
+(function() {
+    let actionPageIndex = 0;
+    let touchStartX = 0;
+    let touchDeltaX = 0;
+    let isSwiping = false;
+
+    function getTrack() { return document.getElementById('action-panel-track'); }
+    function getDots() { return document.querySelectorAll('#action-panel-dots .action-dot'); }
+
+    function setActionPage(idx) {
+        actionPageIndex = idx;
+        const track = getTrack();
+        if (track) track.style.transform = 'translateX(' + (-idx * 50) + '%)';
+        getDots().forEach((d, i) => {
+            d.classList.toggle('active', i === idx);
+        });
+    }
+
+    document.addEventListener('touchstart', function(e) {
+        const swiper = document.getElementById('action-panel-swiper');
+        if (!swiper || !swiper.closest('.action-panel') || swiper.closest('.action-panel').style.display === 'none') return;
+        if (!swiper.contains(e.target)) return;
+        touchStartX = e.touches[0].clientX;
+        touchDeltaX = 0;
+        isSwiping = true;
+        const track = getTrack();
+        if (track) track.style.transition = 'none';
+    }, { passive: true });
+
+    document.addEventListener('touchmove', function(e) {
+        if (!isSwiping) return;
+        const swiper = document.getElementById('action-panel-swiper');
+        if (!swiper || !swiper.contains(e.target)) return;
+        touchDeltaX = e.touches[0].clientX - touchStartX;
+        const track = getTrack();
+        if (track) {
+            const base = -actionPageIndex * 50;
+            const pct = (touchDeltaX / swiper.offsetWidth) * 50;
+            track.style.transform = 'translateX(' + (base + pct) + '%)';
+        }
+    }, { passive: true });
+
+    document.addEventListener('touchend', function(e) {
+        if (!isSwiping) return;
+        isSwiping = false;
+        const track = getTrack();
+        if (track) track.style.transition = 'transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)';
+        const threshold = 50;
+        if (touchDeltaX < -threshold && actionPageIndex < 1) {
+            setActionPage(1);
+        } else if (touchDeltaX > threshold && actionPageIndex > 0) {
+            setActionPage(0);
+        } else {
+            setActionPage(actionPageIndex);
+        }
+    }, { passive: true });
+
+    // 点击小圆点
+    document.addEventListener('click', function(e) {
+        const dot = e.target.closest('.action-dot');
+        if (dot && dot.dataset.page !== undefined) {
+            setActionPage(parseInt(dot.dataset.page));
+        }
+    });
+
+    // 面板每次打开时重置到第一页
+    const origToggle = window.toggleChatPanel;
+    window.toggleChatPanel = function(type) {
+        if (type === 'action') {
+            setActionPage(0);
+        }
+        origToggle(type);
+    };
+})();
+
+// ---- 默契绘画游戏逻辑 ----
+const MOQI_TOPICS = [
+    "手机","杯子","雨伞","钥匙","灯泡","镜子","书包","手表","拖鞋","枕头",
+    "小猫","小狗","兔子","小鸟","熊猫","鱼","蝴蝶","猴子","大象","企鹅",
+    "汉堡","冰淇淋","蛋糕","奶茶","面条","水果","披萨","棒棒糖","饺子","火锅",
+    "太阳","月亮","星星","云朵","彩虹","开心","睡觉","跑步","跳舞","害羞",
+    "外星人","超人","火箭","城堡","魔法棒","爱心","礼物","气球","烟花","天使"
+];
+
+let moqiCurrentTopic = '';
+let moqiUserCtx = null;
+let moqiAiCtx = null;
+let moqiIsDrawing = false;
+let moqiCurrentColor = '#333333';
+let moqiCurrentTool = 'pen';
+let moqiBrushSize = 3;
+let moqiUndoStack = [];
+let moqiAiDrawn = false;
+let moqiCharName = '角色'; // 当前聊天角色名
+let moqiCharDesc = ''; // 当前聊天角色人设描述
+
+async function showMoqiDrawGame() {
+    closeChatPanel();
+
+    // 获取当前聊天角色信息
+    try {
+        const charId = window._currentChatCharId || null;
+        if (charId) {
+            const char = await db.characters.get(charId);
+            if (char) {
+                const accountId = localStorage.getItem('current_my_char_id') || '1';
+                // 优先用备注名
+                const nickMap = char.account_nicks || {};
+                moqiCharName = nickMap[accountId] || char.nick || char.name || '角色';
+                moqiCharDesc = char.description || char.desc || '';
+            }
+        }
+    } catch (e) {
+        console.warn('[默契绘画] 获取角色信息失败:', e);
+    }
+
+    // 更新界面上的角色名
+    const charLabel = document.getElementById('moqi-char-label');
+    if (charLabel) charLabel.textContent = moqiCharName + ' 的画';
+    const btnText = document.getElementById('moqi-ai-btn-text');
+    if (btnText) btnText.textContent = '让' + moqiCharName + '画上半部分';
+
+    const overlay = document.getElementById('moqi-draw-overlay');
+    overlay.style.display = 'flex';
+    initMoqiCanvases();
+}
+window.showMoqiDrawGame = showMoqiDrawGame;
+
+function closeMoqiDrawGame() {
+    document.getElementById('moqi-draw-overlay').style.display = 'none';
+}
+window.closeMoqiDrawGame = closeMoqiDrawGame;
+
+function initMoqiCanvases() {
+    const aiCanvas = document.getElementById('moqi-ai-canvas');
+    const userCanvas = document.getElementById('moqi-user-canvas');
+    
+    // 设置 canvas 分辨率
+    const w = aiCanvas.offsetWidth;
+    const h = aiCanvas.offsetHeight;
+    const dpr = window.devicePixelRatio || 1;
+
+    [aiCanvas, userCanvas].forEach(c => {
+        c.width = w * dpr;
+        c.height = h * dpr;
+        const ctx = c.getContext('2d');
+        ctx.scale(dpr, dpr);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, w, h);
+    });
+
+    moqiAiCtx = aiCanvas.getContext('2d');
+    moqiUserCtx = userCanvas.getContext('2d');
+    moqiUndoStack = [];
+    moqiAiDrawn = false;
+
+    // 用户绘画事件
+    setupMoqiUserDrawing(userCanvas);
+}
+
+function setupMoqiUserDrawing(canvas) {
+    let lastX, lastY;
+    const dpr = window.devicePixelRatio || 1;
+
+    function getPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const touch = e.touches ? e.touches[0] : e;
+        return {
+            x: (touch.clientX - rect.left),
+            y: (touch.clientY - rect.top)
+        };
+    }
+
+    function startDraw(e) {
+        e.preventDefault();
+        moqiIsDrawing = true;
+        const pos = getPos(e);
+        lastX = pos.x;
+        lastY = pos.y;
+        // 保存撤销快照
+        moqiSaveUndoSnapshot();
+    }
+
+    function draw(e) {
+        e.preventDefault();
+        if (!moqiIsDrawing) return;
+        const pos = getPos(e);
+        const ctx = moqiUserCtx;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(lastX, lastY);
+        ctx.lineTo(pos.x, pos.y);
+        ctx.lineWidth = moqiBrushSize;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        if (moqiCurrentTool === 'eraser') {
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.strokeStyle = 'rgba(255,255,255,1)';
+            ctx.lineWidth = moqiBrushSize * 3;
+        } else {
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.strokeStyle = moqiCurrentColor;
+        }
+
+        ctx.stroke();
+        ctx.restore();
+
+        lastX = pos.x;
+        lastY = pos.y;
+    }
+
+    function endDraw(e) {
+        if (e) e.preventDefault();
+        moqiIsDrawing = false;
+    }
+
+    // Remove old handlers
+    canvas.onmousedown = null;
+    canvas.onmousemove = null;
+    canvas.onmouseup = null;
+    canvas.onmouseleave = null;
+    canvas.ontouchstart = null;
+    canvas.ontouchmove = null;
+    canvas.ontouchend = null;
+
+    canvas.addEventListener('mousedown', startDraw);
+    canvas.addEventListener('mousemove', draw);
+    canvas.addEventListener('mouseup', endDraw);
+    canvas.addEventListener('mouseleave', endDraw);
+    canvas.addEventListener('touchstart', startDraw, { passive: false });
+    canvas.addEventListener('touchmove', draw, { passive: false });
+    canvas.addEventListener('touchend', endDraw, { passive: false });
+}
+
+function moqiSaveUndoSnapshot() {
+    const canvas = document.getElementById('moqi-user-canvas');
+    moqiUndoStack.push(canvas.toDataURL());
+    if (moqiUndoStack.length > 30) moqiUndoStack.shift();
+}
+
+function moqiUndo() {
+    if (moqiUndoStack.length === 0) return;
+    const dataUrl = moqiUndoStack.pop();
+    const canvas = document.getElementById('moqi-user-canvas');
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const img = new Image();
+    img.onload = function() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+    };
+    img.src = dataUrl;
+}
+window.moqiUndo = moqiUndo;
+
+function moqiClearUser() {
+    moqiSaveUndoSnapshot();
+    const canvas = document.getElementById('moqi-user-canvas');
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+}
+window.moqiClearUser = moqiClearUser;
+
+function moqiSetColor(el) {
+    moqiCurrentColor = el.dataset.color;
+    document.querySelectorAll('.moqi-color-btn').forEach(b => b.classList.remove('active'));
+    el.classList.add('active');
+    moqiSetTool('pen');
+}
+window.moqiSetColor = moqiSetColor;
+
+function moqiSetTool(tool) {
+    moqiCurrentTool = tool;
+    document.getElementById('moqi-pen-btn').classList.toggle('active', tool === 'pen');
+    document.getElementById('moqi-eraser-btn').classList.toggle('active', tool === 'eraser');
+}
+window.moqiSetTool = moqiSetTool;
+
+function moqiSetBrushSize(val) {
+    moqiBrushSize = parseInt(val);
+}
+window.moqiSetBrushSize = moqiSetBrushSize;
+
+function moqiNewRound() {
+    // 随机选题
+    moqiCurrentTopic = MOQI_TOPICS[Math.floor(Math.random() * MOQI_TOPICS.length)];
+    document.getElementById('moqi-draw-topic').textContent = moqiCurrentTopic;
+    
+    // 重置画布
+    initMoqiCanvases();
+    
+    // 启用绘画按钮
+    const btn = document.getElementById('moqi-ai-draw-btn');
+    btn.disabled = false;
+    btn.style.display = 'inline-flex';
+    const btnText = document.getElementById('moqi-ai-btn-text');
+    if (btnText) btnText.textContent = '让' + moqiCharName + '画上半部分';
+    moqiAiDrawn = false;
+    // 隐藏保存/分享按钮
+    moqiHideSaveArea();
+}
+window.moqiNewRound = moqiNewRound;
+
+// 独立的 API 调用（因为 callAI 在内部作用域，这里直接读取同样的配置）
+async function moqiCallAI(messages) {
+    const urlItem = await db.dexiData.get('aiBaseUrl');
+    const keyItem = await db.dexiData.get('aiApiKey');
+    const modelItem = await db.dexiData.get('aiCurrentModel');
+
+    const urlValue = urlItem?.value?.trim() || '';
+    const apiKey = keyItem?.value?.trim() || '';
+    const model = modelItem?.value?.trim() || '';
+
+    if (!urlValue || !apiKey || !model) {
+        throw new Error('请先在设置中配置 API 地址、密钥和模型');
+    }
+
+    let url = urlValue;
+    if (url.endsWith('/')) url = url.slice(0, -1);
+    if (!url.includes('/v1')) url += '/v1';
+    url += '/chat/completions';
+
+    const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+            model: model,
+            messages: messages,
+            temperature: 0.7
+        })
+    });
+
+    if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`API 请求失败 (${res.status}): ${errText.substring(0, 200)}`);
+    }
+
+    const data = await res.json();
+
+    // 兼容 Gemini / OpenAI 格式
+    if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+        return data.candidates[0].content.parts[0].text;
+    }
+    if (data?.choices?.[0]?.message?.content) {
+        return data.choices[0].message.content;
+    }
+    throw new Error('角色返回了空内容');
+}
+
+async function moqiAiDraw() {
+    if (!moqiCurrentTopic || moqiAiDrawn) return;
+    moqiAiDrawn = true;
+    const btn = document.getElementById('moqi-ai-draw-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<svg class="svg-icon" viewBox="0 0 24 24" style="width:16px;height:16px;stroke:#fff;animation:spin 1s linear infinite;"><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line></svg> ' + moqiCharName + ' 绘画中...';
+
+    const canvas = document.getElementById('moqi-ai-canvas');
+    const ctx = moqiAiCtx;
+    const w = canvas.offsetWidth;
+    const h = canvas.offsetHeight;
+
+    // 清空AI画布
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+
+    try {
+        // 构建带角色人设的prompt
+        let charContext = '';
+        if (moqiCharDesc) {
+            charContext = `\n你正在扮演一个角色"${moqiCharName}"，这个角色的人设是：
+${moqiCharDesc.substring(0, 500)}
+
+请根据这个角色的性格特点来画画。比如角色如果是可爱的，画风就更萌；如果是酷酷的，画风就更帅气简练；如果是文艺的，画风就更有艺术感。画面要体现角色的个性。`;
+        } else {
+            charContext = `\n你正在扮演角色"${moqiCharName}"来画画。`;
+        }
+
+        const prompt = `你是一个简笔画生成器。请为题目"${moqiCurrentTopic}"生成简笔画的【上半部分】的绘画指令。
+${charContext}
+
+这是一个"默契绘画"游戏：${moqiCharName}画上半部分，用户画下半部分，然后拼在一起看是否默契。
+
+画布坐标系：宽度100，高度100。画布左上角是(0,0)，右下角是(100,100)。
+你只画上半部分，所以内容主要集中在y=0到y=100的范围内（但这是上半画布，下半部分用户会接着画）。
+
+请返回一个JSON数组，每个元素是一个笔画对象，格式如下：
+- line: {"type":"line","x1":数字,"y1":数字,"x2":数字,"y2":数字,"color":"颜色","width":数字}
+- circle: {"type":"circle","cx":数字,"cy":数字,"r":数字,"color":"颜色","width":数字}
+- arc: {"type":"arc","cx":数字,"cy":数字,"r":数字,"startAngle":角度数字,"endAngle":角度数字,"color":"颜色","width":数字}
+- path: {"type":"path","points":[[x,y],[x,y],...],"color":"颜色","width":数字}
+
+要求：
+1. 只返回JSON数组，不要其他文字
+2. 画面要可爱、简洁、像简笔画
+3. 颜色用hex格式如 #333333
+4. width线宽建议2-4
+5. 内容是题目的上半部分（比如人物画头和上半身，动物画头部，物品画上半部分）
+6. 画面要居中，大小适中，留一些边距
+7. 底部边缘的线条要自然地延伸到底部，方便用户接着画下半部分`;
+
+        const aiResponse = await moqiCallAI([
+            { role: 'user', content: prompt }
+        ]);
+
+        // 解析 AI 返回的 JSON
+        let commands = [];
+        try {
+            // 尝试提取 JSON 数组（可能包含 markdown 代码块）
+            let jsonStr = aiResponse.trim();
+            const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) {
+                jsonStr = jsonMatch[1].trim();
+            }
+            // 尝试找到数组开始和结束
+            const arrStart = jsonStr.indexOf('[');
+            const arrEnd = jsonStr.lastIndexOf(']');
+            if (arrStart !== -1 && arrEnd !== -1) {
+                jsonStr = jsonStr.substring(arrStart, arrEnd + 1);
+            }
+            commands = JSON.parse(jsonStr);
+        } catch (parseErr) {
+            console.error('[默契绘画] 返回解析失败:', parseErr, aiResponse);
+            throw new Error('角色返回的绘画指令格式有误，请重试');
+        }
+
+        // 在画布上渲染角色的绘画指令（带动画）
+        await moqiRenderCommands(ctx, commands, w, h);
+        btn.style.display = 'none';
+        // 显示保存/分享按钮
+        moqiShowSaveArea();
+
+    } catch (err) {
+        console.error('[默契绘画] 绘画失败:', err);
+        moqiAiDrawn = false;
+        btn.disabled = false;
+        btn.innerHTML = '<svg class="svg-icon" viewBox="0 0 24 24" style="width:16px;height:16px;stroke:#fff;"><path d="M12 19l7-7 3 3-7 7-3-3z"></path><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"></path><path d="M2 2l7.586 7.586"></path><circle cx="11" cy="11" r="2"></circle></svg> <span id="moqi-ai-btn-text">让' + moqiCharName + '画上半部分</span>';
+        if (typeof showToast === 'function') {
+            showToast('❌ ' + err.message);
+        } else {
+            alert(err.message);
+        }
+    }
+}
+window.moqiAiDraw = moqiAiDraw;
+
+// 将角色返回的绘画指令渲染到画布上（带逐笔动画）
+function moqiRenderCommands(ctx, commands, canvasW, canvasH) {
+    return new Promise((resolve) => {
+        const scaleX = canvasW / 100;
+        const scaleY = canvasH / 100;
+        let idx = 0;
+
+        function drawNext() {
+            if (idx >= commands.length) {
+                resolve();
+                return;
+            }
+            const cmd = commands[idx];
+            ctx.strokeStyle = cmd.color || '#333';
+            ctx.lineWidth = (cmd.width || 2.5) * Math.min(scaleX, scaleY) / 2;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.fillStyle = 'transparent';
+
+            try {
+                switch (cmd.type) {
+                    case 'line':
+                        ctx.beginPath();
+                        ctx.moveTo(cmd.x1 * scaleX, cmd.y1 * scaleY);
+                        ctx.lineTo(cmd.x2 * scaleX, cmd.y2 * scaleY);
+                        ctx.stroke();
+                        break;
+                    case 'circle':
+                        ctx.beginPath();
+                        ctx.arc(cmd.cx * scaleX, cmd.cy * scaleY, cmd.r * Math.min(scaleX, scaleY), 0, Math.PI * 2);
+                        ctx.stroke();
+                        if (cmd.fill) {
+                            ctx.fillStyle = cmd.fill;
+                            ctx.fill();
+                        }
+                        break;
+                    case 'arc': {
+                        const sa = (cmd.startAngle || 0) * Math.PI / 180;
+                        const ea = (cmd.endAngle || 360) * Math.PI / 180;
+                        ctx.beginPath();
+                        ctx.arc(cmd.cx * scaleX, cmd.cy * scaleY, cmd.r * Math.min(scaleX, scaleY), sa, ea);
+                        ctx.stroke();
+                        break;
+                    }
+                    case 'path':
+                        if (cmd.points && cmd.points.length >= 2) {
+                            ctx.beginPath();
+                            ctx.moveTo(cmd.points[0][0] * scaleX, cmd.points[0][1] * scaleY);
+                            for (let i = 1; i < cmd.points.length; i++) {
+                                ctx.lineTo(cmd.points[i][0] * scaleX, cmd.points[i][1] * scaleY);
+                            }
+                            ctx.stroke();
+                            if (cmd.fill) {
+                                ctx.fillStyle = cmd.fill;
+                                ctx.fill();
+                            }
+                        }
+                        break;
+                    case 'rect':
+                        ctx.beginPath();
+                        ctx.rect(
+                            (cmd.x || 0) * scaleX,
+                            (cmd.y || 0) * scaleY,
+                            (cmd.w || cmd.width_rect || 10) * scaleX,
+                            (cmd.h || cmd.height_rect || 10) * scaleY
+                        );
+                        ctx.stroke();
+                        if (cmd.fill) {
+                            ctx.fillStyle = cmd.fill;
+                            ctx.fill();
+                        }
+                        break;
+                    case 'ellipse':
+                        ctx.beginPath();
+                        ctx.ellipse(
+                            (cmd.cx || 50) * scaleX,
+                            (cmd.cy || 50) * scaleY,
+                            (cmd.rx || 10) * scaleX,
+                            (cmd.ry || 10) * scaleY,
+                            0, 0, Math.PI * 2
+                        );
+                        ctx.stroke();
+                        if (cmd.fill) {
+                            ctx.fillStyle = cmd.fill;
+                            ctx.fill();
+                        }
+                        break;
+                }
+            } catch (e) {
+                console.warn('[默契绘画] 渲染指令出错:', e, cmd);
+            }
+
+            idx++;
+            // 逐笔动画间隔
+            setTimeout(drawNext, 80);
+        }
+
+        drawNext();
+    });
+}
+
+// 添加到 window
+window.moqiNewRound = moqiNewRound;
+window.moqiAiDraw = moqiAiDraw;
+
+// ========== 默契绘画 - 保存 & 分享 ==========
+function moqiShowSaveArea() {
+    const area = document.getElementById('moqi-draw-save-area');
+    if (area) area.style.display = 'flex';
+}
+function moqiHideSaveArea() {
+    const area = document.getElementById('moqi-draw-save-area');
+    if (area) area.style.display = 'none';
+}
+
+// 获取用户名
+async function moqiGetUserName() {
+    try {
+        const accountId = localStorage.getItem('current_my_char_id');
+        if (!accountId) return '我';
+        const userChar = await db.characters.get(parseInt(accountId));
+        if (userChar) return userChar.nick || userChar.name || '我';
+    } catch(e) {}
+    return '我';
+}
+
+// 将两个画布拼接成一张完整图片（含标题和作者信息），返回 canvas
+function moqiMergeCanvases(charName, userName, topic) {
+    const aiCanvas = document.getElementById('moqi-ai-canvas');
+    const userCanvas = document.getElementById('moqi-user-canvas');
+    if (!aiCanvas || !userCanvas) return null;
+
+    const cw = aiCanvas.width; // 画布宽度
+    const headerH = 70;  // 顶部标题区高度
+    const footerH = 50;  // 底部署名区高度
+    const labelH = 28;   // 每个画布上方/下方的名字标签高度
+
+    const mergedCanvas = document.createElement('canvas');
+    mergedCanvas.width = cw;
+    mergedCanvas.height = headerH + labelH + aiCanvas.height + userCanvas.height + labelH + footerH;
+    const mCtx = mergedCanvas.getContext('2d');
+
+    // 白色背景
+    mCtx.fillStyle = '#fff';
+    mCtx.fillRect(0, 0, mergedCanvas.width, mergedCanvas.height);
+
+    // ---- 顶部标题区 ----
+    const topicText = (topic && topic !== '点击下方按钮开始') ? topic : '自由创作';
+    mCtx.textAlign = 'center';
+    // 小标签
+    mCtx.font = '600 12px -apple-system, "Helvetica Neue", sans-serif';
+    mCtx.fillStyle = '#bbb';
+    mCtx.fillText('默 契 绘 画', cw / 2, 28);
+    // 题目
+    mCtx.font = '600 20px -apple-system, "Helvetica Neue", sans-serif';
+    mCtx.fillStyle = '#333';
+    mCtx.fillText(topicText, cw / 2, 55);
+
+    // ---- 角色名标签 ----
+    let yPos = headerH;
+    mCtx.font = '500 12px -apple-system, "Helvetica Neue", sans-serif';
+    mCtx.fillStyle = '#999';
+    mCtx.textAlign = 'left';
+    mCtx.fillText(charName + ' 的画', 16, yPos + 18);
+    yPos += labelH;
+
+    // ---- 角色画布 ----
+    mCtx.drawImage(aiCanvas, 0, yPos);
+    yPos += aiCanvas.height;
+
+    // ---- 拼接虚线 ----
+    mCtx.setLineDash([6, 4]);
+    mCtx.strokeStyle = '#ddd';
+    mCtx.lineWidth = 1;
+    mCtx.beginPath();
+    mCtx.moveTo(0, yPos);
+    mCtx.lineTo(cw, yPos);
+    mCtx.stroke();
+    mCtx.setLineDash([]);
+
+    // ---- 用户画布 ----
+    mCtx.drawImage(userCanvas, 0, yPos);
+    yPos += userCanvas.height;
+
+    // ---- 用户名标签 ----
+    mCtx.font = '500 12px -apple-system, "Helvetica Neue", sans-serif';
+    mCtx.fillStyle = '#999';
+    mCtx.textAlign = 'right';
+    mCtx.fillText(userName + ' 的画', cw - 16, yPos + 18);
+    yPos += labelH;
+
+    // ---- 底部署名区 ----
+    mCtx.textAlign = 'center';
+    // 分隔细线
+    mCtx.strokeStyle = '#eee';
+    mCtx.lineWidth = 1;
+    mCtx.beginPath();
+    mCtx.moveTo(cw * 0.2, yPos + 4);
+    mCtx.lineTo(cw * 0.8, yPos + 4);
+    mCtx.stroke();
+    // 署名文字
+    mCtx.font = '400 13px -apple-system, "Helvetica Neue", sans-serif';
+    mCtx.fillStyle = '#bbb';
+    mCtx.fillText(charName + '  ×  ' + userName, cw / 2, yPos + 30);
+
+    return mergedCanvas;
+}
+
+// 保存图片
+window.moqiSaveDrawing = async function() {
+    const topic = document.getElementById('moqi-draw-topic')?.textContent || '';
+    const charName = moqiCharName || '角色';
+    const userName = await moqiGetUserName();
+    const merged = moqiMergeCanvases(charName, userName, topic);
+    if (!merged) { if (typeof showToast === 'function') showToast('画布为空'); return; }
+    // 触发下载
+    const link = document.createElement('a');
+    link.download = '默契绘画_' + charName + '×' + userName + '_' + (topic || '作品') + '.png';
+    link.href = merged.toDataURL('image/png');
+    link.click();
+    if (typeof showToast === 'function') showToast('图片已保存');
+};
+
+// 分享给好友（发送到聊天）
+window.moqiShareDrawing = async function() {
+    let friends = [];
+    try {
+        const accountId = localStorage.getItem('current_my_char_id');
+        if (!accountId) { if (typeof showToast === 'function') showToast('请先登录'); return; }
+        const allChars = await db.characters.toArray();
+        friends = allChars.filter(c => {
+            if (c.type === 'user') return false;
+            const perUserStatus = c.wechat_status_by_user?.[accountId];
+            if (perUserStatus && perUserStatus !== 'stranger') return perUserStatus === 'friend';
+            if (c.wechat_status && c.wechat_status !== 'stranger') return c.wechat_status === 'friend';
+            return false;
+        });
+    } catch(e) { console.error(e); }
+    if (!friends.length) { if (typeof showToast === 'function') showToast('暂无好友可分享'); return; }
+
+    // 构建选择弹窗
+    let overlay = document.getElementById('moqi-share-picker');
+    if (overlay) overlay.remove();
+    overlay = document.createElement('div');
+    overlay.id = 'moqi-share-picker';
+    overlay.className = 'moqi-share-picker-overlay';
+    let html = '<div class="moqi-share-picker-mask"></div><div class="moqi-share-picker-panel"><div class="moqi-share-picker-header"><span>分享给好友</span><div class="close-btn" style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:#f5f5f5;cursor:pointer;"><svg width="18" height="18" fill="none" stroke="#999" stroke-width="2" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></div></div><div class="moqi-share-picker-list">';
+    friends.forEach(f => {
+        const avatar = f.avatar || '';
+        const name = f.name || '未知';
+        html += `<div class="moqi-share-picker-item" data-id="${f.id}"><img src="${avatar}" onerror="this.src='data:image/svg+xml,<svg xmlns=\\'http://www.w3.org/2000/svg\\' viewBox=\\'0 0 40 40\\'><rect fill=\\'%23ddd\\' width=\\'40\\' height=\\'40\\'/></svg>'" style="width:36px;height:36px;border-radius:50%;object-fit:cover;"><span>${name}</span></div>`;
+    });
+    html += '</div></div>';
+    overlay.innerHTML = html;
+    document.body.appendChild(overlay);
+
+    // 绑定事件
+    overlay.querySelector('.moqi-share-picker-mask').onclick = () => overlay.remove();
+    overlay.querySelector('.close-btn').onclick = () => overlay.remove();
+    overlay.querySelectorAll('.moqi-share-picker-item').forEach(item => {
+        item.onclick = async () => {
+            const charId = parseInt(item.dataset.id);
+            overlay.remove();
+            await moqiSendDrawingToFriend(charId);
+        };
+    });
+};
+
+async function moqiSendDrawingToFriend(charId) {
+    const topic = document.getElementById('moqi-draw-topic')?.textContent || '作品';
+    const charName = moqiCharName || '角色';
+    const userName = await moqiGetUserName();
+    const merged = moqiMergeCanvases(charName, userName, topic);
+    if (!merged) return;
+    const imgData = merged.toDataURL('image/png');
+    const accountId = localStorage.getItem('current_my_char_id');
+    if (!accountId) return;
+    try {
+        const char = await db.characters.get(charId);
+        if (!char) return;
+        const history = char.chat_history_by_user?.[accountId] || char.chat_history || [];
+        // 用 [img:...] 格式，让聊天渲染器能识别为图片
+        const newMsg = {
+            role: 'user',
+            content: '[img:' + imgData + ']',
+            timestamp: Date.now()
+        };
+        history.push(newMsg);
+        if (!char.chat_history_by_user) char.chat_history_by_user = {};
+        char.chat_history_by_user[accountId] = history;
+        await db.characters.put(char);
+        // 追加到聊天 UI
+        if (typeof window._appendShopCardToChat === 'function') {
+            window._appendShopCardToChat(charId, newMsg);
+        }
+        if (typeof showToast === 'function') showToast('已分享给 ' + (char.name || '好友'));
+    } catch(e) {
+        console.error('[默契绘画] 分享失败:', e);
+        if (typeof showToast === 'function') showToast('分享失败');
+    }
+}
+
+// ===================== 购物页面 =====================
+(function() {
+    // 商品数据
+    const shopProducts = [
+        // 服饰
+        { id:1, name:'极简纯棉白T恤', cat:'clothing', price:129, originPrice:199, desc:'100%纯棉面料，宽松版型，基础百搭单品', specs:['S','M','L','XL'], sold:2341, emoji:'👕' },
+        { id:2, name:'高腰修身牛仔裤', cat:'clothing', price:259, originPrice:399, desc:'弹力面料，修身显瘦，经典蓝色水洗', specs:['25','26','27','28','29','30'], sold:1876, emoji:'👖' },
+        { id:3, name:'法式碎花连衣裙', cat:'clothing', price:339, originPrice:499, desc:'轻盈雪纺面料，浪漫碎花印花，收腰设计', specs:['S','M','L'], sold:923, emoji:'👗' },
+        { id:4, name:'羊绒混纺针织衫', cat:'clothing', price:459, originPrice:699, desc:'柔软亲肤，细腻触感，优雅圆领设计', specs:['S','M','L','XL'], sold:1543, emoji:'🧶' },
+        { id:5, name:'宽松运动卫衣', cat:'clothing', price:199, originPrice:299, desc:'加绒保暖，落肩设计，潮流字母印花', specs:['M','L','XL','2XL'], sold:3021, emoji:'🧥' },
+        { id:6, name:'真丝缎面衬衫', cat:'clothing', price:389, originPrice:599, desc:'桑蚕丝面料，光泽细腻，通勤百搭', specs:['S','M','L'], sold:687, emoji:'👔' },
+        // 包袋
+        { id:7, name:'极简托特包', cat:'bags', price:299, originPrice:459, desc:'大容量设计，优质PU皮革，简约线条', specs:['黑色','米白','焦糖'], sold:1234, emoji:'👜' },
+        { id:8, name:'链条斜挎小方包', cat:'bags', price:249, originPrice:399, desc:'精致小巧，金属链条肩带，翻盖设计', specs:['黑色','白色','粉色'], sold:2156, emoji:'👛' },
+        { id:9, name:'帆布单肩包', cat:'bags', price:89, originPrice:139, desc:'文艺范帆布材质，轻便实用', specs:['米色','灰色','军绿'], sold:4523, emoji:'🎒' },
+        { id:10, name:'真皮手拿包', cat:'bags', price:459, originPrice:699, desc:'头层牛皮，信封式设计，晚宴必备', specs:['黑色','酒红','墨绿'], sold:567, emoji:'💼' },
+        // 鞋履
+        { id:11, name:'小白鞋 经典款', cat:'shoes', price:199, originPrice:299, desc:'百搭小白鞋，柔软鞋底，舒适透气', specs:['36','37','38','39','40'], sold:5678, emoji:'👟' },
+        { id:12, name:'尖头高跟鞋', cat:'shoes', price:329, originPrice:499, desc:'7cm细跟，优雅尖头设计，漆皮亮面', specs:['35','36','37','38','39'], sold:1432, emoji:'👠' },
+        { id:13, name:'切尔西短靴', cat:'shoes', price:399, originPrice:599, desc:'经典版型，弹力带设计，秋冬必备', specs:['36','37','38','39','40'], sold:2134, emoji:'👢' },
+        { id:14, name:'运动老爹鞋', cat:'shoes', price:269, originPrice:429, desc:'增高厚底，复古配色，潮流街拍', specs:['36','37','38','39','40','41'], sold:3456, emoji:'👟' },
+        // 美妆
+        { id:15, name:'丝绒哑光唇釉', cat:'beauty', price:129, originPrice:189, desc:'雾面质地，持久显色，不拔干', specs:['豆沙红','玫瑰粉','正红','裸色'], sold:8765, emoji:'💄' },
+        { id:16, name:'气垫BB霜', cat:'beauty', price:199, originPrice:299, desc:'轻薄服帖，自然遮瑕，水润不脱妆', specs:['象牙白','自然色','暖白'], sold:6543, emoji:'💋' },
+        { id:17, name:'十六色眼影盘', cat:'beauty', price:159, originPrice:249, desc:'大地色系，哑光珠光双质地，日常百搭', specs:['暖棕盘','冷灰盘','玫瑰盘'], sold:4321, emoji:'🎨' },
+        { id:18, name:'保湿精华液 30ml', cat:'beauty', price:289, originPrice:439, desc:'玻尿酸成分，深层补水，改善干纹', specs:['30ml','50ml'], sold:3456, emoji:'✨' },
+        { id:19, name:'定妆喷雾', cat:'beauty', price:79, originPrice:119, desc:'细腻雾化，持妆12小时，清爽不粘腻', specs:['100ml'], sold:7654, emoji:'💧' },
+        // 配饰
+        { id:20, name:'极简金属手链', cat:'jewelry', price:89, originPrice:139, desc:'钛钢材质，不褪色不过敏，细链设计', specs:['金色','银色','玫瑰金'], sold:3456, emoji:'📿' },
+        { id:21, name:'珍珠耳钉', cat:'jewelry', price:69, originPrice:99, desc:'天然淡水珍珠，925银针，低敏材质', specs:['6mm','8mm','10mm'], sold:5678, emoji:'💎' },
+        { id:22, name:'复古太阳镜', cat:'jewelry', price:149, originPrice:229, desc:'UV400防晒，TR90轻量镜架，ins风', specs:['黑色','茶色','灰色'], sold:2345, emoji:'🕶️' },
+        { id:23, name:'简约手表', cat:'jewelry', price:259, originPrice:399, desc:'日本机芯，真皮表带，极简表盘', specs:['黑盘棕带','白盘黑带','白盘米带'], sold:1234, emoji:'⌚' },
+        // 数码
+        { id:24, name:'无线蓝牙耳机', cat:'digital', price:199, originPrice:299, desc:'主动降噪，30h续航，触控操作', specs:['白色','黑色'], sold:8765, emoji:'🎧' },
+        { id:25, name:'磁吸无线充电器', cat:'digital', price:79, originPrice:129, desc:'15W快充，兼容多机型，极简设计', specs:['白色','黑色'], sold:5432, emoji:'🔌' },
+        { id:26, name:'极简台灯', cat:'digital', price:139, originPrice:199, desc:'三档色温，触控调节，Type-C充电', specs:['白色','木纹'], sold:3456, emoji:'💡' },
+        { id:27, name:'便携蓝牙音箱', cat:'digital', price:169, originPrice:259, desc:'IPX7防水，12h续航，立体环绕音效', specs:['黑色','白色','军绿'], sold:2345, emoji:'🔊' },
+        // 家居
+        { id:28, name:'香薰蜡烛 大豆蜡', cat:'home', price:69, originPrice:99, desc:'天然大豆蜡，木质灯芯，助眠香氛', specs:['白茶','檀香','薰衣草','无花果'], sold:6789, emoji:'🕯️' },
+        { id:29, name:'ins风抱枕', cat:'home', price:49, originPrice:79, desc:'棉麻材质，北欧几何图案，含枕芯', specs:['45×45cm','50×50cm'], sold:4567, emoji:'🛋️' },
+        { id:30, name:'陶瓷马克杯', cat:'home', price:39, originPrice:59, desc:'哑光釉面，大容量400ml，简约设计', specs:['白色','灰色','莫兰迪粉'], sold:8765, emoji:'☕' },
+        { id:31, name:'干花花束装饰', cat:'home', price:59, originPrice:89, desc:'天然干花，ins风拍照道具，含花瓶', specs:['白色系','暖色系','混合色'], sold:3456, emoji:'💐' },
+        { id:32, name:'极简收纳盒套装', cat:'home', price:89, originPrice:139, desc:'PP材质，磨砂质感，桌面化妆品收纳', specs:['3件套','5件套'], sold:2345, emoji:'📦' },
+    ];
+
+    let shopCart = [];
+    let currentCategory = 'all';
+    let currentDetailProduct = null;
+    let currentSpec = '';
+    let currentInstallment = 0;
+    let selectedFriendForPay = null; // 代付选中的好友
+    let selectedFamilyCard = null;   // 选中的亲属卡
+    let selectedBuyForFriend = null; // 送给谁（为谁购买）
+    const SHOP_INST_KEY = 'shop_installment_plans'; // localStorage key
+
+    // ====== 工具函数 ======
+    function getMyCharId() {
+        return localStorage.getItem('current_my_char_id');
+    }
+
+    // 获取好友状态（复制逻辑，因为原函数在DOMContentLoaded闭包内）
+    function _getFriendStatus(char, accountId) {
+        if (!accountId) return char.wechat_status || 'stranger';
+        const perUserStatus = char.wechat_status_by_user?.[accountId];
+        if (perUserStatus && perUserStatus !== 'stranger') return perUserStatus;
+        if (char.wechat_status && char.wechat_status !== 'stranger') return char.wechat_status;
+        return perUserStatus || 'stranger';
+    }
+
+    function _getChatHistory(char, accountId) {
+        if (!accountId) return char.chat_history || [];
+        return char.chat_history_by_user?.[accountId] || [];
+    }
+
+    async function _setChatHistory(char, accountId, history) {
+        if (!accountId) {
+            char.chat_history = history;
+        } else {
+            if (!char.chat_history_by_user) char.chat_history_by_user = {};
+            char.chat_history_by_user[accountId] = history;
+        }
+        await db.characters.put(char);
+    }
+
+    // 获取好友列表
+    async function getFriendsList() {
+        const accountId = getMyCharId();
+        if (!accountId) return [];
+        const allChars = await db.characters.toArray();
+        return allChars.filter(c => {
+            if (c.type === 'user') return false;
+            const status = _getFriendStatus(c, accountId);
+            return status === 'friend';
+        });
+    }
+
+    // 检查是否有收到的亲属卡
+    async function getReceivedFamilyCards() {
+        const accountId = getMyCharId();
+        if (!accountId) return [];
+        const user = await db.characters.get(parseInt(accountId));
+        if (!user) return [];
+
+        const cards = [];
+        // 方式1：从 identity.familyCardsReceived
+        if (user.identity && user.identity.familyCardsReceived) {
+            for (const card of user.identity.familyCardsReceived) {
+                const giver = await db.characters.get(card.charId);
+                if (giver) {
+                    cards.push({
+                        charId: card.charId,
+                        name: giver.name,
+                        avatar: giver.avatar || '',
+                        monthlyLimit: card.monthlyLimit || 0,
+                        usedThisMonth: card.usedThisMonth || 0,
+                        source: 'identity'
+                    });
+                }
+            }
+        }
+
+        // 方式2：从聊天记录中检测（角色发送的亲属卡消息）
+        const allChars = await db.characters.toArray();
+        for (const c of allChars) {
+            if (c.type === 'user') continue;
+            if (_getFriendStatus(c, accountId) !== 'friend') continue;
+            const history = _getChatHistory(c, accountId);
+            const fcMsgs = history.filter(m => m.role === 'char' && m.type === 'familyCard');
+            if (fcMsgs.length > 0) {
+                // 检查是否已经在上面添加了
+                const already = cards.some(x => x.charId === c.id);
+                if (!already) {
+                    const lastCard = fcMsgs[fcMsgs.length - 1];
+                    let cardData = {};
+                    try { cardData = JSON.parse(lastCard.content); } catch(e) {}
+                    cards.push({
+                        charId: c.id,
+                        name: c.name,
+                        avatar: c.avatar || '',
+                        monthlyLimit: cardData.monthlyLimit || 0,
+                        usedThisMonth: 0,
+                        source: 'chat'
+                    });
+                }
+            }
+        }
+
+        return cards;
+    }
+
+    // ====== 渲染商品列表 ======
+    function renderProducts(cat) {
+        const grid = document.getElementById('shop-product-grid');
+        if (!grid) return;
+        const filtered = cat === 'all' ? shopProducts : shopProducts.filter(p => p.cat === cat);
+        grid.innerHTML = filtered.map(p => `
+            <div class="shop-product-card" onclick="openShopDetail(${p.id})">
+                <div class="shop-product-img">
+                    <span>${p.emoji}</span>
+                    ${p.originPrice > p.price ? '<div class="shop-product-tag">HOT</div>' : ''}
+                </div>
+                <div class="shop-product-info">
+                    <div class="shop-product-name">${p.name}</div>
+                    <div class="shop-product-price">¥${p.price.toFixed(2)}
+                        ${p.originPrice ? '<span class="shop-origin-price">¥' + p.originPrice.toFixed(2) + '</span>' : ''}
+                    </div>
+                    <div class="shop-product-bottom">
+                        <div class="shop-product-sold">已售 ${p.sold}</div>
+                        <div class="shop-quick-add" onclick="event.stopPropagation();quickAddToCart(${p.id})">+</div>
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    // 切换分类
+    window.switchShopCategory = function(cat) {
+        currentCategory = cat;
+        document.querySelectorAll('.shop-cat-item').forEach(el => {
+            el.classList.toggle('active', el.dataset.cat === cat);
+        });
+        renderProducts(cat);
+    };
+
+    // 快速添加到购物车
+    window.quickAddToCart = function(id) {
+        const p = shopProducts.find(x => x.id === id);
+        if (!p) return;
+        addItemToCart(p, p.specs[0]);
+        showCartBadgeAnim();
+    };
+
+    function addItemToCart(product, spec) {
+        const key = product.id + '_' + spec;
+        const exist = shopCart.find(x => x.key === key);
+        if (exist) { exist.qty++; } else { shopCart.push({ key, product, spec, qty: 1 }); }
+        updateCartBadge();
+    }
+
+    // ====== 自定义商品功能 ======
+    let customProductIdCounter = 90000;
+
+    window.showCustomProductForm = function() {
+        document.getElementById('shop-custom-modal').style.display = 'flex';
+    };
+
+    window.hideCustomProductForm = function() {
+        document.getElementById('shop-custom-modal').style.display = 'none';
+    };
+
+    window.addCustomProduct = function() {
+        const nameEl = document.getElementById('custom-product-name');
+        const catEl = document.getElementById('custom-product-cat');
+        const priceEl = document.getElementById('custom-product-price');
+        const originEl = document.getElementById('custom-product-origin');
+        const specsEl = document.getElementById('custom-product-specs');
+        const descEl = document.getElementById('custom-product-desc');
+        const qtyEl = document.getElementById('custom-product-qty');
+
+        const name = (nameEl.value || '').trim();
+        const cat = catEl.value || 'other';
+        const price = parseFloat(priceEl.value);
+        const originPrice = parseFloat(originEl.value) || 0;
+        const specsStr = (specsEl.value || '').trim();
+        const desc = (descEl.value || '').trim();
+        const qty = parseInt(qtyEl.value) || 1;
+
+        if (!name) { showToast('请输入商品名称'); nameEl.focus(); return; }
+        if (!price || price <= 0) { showToast('请输入有效价格'); priceEl.focus(); return; }
+
+        const specs = specsStr ? specsStr.split(/[,，、]/).map(s => s.trim()).filter(s => s) : ['默认'];
+
+        // 类别对应的图标
+        const catEmoji = { clothing:'👕', bags:'👜', shoes:'👟', beauty:'💄', jewelry:'💎', digital:'📱', home:'🏠', other:'🛒' };
+
+        customProductIdCounter++;
+        const product = {
+            id: customProductIdCounter,
+            name: name,
+            cat: cat,
+            price: price,
+            originPrice: originPrice > 0 ? originPrice : Math.round(price * 1.5),
+            desc: desc || '自定义商品',
+            specs: specs,
+            sold: 0,
+            emoji: catEmoji[cat] || '🛒',
+            isCustom: true
+        };
+
+        // 加入预设商品列表（这样在商品网格也能看到）
+        shopProducts.push(product);
+
+        // 加入购物车（默认第一个规格）
+        for (let i = 0; i < qty; i++) {
+            addItemToCart(product, specs[0]);
+        }
+        showCartBadgeAnim();
+
+        // 刷新商品网格
+        renderProducts(currentCategory);
+
+        // 清空表单
+        nameEl.value = '';
+        priceEl.value = '';
+        originEl.value = '';
+        specsEl.value = '';
+        descEl.value = '';
+        qtyEl.value = '1';
+
+        hideCustomProductForm();
+        showToast(`${name} x${qty} 已加入购物车`);
+    };
+
+    function updateCartBadge() {
+        const badge = document.getElementById('shop-cart-badge');
+        const total = shopCart.reduce((s, x) => s + x.qty, 0);
+        if (badge) { badge.textContent = total; badge.style.display = total > 0 ? 'flex' : 'none'; }
+    }
+
+    function showCartBadgeAnim() {
+        const badge = document.getElementById('shop-cart-badge');
+        if (badge) { badge.style.transform = 'scale(1.4)'; setTimeout(() => badge.style.transform = 'scale(1)', 200); }
+    }
+
+    // ====== 页面显示/隐藏 ======
+    window.showShoppingPage = function() {
+        const page = document.getElementById('shopping-page');
+        if (page) { page.style.display = 'flex'; page.offsetHeight; page.classList.add('active'); renderProducts(currentCategory); }
+    };
+    window.hideShoppingPage = function() {
+        const page = document.getElementById('shopping-page');
+        if (page) { page.classList.remove('active'); setTimeout(() => page.style.display = 'none', 300); }
+    };
+    window.showShoppingCart = function() {
+        const drawer = document.getElementById('shop-cart-drawer');
+        if (drawer) { drawer.style.display = 'flex'; renderCartList(); }
+    };
+    window.hideShoppingCart = function() {
+        const drawer = document.getElementById('shop-cart-drawer');
+        if (drawer) drawer.style.display = 'none';
+    };
+
+    // ====== 购物车渲染 ======
+    function renderCartList() {
+        const list = document.getElementById('shop-cart-list');
+        const totalEl = document.getElementById('shop-total-price');
+        if (!list) return;
+        if (shopCart.length === 0) {
+            list.innerHTML = '<div class="shop-cart-empty">购物车是空的</div>';
+            if (totalEl) totalEl.textContent = '¥0.00';
+            return;
+        }
+        let total = 0;
+        list.innerHTML = shopCart.map((item, idx) => {
+            total += item.product.price * item.qty;
+            return `<div class="shop-cart-item">
+                <div class="shop-cart-item-img"><span>${item.product.emoji}</span></div>
+                <div class="shop-cart-item-info">
+                    <div class="shop-cart-item-name">${item.product.name}</div>
+                    <div class="shop-cart-item-spec">${item.spec}</div>
+                    <div class="shop-cart-item-price">¥${item.product.price.toFixed(2)}</div>
+                </div>
+                <div class="shop-cart-qty">
+                    <div class="shop-qty-btn" onclick="changeCartQty(${idx},-1)">−</div>
+                    <div class="shop-qty-num">${item.qty}</div>
+                    <div class="shop-qty-btn" onclick="changeCartQty(${idx},1)">+</div>
+                </div>
+            </div>`;
+        }).join('');
+        if (totalEl) totalEl.textContent = '¥' + total.toFixed(2);
+    }
+
+    window.changeCartQty = function(idx, delta) {
+        if (!shopCart[idx]) return;
+        shopCart[idx].qty += delta;
+        if (shopCart[idx].qty <= 0) shopCart.splice(idx, 1);
+        updateCartBadge();
+        renderCartList();
+    };
+    window.clearShoppingCart = function() { shopCart = []; updateCartBadge(); renderCartList(); };
+
+    // ====== 商品详情 ======
+    window.openShopDetail = function(id) {
+        const p = shopProducts.find(x => x.id === id);
+        if (!p) return;
+        currentDetailProduct = p;
+        currentSpec = p.specs[0];
+        document.getElementById('shop-detail-img').innerHTML = '<span style="font-size:80px;">' + p.emoji + '</span>';
+        document.getElementById('shop-detail-name').textContent = p.name;
+        document.getElementById('shop-detail-desc').textContent = p.desc;
+        document.getElementById('shop-detail-price').textContent = '¥' + p.price.toFixed(2);
+        document.getElementById('shop-spec-options').innerHTML = p.specs.map((s, i) =>
+            `<div class="shop-spec-btn ${i===0?'active':''}" onclick="selectShopSpec(this,'${s}')">${s}</div>`
+        ).join('');
+        document.getElementById('shop-detail-modal').style.display = 'flex';
+    };
+    window.selectShopSpec = function(el, spec) {
+        currentSpec = spec;
+        el.parentElement.querySelectorAll('.shop-spec-btn').forEach(b => b.classList.remove('active'));
+        el.classList.add('active');
+    };
+    window.closeShopDetail = function() { document.getElementById('shop-detail-modal').style.display = 'none'; };
+    window.addToCartFromDetail = function() {
+        if (!currentDetailProduct) return;
+        addItemToCart(currentDetailProduct, currentSpec);
+        showCartBadgeAnim();
+        closeShopDetail();
+    };
+
+    // ====== 结算页面 ======
+    window.showCheckoutPage = function() {
+        if (shopCart.length === 0) return;
+        hideShoppingCart();
+        currentInstallment = 0;
+        selectedFriendForPay = null;
+        selectedFamilyCard = null;
+        selectedBuyForFriend = null;
+
+        // 重置送给谁
+        document.getElementById('shop-buyfor-self')?.classList.add('active');
+        document.getElementById('shop-buyfor-friend-btn')?.classList.remove('active');
+        document.getElementById('shop-buyfor-selected').style.display = 'none';
+        document.getElementById('shop-buyfor-reset').style.display = 'none';
+
+        const itemsEl = document.getElementById('shop-checkout-items');
+        let subtotal = 0;
+        if (itemsEl) {
+            itemsEl.innerHTML = shopCart.map(item => {
+                subtotal += item.product.price * item.qty;
+                return `<div class="shop-checkout-item">
+                    <div class="shop-checkout-item-img"><span>${item.product.emoji}</span></div>
+                    <div class="shop-checkout-item-info">
+                        <div class="shop-checkout-item-name">${item.product.name}</div>
+                        <div class="shop-checkout-item-spec">规格：${item.spec}</div>
+                    </div>
+                    <div class="shop-checkout-item-right">
+                        <div class="shop-checkout-item-price">¥${item.product.price.toFixed(2)}</div>
+                        <div class="shop-checkout-item-qty">×${item.qty}</div>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        updateCheckoutSummary(subtotal);
+
+        // 分期描述
+        const i3 = document.getElementById('inst-3-desc');
+        const i6 = document.getElementById('inst-6-desc');
+        const i12 = document.getElementById('inst-12-desc');
+        if (i3) i3.textContent = '¥' + (subtotal / 3).toFixed(2) + '/期';
+        if (i6) i6.textContent = '¥' + ((subtotal * 1.005) / 6).toFixed(2) + '/期';
+        if (i12) i12.textContent = '¥' + ((subtotal * 1.01) / 12).toFixed(2) + '/期';
+
+        // 重置选项
+        document.querySelectorAll('.shop-inst-item').forEach(el => el.classList.remove('active'));
+        const first = document.querySelector('.shop-inst-item[data-inst="0"]');
+        if (first) first.classList.add('active');
+
+        // 重置付款方式为钱包
+        const walletRadio = document.querySelector('input[name="payMethod"][value="wallet"]');
+        if (walletRadio) walletRadio.checked = true;
+
+        // 清除已选好友/亲属卡的提示
+        const existFriendInfo = document.getElementById('shop-selected-friend-info');
+        if (existFriendInfo) existFriendInfo.remove();
+        const existFcInfo = document.getElementById('shop-selected-fc-info');
+        if (existFcInfo) existFcInfo.remove();
+
+        document.getElementById('shop-checkout-page').style.display = 'flex';
+    };
+
+    function updateCheckoutSummary(subtotal) {
+        if (subtotal === undefined) subtotal = shopCart.reduce((s, x) => s + x.product.price * x.qty, 0);
+        let fee = 0;
+        if (currentInstallment === 6) fee = subtotal * 0.005;
+        else if (currentInstallment === 12) fee = subtotal * 0.01;
+        const total = subtotal + fee;
+
+        const subEl = document.getElementById('checkout-subtotal');
+        const feeEl = document.getElementById('checkout-fee');
+        const totalEl = document.getElementById('checkout-total');
+        const finalEl = document.getElementById('checkout-final-price');
+        const instInfo = document.getElementById('checkout-installment-info');
+        const perPeriod = document.getElementById('checkout-per-period');
+
+        if (subEl) subEl.textContent = '¥' + subtotal.toFixed(2);
+        if (feeEl) feeEl.textContent = '¥' + fee.toFixed(2);
+        if (totalEl) totalEl.textContent = '¥' + total.toFixed(2);
+        if (finalEl) finalEl.textContent = '¥' + total.toFixed(2);
+
+        if (currentInstallment > 0 && instInfo && perPeriod) {
+            instInfo.style.display = 'block';
+            perPeriod.textContent = '¥' + (total / currentInstallment).toFixed(2);
+        } else if (instInfo) {
+            instInfo.style.display = 'none';
+        }
+    }
+
+    window.hideCheckoutPage = function() { document.getElementById('shop-checkout-page').style.display = 'none'; };
+    window.selectInstallment = function(n) {
+        currentInstallment = n;
+        document.querySelectorAll('.shop-inst-item').forEach(el => { el.classList.toggle('active', parseInt(el.dataset.inst) === n); });
+        updateCheckoutSummary();
+    };
+
+    // ====== 送给谁（为谁购买） ======
+    window.selectBuyForSelf = function() {
+        selectedBuyForFriend = null;
+        document.getElementById('shop-buyfor-self')?.classList.add('active');
+        document.getElementById('shop-buyfor-friend-btn')?.classList.remove('active');
+        document.getElementById('shop-buyfor-selected').style.display = 'none';
+        document.getElementById('shop-buyfor-reset').style.display = 'none';
+    };
+
+    window.showBuyForFriendPicker = async function() {
+        const picker = document.getElementById('shop-buyfor-picker');
+        const list = document.getElementById('shop-buyfor-picker-list');
+        picker.style.display = 'flex';
+        list.innerHTML = '<div style="text-align:center;padding:30px;color:#ccc;">加载好友列表...</div>';
+
+        const friends = await getFriendsList();
+        if (friends.length === 0) {
+            list.innerHTML = '<div style="text-align:center;padding:40px;color:#bbb;">暂无好友</div>';
+            return;
+        }
+
+        list.innerHTML = friends.map(f => {
+            const avatarStyle = f.avatar ? `background-image:url(${f.avatar})` : 'background:#e0e0e0';
+            return `<div class="shop-friend-item" data-fid="${f.id}" onclick="selectBuyForFriend(${f.id}, this)">
+                <div class="shop-friend-avatar" style="${avatarStyle}"></div>
+                <div class="shop-friend-name">${f.name}</div>
+                <div class="shop-friend-select-icon">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                </div>
+            </div>`;
+        }).join('') + '<div class="shop-friend-confirm-btn" onclick="confirmBuyForFriend()">确认选择</div>';
+    };
+
+    window.selectBuyForFriend = function(id, el) {
+        document.querySelectorAll('#shop-buyfor-picker-list .shop-friend-item').forEach(e => e.classList.remove('selected'));
+        el.classList.add('selected');
+        selectedBuyForFriend = id;
+    };
+
+    window.hideBuyForPicker = function() {
+        document.getElementById('shop-buyfor-picker').style.display = 'none';
+    };
+
+    window.confirmBuyForFriend = async function() {
+        if (!selectedBuyForFriend) { showToast('请先选择一位好友'); return; }
+        const friend = await db.characters.get(selectedBuyForFriend);
+        if (!friend) { showToast('好友不存在'); return; }
+
+        hideBuyForPicker();
+
+        // 更新UI
+        document.getElementById('shop-buyfor-self')?.classList.remove('active');
+        document.getElementById('shop-buyfor-friend-btn')?.classList.add('active');
+
+        const selectedDiv = document.getElementById('shop-buyfor-selected');
+        const avatarDiv = document.getElementById('shop-buyfor-avatar');
+        const nameSpan = document.getElementById('shop-buyfor-name');
+        if (selectedDiv) selectedDiv.style.display = 'flex';
+        if (avatarDiv) avatarDiv.style = friend.avatar ? `background-image:url(${friend.avatar})` : 'background:#e0e0e0';
+        if (nameSpan) nameSpan.textContent = friend.name;
+        document.getElementById('shop-buyfor-reset').style.display = 'inline';
+
+        showToast('已选择送给 ' + friend.name);
+    };
+
+    window.resetBuyFor = function() {
+        selectBuyForSelf();
+    };
+
+    // ====== 找朋友代付 ======
+    window.showShopFriendPicker = async function() {
+        const picker = document.getElementById('shop-friend-picker');
+        const list = document.getElementById('shop-friend-picker-list');
+        picker.style.display = 'flex';
+        list.innerHTML = '<div style="text-align:center;padding:30px;color:#ccc;">加载好友列表...</div>';
+
+        const friends = await getFriendsList();
+        if (friends.length === 0) {
+            list.innerHTML = '<div style="text-align:center;padding:40px;color:#bbb;">暂无好友</div>';
+            return;
+        }
+
+        list.innerHTML = friends.map(f => {
+            const avatarStyle = f.avatar ? `background-image:url(${f.avatar})` : 'background:#e0e0e0';
+            return `<div class="shop-friend-item" data-fid="${f.id}" onclick="selectShopFriend(${f.id}, this)">
+                <div class="shop-friend-avatar" style="${avatarStyle}"></div>
+                <div class="shop-friend-name">${f.name}</div>
+                <div class="shop-friend-select-icon">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                </div>
+            </div>`;
+        }).join('') + '<div class="shop-friend-confirm-btn" onclick="confirmShopFriendPay()">确认选择</div>';
+    };
+
+    window.selectShopFriend = function(id, el) {
+        document.querySelectorAll('.shop-friend-item').forEach(e => e.classList.remove('selected'));
+        el.classList.add('selected');
+        selectedFriendForPay = id;
+    };
+
+    window.hideShopFriendPicker = function() {
+        document.getElementById('shop-friend-picker').style.display = 'none';
+    };
+
+    window.confirmShopFriendPay = async function() {
+        if (!selectedFriendForPay) { showToast('请先选择一位好友'); return; }
+        const friend = await db.characters.get(selectedFriendForPay);
+        if (!friend) { showToast('好友不存在'); return; }
+
+        hideShopFriendPicker();
+
+        // 显示已选好友信息
+        const existInfo = document.getElementById('shop-selected-friend-info');
+        if (existInfo) existInfo.remove();
+        const paySection = document.querySelector('.shop-pay-options');
+        if (paySection) {
+            const div = document.createElement('div');
+            div.id = 'shop-selected-friend-info';
+            div.className = 'shop-pay-selected-friend';
+            const avatarStyle = friend.avatar ? `background-image:url(${friend.avatar})` : 'background:#e0e0e0';
+            div.innerHTML = `<div class="shop-pay-selected-avatar" style="${avatarStyle}"></div>
+                <span>已选择 <b>${friend.name}</b> 代付</span>`;
+            paySection.parentElement.appendChild(div);
+        }
+        showToast('已选择 ' + friend.name + ' 代付');
+    };
+
+    // 监听付款方式radio变化
+    document.addEventListener('change', function(e) {
+        if (e.target.name === 'payMethod') {
+            // 清除已选信息
+            const existFriendInfo = document.getElementById('shop-selected-friend-info');
+            if (existFriendInfo) existFriendInfo.remove();
+            const existFcInfo = document.getElementById('shop-selected-fc-info');
+            if (existFcInfo) existFcInfo.remove();
+            selectedFriendForPay = null;
+            selectedFamilyCard = null;
+
+            if (e.target.value === 'friend') {
+                showShopFriendPicker();
+            } else if (e.target.value === 'family') {
+                showShopFamilyCardPicker();
+            }
+        }
+    });
+
+    // ====== 亲属卡支付 ======
+    window.showShopFamilyCardPicker = async function() {
+        const picker = document.getElementById('shop-family-card-picker');
+        const list = document.getElementById('shop-family-card-list');
+        picker.style.display = 'flex';
+        list.innerHTML = '<div style="text-align:center;padding:30px;color:#ccc;">检测亲属卡...</div>';
+
+        const cards = await getReceivedFamilyCards();
+        if (cards.length === 0) {
+            list.innerHTML = `<div class="shop-fc-empty">
+                <div style="margin-bottom:12px;"><svg width="40" height="40" fill="none" stroke="#ccc" stroke-width="1.5" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg></div>
+                <div>暂未收到亲属卡</div>
+                <div style="font-size:12px;margin-top:6px;color:#ccc;">好友可以在聊天中向你赠送亲属卡</div>
+            </div>`;
+            return;
+        }
+
+        list.innerHTML = cards.map((c, i) => {
+            const avatarStyle = c.avatar ? `background-image:url(${c.avatar})` : 'background:#e0e0e0';
+            const limitText = c.monthlyLimit > 0 ? `月额度 ¥${c.monthlyLimit}` : '不限额度';
+            const remain = c.monthlyLimit > 0 ? `剩余 ¥${(c.monthlyLimit - c.usedThisMonth).toFixed(2)}` : '无限制';
+            return `<div class="shop-fc-item" data-idx="${i}" onclick="selectShopFamilyCard(${i}, this)">
+                <div class="shop-fc-avatar" style="${avatarStyle}"></div>
+                <div class="shop-fc-info">
+                    <div class="shop-fc-name">${c.name} 的亲属卡</div>
+                    <div class="shop-fc-limit">${limitText}</div>
+                    <div class="shop-fc-remain">${remain}</div>
+                </div>
+                <div class="shop-fc-check">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                </div>
+            </div>`;
+        }).join('') + '<div class="shop-friend-confirm-btn" onclick="confirmShopFamilyCard()">使用此亲属卡</div>';
+
+        // 保存cards供选择使用
+        window._shopFamilyCards = cards;
+    };
+
+    window.selectShopFamilyCard = function(idx, el) {
+        document.querySelectorAll('.shop-fc-item').forEach(e => e.classList.remove('selected'));
+        el.classList.add('selected');
+        selectedFamilyCard = window._shopFamilyCards?.[idx] || null;
+    };
+
+    window.hideShopFamilyCardPicker = function() {
+        document.getElementById('shop-family-card-picker').style.display = 'none';
+    };
+
+    window.confirmShopFamilyCard = function() {
+        if (!selectedFamilyCard) { showToast('请选择一张亲属卡'); return; }
+
+        // 检查额度
+        const subtotal = shopCart.reduce((s, x) => s + x.product.price * x.qty, 0);
+        if (selectedFamilyCard.monthlyLimit > 0) {
+            const remain = selectedFamilyCard.monthlyLimit - selectedFamilyCard.usedThisMonth;
+            if (subtotal > remain) {
+                showToast('亲属卡本月额度不足（剩余¥' + remain.toFixed(2) + '）');
+                return;
+            }
+        }
+
+        hideShopFamilyCardPicker();
+
+        // 显示已选亲属卡
+        const existInfo = document.getElementById('shop-selected-fc-info');
+        if (existInfo) existInfo.remove();
+        const paySection = document.querySelector('.shop-pay-options');
+        if (paySection) {
+            const div = document.createElement('div');
+            div.id = 'shop-selected-fc-info';
+            div.className = 'shop-pay-selected-fc';
+            div.innerHTML = `使用 <b>${selectedFamilyCard.name}</b> 的亲属卡支付`;
+            paySection.parentElement.appendChild(div);
+        }
+        showToast('已选择 ' + selectedFamilyCard.name + ' 的亲属卡');
+    };
+
+    // ====== 分期付款管理 ======
+    function getInstallmentPlans() {
+        try { return JSON.parse(localStorage.getItem(SHOP_INST_KEY) || '[]'); } catch(e) { return []; }
+    }
+    function saveInstallmentPlans(plans) {
+        localStorage.setItem(SHOP_INST_KEY, JSON.stringify(plans));
+    }
+
+    // 创建分期计划
+    function createInstallmentPlan(totalAmount, periods, items) {
+        const perPeriod = parseFloat((totalAmount / periods).toFixed(2));
+        const plan = {
+            id: 'inst_' + Date.now(),
+            totalAmount,
+            periods,
+            perPeriod,
+            paidPeriods: 1, // 第一期立即扣
+            paidAmount: perPeriod,
+            items: items.map(x => x.product.name).join('、'),
+            createdAt: Date.now(),
+            nextDeductAt: Date.now() + 86400000, // 1天后扣第二期（一天一期）
+            status: 'active'
+        };
+        const plans = getInstallmentPlans();
+        plans.push(plan);
+        saveInstallmentPlans(plans);
+        startInstallmentTimer();
+        return plan;
+    }
+
+    // 从余额扣款
+    async function deductBalance(amount, desc) {
+        const charId = getMyCharId();
+        if (!charId) return false;
+        const user = await db.characters.get(parseInt(charId));
+        if (!user || !user.identity) return false;
+        let balance = parseFloat(user.identity.balance || 0);
+        balance -= amount;
+        user.identity.balance = balance.toFixed(2);
+        await db.characters.put(user);
+        console.log('[购物分期] 扣款成功: ¥' + amount.toFixed(2) + ' | 余额: ¥' + balance.toFixed(2) + ' | ' + desc);
+        return true;
+    }
+
+    // 分期定时器
+    let instTimer = null;
+    function startInstallmentTimer() {
+        if (instTimer) return; // 已在运行
+        instTimer = setInterval(async () => {
+            const plans = getInstallmentPlans();
+            let changed = false;
+            const now = Date.now();
+
+            for (const plan of plans) {
+                if (plan.status !== 'active') continue;
+                if (plan.paidPeriods >= plan.periods) {
+                    plan.status = 'completed';
+                    changed = true;
+                    continue;
+                }
+                if (now >= plan.nextDeductAt) {
+                    // 扣款
+                    const success = await deductBalance(plan.perPeriod, `分期付款 第${plan.paidPeriods + 1}/${plan.periods}期`);
+                    if (success) {
+                        plan.paidPeriods++;
+                        plan.paidAmount = parseFloat((plan.paidAmount + plan.perPeriod).toFixed(2));
+                        plan.nextDeductAt = now + 86400000; // 每天一期
+                        if (plan.paidPeriods >= plan.periods) {
+                            plan.status = 'completed';
+                        }
+                        changed = true;
+                        showToast(`分期扣款 ¥${plan.perPeriod.toFixed(2)} (${plan.paidPeriods}/${plan.periods}期)`);
+                    }
+                }
+            }
+
+            if (changed) saveInstallmentPlans(plans);
+
+            // 如果所有计划都完成了，停止定时器
+            const hasActive = plans.some(p => p.status === 'active');
+            if (!hasActive && instTimer) {
+                clearInterval(instTimer);
+                instTimer = null;
+            }
+        }, 60000); // 每60秒检查一次（一天一期）
+    }
+
+    // 页面加载时恢复定时器
+    const existingPlans = getInstallmentPlans();
+    if (existingPlans.some(p => p.status === 'active')) {
+        startInstallmentTimer();
+    }
+
+    // 查看分期详情
+    window.showInstallmentMgr = function() {
+        const mgr = document.getElementById('shop-installment-mgr');
+        const list = document.getElementById('shop-installment-mgr-list');
+        const plans = getInstallmentPlans();
+
+        if (plans.length === 0) {
+            list.innerHTML = '<div style="text-align:center;padding:40px;color:#bbb;">暂无分期记录</div>';
+        } else {
+            list.innerHTML = plans.slice().reverse().map(plan => {
+                let dots = '';
+                for (let i = 0; i < plan.periods; i++) {
+                    if (i < plan.paidPeriods) dots += '<div class="shop-inst-dot paid"></div>';
+                    else if (i === plan.paidPeriods) dots += '<div class="shop-inst-dot current"></div>';
+                    else dots += '<div class="shop-inst-dot"></div>';
+                }
+                const statusCls = plan.status === 'active' ? 'active' : 'done';
+                const statusText = plan.status === 'active' ? '还款中' : '已结清';
+                return `<div class="shop-inst-record">
+                    <div class="shop-inst-record-header">
+                        <div class="shop-inst-record-title">${plan.periods}期分期</div>
+                        <div class="shop-inst-record-status ${statusCls}">${statusText}</div>
+                    </div>
+                    <div class="shop-inst-progress">${dots}</div>
+                    <div class="shop-inst-record-info">
+                        商品：${plan.items}<br>
+                        总额：¥${plan.totalAmount.toFixed(2)} | 每期：¥${plan.perPeriod.toFixed(2)}<br>
+                        已付：${plan.paidPeriods}/${plan.periods}期 (¥${plan.paidAmount.toFixed(2)})
+                    </div>
+                </div>`;
+            }).join('');
+        }
+        mgr.style.display = 'flex';
+    };
+    window.hideInstallmentMgr = function() { document.getElementById('shop-installment-mgr').style.display = 'none'; };
+
+    // ====== 构建代付请求卡片数据 ======
+    function buildPayRequestCardData(amount, items, buyForName, installmentInfo) {
+        return {
+            amount: amount.toFixed(2),
+            items: items,
+            buyForName: buyForName || '',
+            installmentInfo: installmentInfo || '',
+            status: 'pending'
+        };
+    }
+
+    // 发送代付请求卡片到好友聊天
+    async function sendPayRequestCard(friendId, cardData) {
+        const accountId = getMyCharId();
+        const freshFriend = await db.characters.get(friendId);
+        if (!freshFriend) return;
+
+        const msg = {
+            role: 'user',
+            type: 'shopPayRequest',
+            content: JSON.stringify(cardData),
+            time: Date.now()
+        };
+
+        let history = _getChatHistory(freshFriend, accountId);
+        history.push(msg);
+        await _setChatHistory(freshFriend, accountId, history);
+
+        // 直接追加到聊天DOM（不刷新页面）
+        if (window._appendShopCardToChat) {
+            await window._appendShopCardToChat(friendId, msg);
+        }
+    }
+
+    // 发送购物通知卡片给被赠送的好友
+    async function sendGiftNotifyCard(friendId, cardData) {
+        const accountId = getMyCharId();
+        const freshFriend = await db.characters.get(friendId);
+        if (!freshFriend) return;
+
+        const msg = {
+            role: 'user',
+            type: 'shopPayRequest',
+            content: JSON.stringify({
+                ...cardData,
+                isGift: true,
+                status: 'paid'
+            }),
+            time: Date.now()
+        };
+
+        let history = _getChatHistory(freshFriend, accountId);
+        history.push(msg);
+        await _setChatHistory(freshFriend, accountId, history);
+
+        // 直接追加到聊天DOM（不刷新页面）
+        if (window._appendShopCardToChat) {
+            await window._appendShopCardToChat(friendId, msg);
+        }
+    }
+
+    // 发送购物分享卡片给好友（买给自己时分享）
+    async function sendShareCard(friendId, cardData) {
+        const accountId = getMyCharId();
+        const freshFriend = await db.characters.get(friendId);
+        if (!freshFriend) return;
+
+        const msg = {
+            role: 'user',
+            type: 'shopPayRequest',
+            content: JSON.stringify({
+                ...cardData,
+                isShare: true,
+                status: 'paid'
+            }),
+            time: Date.now()
+        };
+
+        let history = _getChatHistory(freshFriend, accountId);
+        history.push(msg);
+        await _setChatHistory(freshFriend, accountId, history);
+
+        // 直接追加到聊天DOM（不刷新页面）
+        if (window._appendShopCardToChat) {
+            await window._appendShopCardToChat(friendId, msg);
+        }
+    }
+
+    // ====== 提交订单 ======
+    window.submitShopOrder = async function() {
+        const subtotal = shopCart.reduce((s, x) => s + x.product.price * x.qty, 0);
+        let fee = 0;
+        if (currentInstallment === 6) fee = subtotal * 0.005;
+        else if (currentInstallment === 12) fee = subtotal * 0.01;
+        const finalAmount = subtotal + fee;
+
+        const payMethod = document.querySelector('input[name="payMethod"]:checked')?.value || 'wallet';
+        const itemNames = shopCart.map(x => x.product.name).join('、');
+
+        // 获取"送给谁"的好友名字
+        let buyForName = '';
+        let buyForFriend = null;
+        if (selectedBuyForFriend) {
+            buyForFriend = await db.characters.get(selectedBuyForFriend);
+            buyForName = buyForFriend ? buyForFriend.name : '';
+        }
+
+        // 分期信息
+        let installmentInfo = '';
+        if (currentInstallment > 0) {
+            const perPeriod = (finalAmount / currentInstallment).toFixed(2);
+            installmentInfo = `分${currentInstallment}期 · 每天 ¥${perPeriod}`;
+        }
+
+        // 保存订单卡片数据供分享使用
+        lastOrderCardData = buildPayRequestCardData(finalAmount, itemNames, buyForName, installmentInfo);
+
+        // ====== 处理不同付款方式 ======
+        if (payMethod === 'friend') {
+            // 代付 - 需要已选好友
+            if (!selectedFriendForPay) { showToast('请先选择代付好友'); showShopFriendPicker(); return; }
+            const friend = await db.characters.get(selectedFriendForPay);
+            if (!friend) { showToast('好友不存在'); return; }
+
+            // 构建代付请求卡片
+            const cardData = buildPayRequestCardData(finalAmount, itemNames, buyForName, installmentInfo);
+
+            // 发送代付请求卡片到代付好友的聊天
+            await sendPayRequestCard(friend.id, cardData);
+
+            // 如果还选了"送给谁"，也发一张通知卡片给被赠送的好友
+            if (buyForFriend && buyForFriend.id !== friend.id) {
+                await sendGiftNotifyCard(buyForFriend.id, cardData);
+            }
+
+            let successMsg = `已向 ${friend.name} 发送代付请求\n金额 ¥${finalAmount.toFixed(2)}`;
+            if (buyForName) successMsg += `\n送给：${buyForName}`;
+            if (installmentInfo) successMsg += `\n${installmentInfo}`;
+            showPaySuccess(finalAmount, successMsg);
+
+        } else if (payMethod === 'family') {
+            // 亲属卡支付
+            if (!selectedFamilyCard) { showToast('请先选择亲属卡'); showShopFamilyCardPicker(); return; }
+
+            // 检查额度
+            if (selectedFamilyCard.monthlyLimit > 0) {
+                const remain = selectedFamilyCard.monthlyLimit - selectedFamilyCard.usedThisMonth;
+                if (finalAmount > remain) {
+                    showToast('亲属卡额度不足');
+                    return;
+                }
+            }
+
+            // 更新亲属卡使用额度
+            const accountId = getMyCharId();
+            if (accountId) {
+                const user = await db.characters.get(parseInt(accountId));
+                if (user && user.identity && user.identity.familyCardsReceived) {
+                    const card = user.identity.familyCardsReceived.find(c => c.charId === selectedFamilyCard.charId);
+                    if (card) {
+                        card.usedThisMonth = (card.usedThisMonth || 0) + finalAmount;
+                        if (!card.records) card.records = [];
+                        card.records.push({ amount: finalAmount, desc: '购物消费', time: Date.now() });
+                        await db.characters.put(user);
+                    }
+                }
+            }
+
+            // 如果选了"送给谁"，发通知卡片给被赠送的好友
+            if (buyForFriend) {
+                const cardData = buildPayRequestCardData(finalAmount, itemNames, buyForName, installmentInfo);
+                cardData.payMethod = '亲属卡（' + selectedFamilyCard.name + '）';
+                await sendGiftNotifyCard(buyForFriend.id, cardData);
+            }
+
+            let successMsg = `已使用 ${selectedFamilyCard.name} 的亲属卡支付`;
+            if (buyForName) successMsg += `\n送给：${buyForName}`;
+            showPaySuccess(finalAmount, successMsg);
+
+        } else {
+            // 零钱支付
+            if (currentInstallment > 0) {
+                // 分期付款 - 第一期立即扣
+                const plan = createInstallmentPlan(finalAmount, currentInstallment, shopCart);
+                await deductBalance(plan.perPeriod, `分期付款 第1/${currentInstallment}期`);
+
+                // 如果选了"送给谁"，发通知卡片给被赠送的好友
+                if (buyForFriend) {
+                    const cardData = buildPayRequestCardData(finalAmount, itemNames, buyForName, installmentInfo);
+                    cardData.payMethod = '分期付款';
+                    await sendGiftNotifyCard(buyForFriend.id, cardData);
+                }
+
+                let successMsg = `分期 ${currentInstallment} 期\n首期已扣 ¥${plan.perPeriod.toFixed(2)}\n每天自动扣款一期`;
+                if (buyForName) successMsg += `\n送给：${buyForName}`;
+                showPaySuccess(finalAmount, successMsg, true);
+            } else {
+                // 全额支付
+                await deductBalance(finalAmount, '购物消费');
+
+                // 如果选了"送给谁"，发通知卡片给被赠送的好友
+                if (buyForFriend) {
+                    const cardData = buildPayRequestCardData(finalAmount, itemNames, buyForName, '');
+                    cardData.payMethod = '零钱支付';
+                    await sendGiftNotifyCard(buyForFriend.id, cardData);
+                }
+
+                let successMsg = '';
+                if (buyForName) successMsg = `送给：${buyForName}`;
+                showPaySuccess(finalAmount, successMsg || undefined);
+            }
+        }
+
+        // 清空购物车
+        shopCart = [];
+        updateCartBadge();
+    };
+
+    // ====== 分享购物卡片给好友 ======
+    let lastOrderCardData = null; // 保存最后一次订单卡片数据供分享使用
+
+    window.showShareToPicker = async function() {
+        const picker = document.getElementById('shop-share-picker');
+        const list = document.getElementById('shop-share-picker-list');
+        picker.style.display = 'flex';
+        list.innerHTML = '<div style="text-align:center;padding:30px;color:#ccc;">加载好友列表...</div>';
+
+        const friends = await getFriendsList();
+        if (friends.length === 0) {
+            list.innerHTML = '<div style="text-align:center;padding:40px;color:#bbb;">暂无好友</div>';
+            return;
+        }
+
+        list.innerHTML = friends.map(f => {
+            const avatarStyle = f.avatar ? `background-image:url(${f.avatar})` : 'background:#e0e0e0';
+            return `<div class="shop-friend-item" data-fid="${f.id}" onclick="confirmShareTo(${f.id})">
+                <div class="shop-friend-avatar" style="${avatarStyle}"></div>
+                <div class="shop-friend-name">${f.name}</div>
+                <svg width="14" height="14" stroke="#ccc" stroke-width="2" fill="none" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>
+            </div>`;
+        }).join('');
+    };
+
+    window.hideSharePicker = function() {
+        document.getElementById('shop-share-picker').style.display = 'none';
+    };
+
+    window.confirmShareTo = async function(friendId) {
+        if (!lastOrderCardData) { showToast('无可分享的订单'); return; }
+        const friend = await db.characters.get(friendId);
+        if (!friend) { showToast('好友不存在'); return; }
+
+        await sendShareCard(friendId, lastOrderCardData);
+        hideSharePicker();
+        showToast('已分享给 ' + friend.name);
+    };
+
+    function showPaySuccess(amount, extraInfo, isInstallment) {
+        const modal = document.getElementById('shop-success-modal');
+        const amountEl = document.getElementById('shop-success-amount');
+        const instInfoEl = document.getElementById('shop-success-inst-info');
+
+        if (amountEl) amountEl.textContent = '¥' + amount.toFixed(2);
+        if (extraInfo && instInfoEl) {
+            instInfoEl.style.display = 'block';
+            instInfoEl.textContent = extraInfo;
+        } else if (instInfoEl) {
+            instInfoEl.style.display = 'none';
+        }
+        if (modal) modal.style.display = 'flex';
+    }
+
+    window.closeShopSuccess = function() {
+        document.getElementById('shop-success-modal').style.display = 'none';
+        hideCheckoutPage();
+    };
+})();
