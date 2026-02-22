@@ -2568,6 +2568,9 @@ body {
             align-items: center;
             justify-content: center;
             transition: all 0.2s;
+            touch-action: manipulation; /* 🔧 手机端：消除300ms点击延迟，防止双击缩放 */
+            -webkit-tap-highlight-color: transparent; /* 🔧 去掉手机端点击高亮 */
+            user-select: none; /* 🔧 防止意外选中 */
             border-radius: 50%;
         }
         .chat-icon-btn:active {
@@ -2850,6 +2853,34 @@ body {
             border-radius: 0 2px 0 0; /* 小圆角 */
         }
         
+        /* ===== 卡片消息：无论什么气泡主题，均去掉气泡包裹 ===== */
+        .message-row .message-content:has(.transfer-card),
+        .message-row .message-content:has(.family-card-msg),
+        .message-row .message-content:has(.spr-card),
+        .message-row .message-content:has(.intimate-req-card),
+        .message-row .message-content:has(.location-card) {
+            padding: 0 !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            border: none !important;
+            border-radius: 0 !important;
+            white-space: normal !important;
+            max-width: fit-content !important;
+        }
+        /* 去掉小尾巴三角（对任何主题） */
+        .message-row .message-content:has(.transfer-card)::before,
+        .message-row .message-content:has(.transfer-card)::after,
+        .message-row .message-content:has(.family-card-msg)::before,
+        .message-row .message-content:has(.family-card-msg)::after,
+        .message-row .message-content:has(.spr-card)::before,
+        .message-row .message-content:has(.spr-card)::after,
+        .message-row .message-content:has(.intimate-req-card)::before,
+        .message-row .message-content:has(.intimate-req-card)::after,
+        .message-row .message-content:has(.location-card)::before,
+        .message-row .message-content:has(.location-card)::after {
+            display: none !important;
+        }
+
         /* 气泡样式选择器 */
         .bubble-style-option.selected {
             border-color: var(--ins-pink) !important;
@@ -6338,6 +6369,10 @@ body {
     margin-right: 10px;
     cursor: pointer;
     margin-top: 0;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 .message-input-wrapper {
@@ -13109,4 +13144,204 @@ body {
     border-radius: 8px;
     font-size: 13px;
     color: #07c160;
+}
+
+/* ===== 亲密空间样式 ===== */
+.intimate-type-card:hover {
+    border-color: #d5d5d5 !important;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.04);
+}
+.intimate-type-card:active {
+    transform: scale(0.97);
+    border-color: #c0c0c0 !important;
+}
+.intimate-relation-card {
+    background: #fff;
+    border-radius: 16px;
+    overflow: hidden;
+    border: 1px solid rgba(0,0,0,0.04);
+    transition: all 0.2s;
+}
+.intimate-relation-card:active {
+    transform: scale(0.98);
+}
+.intimate-board-item {
+    padding: 14px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+}
+.intimate-board-item:last-child {
+    border-bottom: none;
+}
+.intimate-stat-item {
+    text-align: center;
+    flex: 1;
+}
+.intimate-stat-num {
+    font-size: 18px;
+    font-weight: 700;
+    color: #262626;
+    letter-spacing: -0.3px;
+}
+.intimate-stat-label {
+    font-size: 11px;
+    color: #b0b0b0;
+    margin-top: 2px;
+    letter-spacing: 0.3px;
+}
+.intimate-action-cell {
+    display: flex;
+    align-items: center;
+    padding: 15px 20px;
+    background: #fff;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.intimate-action-cell:active {
+    background: #f8f8f8;
+}
+.intimate-action-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 14px;
+    font-size: 18px;
+    flex-shrink: 0;
+}
+.intimate-action-text {
+    flex: 1;
+    font-size: 15px;
+    color: #262626;
+    font-weight: 400;
+}
+.intimate-action-arrow {
+    color: #d0d0d0;
+    font-size: 13px;
+}
+.intimate-progress-bar {
+    height: 4px;
+    background: #f0f0f0;
+    border-radius: 2px;
+    overflow: hidden;
+}
+.intimate-progress-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.6s ease;
+}
+.intimate-manage-cell {
+    display: flex;
+    align-items: center;
+    padding: 16px 20px;
+    background: #fff;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(0,0,0,0.03);
+    transition: background 0.15s;
+}
+.intimate-manage-cell:active {
+    background: #f8f8f8;
+}
+.intimate-manage-cell:last-child {
+    border-bottom: none;
+}
+
+/* ===== 亲密关系邀请卡片（仿转账卡片白色简约风） ===== */
+.intimate-req-card {
+    width: 220px;
+    border-radius: 12px;
+    padding: 14px 16px;
+    position: relative;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border: 1px solid rgba(0,0,0,0.03);
+    display: flex;
+    flex-direction: column;
+}
+.message-row.other .intimate-req-card {
+    background-color: #ffffff;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.04);
+}
+.message-row.self .intimate-req-card {
+    background: linear-gradient(135deg, #fff0f3 0%, #ffffff 100%);
+    box-shadow: 0 2px 8px rgba(255,192,203,0.1);
+}
+.intimate-req-card.done {
+    opacity: 0.75;
+}
+.intimate-req-card .ir-title {
+    font-size: 17px;
+    font-weight: 500;
+    color: #333;
+    margin-bottom: 4px;
+    letter-spacing: -0.3px;
+}
+.intimate-req-card.done .ir-title {
+    color: #999;
+}
+.intimate-req-card .ir-desc {
+    font-size: 13px;
+    color: #999;
+    margin-bottom: 12px;
+}
+.intimate-req-card .ir-line {
+    height: 1px;
+    background-color: rgba(0,0,0,0.04);
+    width: 100%;
+    margin-bottom: 8px;
+}
+.intimate-req-card .ir-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.intimate-req-card .ir-footer-text {
+    font-size: 12px;
+    color: #b0b0b0;
+    font-weight: 400;
+}
+.intimate-req-card .ir-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #e8b4c8;
+}
+.intimate-req-card.done .ir-dot {
+    background: #c0c0c0;
+}
+/* 催回复按钮（已废弃，保留兼容旧卡片） */
+.intimate-req-card .ir-action {
+    display: none;
+}
+/* 接受/婉拒按钮组 */
+.intimate-req-card .ir-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+}
+.intimate-req-card .ir-btn {
+    flex: 1;
+    text-align: center;
+    padding: 7px 0;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.intimate-req-card .ir-accept {
+    background: #333;
+    color: #fff;
+}
+.intimate-req-card .ir-accept:active {
+    background: #555;
+}
+.intimate-req-card .ir-reject {
+    background: #f5f5f5;
+    color: #999;
+}
+.intimate-req-card .ir-reject:active {
+    background: #eee;
 }

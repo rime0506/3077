@@ -439,8 +439,8 @@
                 </div>
             </div>
             <div class="custom-edit-tip" style="margin-top:8px; font-size:11px; color:#bbb; line-height:1.5;">
-                💡 提示：CSS代码会在保存设置后持久生效。可用浏览器F12查看元素类名。<br>
-                💬 点击"预览聊天效果"可以实时查看CSS在聊天页面的效果。
+                提示：CSS代码会在保存设置后持久生效。可用浏览器F12查看元素类名。<br>
+                点击"预览聊天效果"可以实时查看CSS在聊天页面的效果。
             </div>
         </div>
 
@@ -449,7 +449,7 @@
             <div style="width:90%; max-width:400px; height:85%; max-height:700px; background:#fff; border-radius:20px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 10px 40px rgba(0,0,0,0.3);">
                 <!-- 预览头部 -->
                 <div style="padding:16px 20px; border-bottom:1px solid #eee; display:flex; align-items:center; justify-content:space-between; background:#f8f8f8;">
-                    <div style="font-size:16px; font-weight:600; color:#333;">💬 聊天页面预览</div>
+                    <div style="font-size:16px; font-weight:600; color:#333;">聊天页面预览</div>
                     <div onclick="closeCSSPreview()" style="width:32px; height:32px; display:flex; align-items:center; justify-content:center; cursor:pointer; border-radius:50%; background:#fff; color:#999; font-size:20px; transition:all 0.2s;">×</div>
                 </div>
                 <!-- 预览内容 - 完全按照实际聊天页面结构 -->
@@ -521,11 +521,11 @@
                 <!-- 预览底部 -->
                 <div style="padding:12px 20px; border-top:1px solid #eee; background:#f8f8f8;">
                     <div style="font-size:11px; color:#999; margin-bottom:8px; line-height:1.4;">
-                        💡 提示：在输入框中修改CSS代码，预览会实时更新。<br>
+                        提示：在输入框中修改CSS代码，预览会实时更新。<br>
                         常用类名：<code style="background:#f0f0f0; padding:2px 4px; border-radius:3px; font-size:10px;">.chat-header</code> <code style="background:#f0f0f0; padding:2px 4px; border-radius:3px; font-size:10px;">.chat-footer</code> <code style="background:#f0f0f0; padding:2px 4px; border-radius:3px; font-size:10px;">.chat-input</code> <code style="background:#f0f0f0; padding:2px 4px; border-radius:3px; font-size:10px;">.message-content</code> <code style="background:#f0f0f0; padding:2px 4px; border-radius:3px; font-size:10px;">.message-row.other</code> <code style="background:#f0f0f0; padding:2px 4px; border-radius:3px; font-size:10px;">.message-row.self</code>
                     </div>
                     <div style="display:flex; gap:8px;">
-                        <div onclick="refreshCSSPreview()" style="flex:1; padding:10px; background:var(--ins-pink); color:#fff; border:none; border-radius:8px; font-size:14px; cursor:pointer; text-align:center; font-weight:500; transition:opacity 0.2s;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">🔄 刷新预览</div>
+                        <div onclick="refreshCSSPreview()" style="flex:1; padding:10px; background:var(--ins-pink); color:#fff; border:none; border-radius:8px; font-size:14px; cursor:pointer; text-align:center; font-weight:500; transition:opacity 0.2s;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">刷新预览</div>
                         <div onclick="applyCSSFromPreview()" style="flex:1; padding:10px; background:#43a047; color:#fff; border:none; border-radius:8px; font-size:14px; cursor:pointer; text-align:center; font-weight:500; transition:opacity 0.2s;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">✓ 应用CSS</div>
                     </div>
                 </div>
@@ -664,7 +664,7 @@
             </div>
             
             <div class="custom-edit-tip" style="margin-top:12px; font-size:11px; color:#bbb; line-height:1.5;">
-                💡 提示：主题保存后，可以在聊天详情页面选择应用。每个角色可以应用不同的主题。
+                提示：主题保存后，可以在聊天详情页面选择应用。每个角色可以应用不同的主题。
             </div>
         </div>
 
@@ -685,7 +685,7 @@
             </div>
             <input type="file" id="theme-import-input" accept=".json" style="display:none;" onchange="importDesktopTheme(this)">
             <div class="custom-edit-tip" style="margin-top:8px; font-size:11px; color:#bbb; line-height:1.5;">
-                💡 导出文件为 JSON 格式。含图片链接的装修包体积较小，含本地上传图片（base64）的装修包体积会较大。
+                导出文件为 JSON 格式。含图片链接的装修包体积较小，含本地上传图片（base64）的装修包体积会较大。
             </div>
         </div>
     </div>
@@ -731,7 +731,7 @@
                     </label>
                 </div>
                 <div class="setting-item" onclick="showDiagnosticPanel()">
-                    <div class="setting-item-text">🔍 诊断面板</div>
+                    <div class="setting-item-text">诊断面板</div>
                     <div style="color: #999; font-size: 12px;">查看 user_id 和订阅状态</div>
                     <div class="setting-arrow">›</div>
                 </div>
@@ -801,7 +801,7 @@
             <!-- NovelAI 图片生成设置 折叠卡片 -->
             <div class="api-setting-card">
                 <div class="api-header" onclick="toggleNovelAISettings()">
-                    <div class="api-title">🎨 NovelAI 图片生成</div>
+                    <div class="api-title">NovelAI 图片生成</div>
                     <div class="api-arrow" id="novelai-setting-arrow">▼</div>
                 </div>
                 <div class="api-body" id="novelai-setting-body" style="display: none;">
@@ -809,7 +809,7 @@
                     <!-- 自动生图开关 -->
                     <div style="display:flex; align-items:center; justify-content:space-between; padding:12px 0; margin-bottom:12px; border-bottom:1px solid #e0e0e0;">
                         <div>
-                            <div style="font-size:14px; font-weight:500; color:#333;">🖼️ 自动生成图片</div>
+                            <div style="font-size:14px; font-weight:500; color:#333;">自动生成图片</div>
                             <div style="font-size:11px; color:#999; margin-top:2px;">角色发送图片卡片时自动调用 NovelAI 生成图片</div>
                         </div>
                         <label class="ios-switch" onclick="event.stopPropagation()">
@@ -1021,7 +1021,7 @@
     <!-- 编辑消息弹窗 -->
     <div class="modal-overlay" id="edit-msg-modal" style="display:none;" onclick="if(event.target===this)closeEditMsgModal()">
         <div class="modal-box" style="max-width:360px;">
-            <div class="modal-title">✏️ 编辑消息</div>
+            <div class="modal-title">编辑消息</div>
             <textarea id="edit-msg-textarea" class="modal-input" placeholder="编辑消息内容..." onkeydown="if(event.key==='Escape'){closeEditMsgModal();event.preventDefault();}"></textarea>
             <div class="modal-btns">
                 <button class="modal-btn btn-cancel" onclick="closeEditMsgModal()">取消</button>
@@ -1033,7 +1033,7 @@
     <!-- 联机登录弹窗 -->
     <div class="modal-overlay" id="online-login-modal" style="display:none;">
         <div class="modal-box" style="max-width:340px;">
-            <div class="modal-title">🔐 联机登录</div>
+            <div class="modal-title">联机登录</div>
             <div style="margin-bottom:16px;">
                 <label style="font-size:13px; color:#666; display:block; margin-bottom:6px;">用户名或邮箱</label>
                 <input type="text" class="modal-input" id="online-login-username" placeholder="输入用户名或邮箱">
@@ -1056,7 +1056,7 @@
     <!-- 联机注册弹窗 -->
     <div class="modal-overlay" id="online-register-modal" style="display:none;">
         <div class="modal-box" style="max-width:340px;">
-            <div class="modal-title">📝 联机注册</div>
+            <div class="modal-title">联机注册</div>
             <div style="margin-bottom:12px;">
                 <label style="font-size:13px; color:#666; display:block; margin-bottom:6px;">用户名</label>
                 <input type="text" class="modal-input" id="online-register-username" placeholder="3-20位字母数字下划线">
@@ -1709,9 +1709,9 @@
             
             <!-- 总结内容 -->
             <div style="margin-bottom:20px;">
-                <div style="font-size:15px; font-weight:600; color:#333; margin-bottom:12px;">📝 聊天总结</div>
+                <div style="font-size:15px; font-weight:600; color:#333; margin-bottom:12px;">聊天总结</div>
                 <div id="summary-edit-hint" style="display:none; font-size:12px; color:#666; margin-bottom:8px; padding:8px 12px; background:#fff5f7; border-radius:6px; border-left:3px solid var(--ins-pink);">
-                    ✏️ 编辑模式 - 修改完成后点击右上角「保存」按钮
+                    编辑模式 - 修改完成后点击右上角「保存」按钮
                 </div>
                 <div id="summary-detail-content" style="padding:16px; background:#f9f9f9; border-radius:12px; font-size:15px; color:#333; line-height:1.8; white-space:pre-wrap;">
                     加载中...
@@ -1811,7 +1811,7 @@
             </div>
             
             <div style="padding:16px; font-size:12px; color:#999; line-height:1.6;">
-                <div style="font-weight:600; color:#666; margin-bottom:6px;">💡 使用说明</div>
+                <div style="font-weight:600; color:#666; margin-bottom:6px;">使用说明</div>
                 <div>• 上线后，其他用户可以通过你的虚拟微信号搜索到你</div>
                 <div>• 你可以同时上线多个角色</div>
                 <div>• 上线的角色可以接收好友申请和消息</div>
@@ -2524,6 +2524,52 @@
                 </div>
             </div>
 
+            <!-- 角色自主活动设置 -->
+            <div class="detail-group">
+                <div class="detail-item">
+                    <div style="display:flex; flex-direction:column; gap:4px;">
+                        <div>允许角色自主活动</div>
+                        <div style="font-size:12px; color:#999; line-height:1.4;">角色会在自己的手机上自主产生活动数据</div>
+                    </div>
+                    <label class="ios-switch">
+                        <input type="checkbox" id="detail-allow-autonomous-switch" onchange="saveChatDetail()">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div style="padding:12px 16px; font-size:12px; color:#999; line-height:1.6; background:#f8f8f8; border-radius:8px; margin:0 16px 12px 16px;">
+                    <div style="font-weight:600; color:#666; margin-bottom:6px;">功能说明：</div>
+                    <div>• 开启后角色在聊天中可能会自主使用手机</div>
+                    <div>• AI会根据剧情决定角色的手机活动（发朋友圈、和好友聊天等）</div>
+                    <div>• 生成的数据会追加到"查手机"中，不会覆盖已有数据</div>
+                    <div style="margin-top:6px; color:#ff6b9d; font-weight:600;">• 你去查手机时就能看到角色自主产生的活动记录</div>
+                </div>
+            </div>
+
+            <!-- 定时自主活动设置 -->
+            <div class="detail-group">
+                <div class="detail-item">
+                    <div style="display:flex; flex-direction:column; gap:4px;">
+                        <div>定时自主活动</div>
+                        <div style="font-size:12px; color:#999; line-height:1.4;">定时调用API让角色自主产生手机活动</div>
+                    </div>
+                    <label class="ios-switch">
+                        <input type="checkbox" id="detail-scheduled-activity-switch" onchange="saveChatDetail()">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="detail-item">
+                    <div>触发间隔 (分钟)</div>
+                    <input type="number" id="detail-scheduled-activity-interval" placeholder="30" style="border:none; background:transparent; width:60px; text-align:right; font-size:16px; color:#8e8e93; outline:none;" onchange="saveChatDetail()">
+                </div>
+                <div style="padding:12px 16px; font-size:12px; color:#999; line-height:1.6; background:#f8f8f8; border-radius:8px; margin:0 16px 12px 16px;">
+                    <div style="font-weight:600; color:#666; margin-bottom:6px;">功能说明：</div>
+                    <div>• 开启后每隔设定的分钟数自动调用一次API</div>
+                    <div>• AI会根据角色人设和当前时间自动生成手机活动数据</div>
+                    <div>• 生成的数据会追加到"查手机"中，不会覆盖已有数据</div>
+                    <div style="margin-top:6px; color:#ff6b9d; font-weight:600;">• 即使你不聊天，角色也会自主产生活动记录</div>
+                </div>
+            </div>
+
             <!-- 朋友圈频率设置 -->
             <div class="detail-group">
                 <div class="detail-item">
@@ -2610,7 +2656,7 @@
                         暂无背景图
                     </div>
                     <div style="margin-top:8px; font-size:11px; color:#999; line-height:1.4;">
-                        💡 自定义背景会覆盖主题背景，清除后恢复主题背景
+                        自定义背景会覆盖主题背景，清除后恢复主题背景
                     </div>
                 </div>
             </div>
@@ -2699,7 +2745,7 @@
                     
                     <!-- 自定义气泡CSS -->
                     <div style="margin-bottom:16px;">
-                        <div style="font-size:14px; font-weight:500; margin-bottom:8px; color:#333;">✏️ 自定义气泡CSS</div>
+                        <div style="font-size:14px; font-weight:500; margin-bottom:8px; color:#333;">自定义气泡CSS</div>
                         <div style="font-size:12px; color:#999; margin-bottom:8px;">输入CSS代码直接覆盖气泡样式，填写后预设样式自动失效</div>
                         <!-- 类名速查 -->
                         <div style="background:#fff; border:1px solid #e8e8e8; border-radius:8px; padding:8px 10px; margin-bottom:10px; font-size:11px; color:#666; line-height:1.8;">
@@ -2737,6 +2783,24 @@
                 </div>
             </div>
             
+            <!-- 聊天统计 -->
+            <div class="detail-group">
+                <div class="detail-item">
+                    <div style="display:flex; flex-direction:column; gap:4px;">
+                        <div>聊天统计</div>
+                        <div style="font-size:12px; color:#999; line-height:1.4;">当前聊天的消息条数与预估tokens</div>
+                    </div>
+                </div>
+                <div class="detail-item">
+                    <div>消息条数</div>
+                    <div style="font-size:14px; color:#8e8e93;" id="detail-chat-msg-count">0 条</div>
+                </div>
+                <div class="detail-item">
+                    <div>预估 Tokens</div>
+                    <div style="font-size:14px; color:#8e8e93;" id="detail-chat-token-count">0</div>
+                </div>
+            </div>
+
             <div style="padding:20px; text-align:center;">
                 <button onclick="clearChatHistory()" style="color:#ff3b30; background:none; border:none; font-size:16px;">清空聊天记录</button>
             </div>
@@ -3120,7 +3184,7 @@
             <div class="editor-group">
                 <label class="editor-label">人设/描述 (Description)</label>
                 <div id="char-desc-hint" style="display:none; font-size:12px; color:#999; margin-bottom:8px; padding:8px 12px; background:#fff5f7; border-radius:6px; border-left:3px solid var(--ins-pink);">
-                    💡 这是AI生成的人设，你可以自由修改完善
+                    这是AI生成的人设，你可以自由修改完善
                 </div>
                 <textarea class="editor-textarea" id="char-desc" placeholder="输入角色设定、性格、背景等..." style="height:300px;"></textarea>
             </div>
@@ -3130,7 +3194,7 @@
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
                     <label class="editor-label" style="margin:0; font-weight:600; color:#333;">虚拟身份信息</label>
                     <button onclick="generateIdentity()" style="background:var(--ins-pink); color:#fff; border:none; padding:6px 12px; border-radius:6px; font-size:12px; display:flex; align-items:center; gap:4px;">
-                        <span id="gen-btn-text">✨ 生成信息</span>
+                        <span id="gen-btn-text">生成信息</span>
                         <div class="loading-spinner" id="gen-spinner" style="width:12px; height:12px; border-width:2px; border-color:#fff; border-top-color:transparent;"></div>
                     </button>
                 </div>
@@ -3180,7 +3244,7 @@
                             <span>＋ 添加关系</span>
                         </button>
                         <button onclick="showNpcGenModal()" style="background:var(--ins-pink); color:#fff; border:none; padding:6px 12px; border-radius:6px; font-size:12px; display:flex; align-items:center; gap:4px;">
-                            <span>✨ 批量生成 NPC</span>
+                            <span>批量生成 NPC</span>
                         </button>
                     </div>
                 </div>
@@ -3195,7 +3259,7 @@
     <!-- 批量生成 NPC 弹窗 -->
     <div class="modal-overlay" id="npc-gen-modal">
         <div class="modal-box">
-            <div class="modal-title">✨ 批量生成 NPC</div>
+            <div class="modal-title">批量生成 NPC</div>
             <div style="font-size:12px; color:#666; margin-bottom:10px;">基于当前角色设定和世界书，批量生成相关联的角色。</div>
             
             <div style="margin-bottom:15px;">
@@ -3232,18 +3296,18 @@
             <div style="margin-bottom:12px;">
                 <label style="font-size:14px; display:block; margin-bottom:6px; font-weight:500;">关系类型</label>
                 <div id="relation-type-tags" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
-                    <span class="relation-type-tag" data-relation="恋人" onclick="selectRelationType(this, '恋人')">❤️ 恋人</span>
-                    <span class="relation-type-tag" data-relation="朋友" onclick="selectRelationType(this, '朋友')">🤝 朋友</span>
-                    <span class="relation-type-tag" data-relation="家人" onclick="selectRelationType(this, '家人')">👨‍👩‍👧 家人</span>
-                    <span class="relation-type-tag" data-relation="同事" onclick="selectRelationType(this, '同事')">💼 同事</span>
-                    <span class="relation-type-tag" data-relation="同学" onclick="selectRelationType(this, '同学')">📚 同学</span>
-                    <span class="relation-type-tag" data-relation="师生" onclick="selectRelationType(this, '师生')">🎓 师生</span>
-                    <span class="relation-type-tag" data-relation="上下级" onclick="selectRelationType(this, '上下级')">👔 上下级</span>
-                    <span class="relation-type-tag" data-relation="对手" onclick="selectRelationType(this, '对手')">⚔️ 对手</span>
-                    <span class="relation-type-tag" data-relation="暧昧" onclick="selectRelationType(this, '暧昧')">💕 暧昧</span>
-                    <span class="relation-type-tag" data-relation="前任" onclick="selectRelationType(this, '前任')">💔 前任</span>
-                    <span class="relation-type-tag" data-relation="仇人" onclick="selectRelationType(this, '仇人')">🔥 仇人</span>
-                    <span class="relation-type-tag" data-relation="陌生人" onclick="selectRelationType(this, '陌生人')">👤 陌生人</span>
+                    <span class="relation-type-tag" data-relation="恋人" onclick="selectRelationType(this, '恋人')">恋人</span>
+                    <span class="relation-type-tag" data-relation="朋友" onclick="selectRelationType(this, '朋友')">朋友</span>
+                    <span class="relation-type-tag" data-relation="家人" onclick="selectRelationType(this, '家人')">家人</span>
+                    <span class="relation-type-tag" data-relation="同事" onclick="selectRelationType(this, '同事')">同事</span>
+                    <span class="relation-type-tag" data-relation="同学" onclick="selectRelationType(this, '同学')">同学</span>
+                    <span class="relation-type-tag" data-relation="师生" onclick="selectRelationType(this, '师生')">师生</span>
+                    <span class="relation-type-tag" data-relation="上下级" onclick="selectRelationType(this, '上下级')">上下级</span>
+                    <span class="relation-type-tag" data-relation="对手" onclick="selectRelationType(this, '对手')">对手</span>
+                    <span class="relation-type-tag" data-relation="暧昧" onclick="selectRelationType(this, '暧昧')">暧昧</span>
+                    <span class="relation-type-tag" data-relation="前任" onclick="selectRelationType(this, '前任')">前任</span>
+                    <span class="relation-type-tag" data-relation="仇人" onclick="selectRelationType(this, '仇人')">仇人</span>
+                    <span class="relation-type-tag" data-relation="陌生人" onclick="selectRelationType(this, '陌生人')">陌生人</span>
                 </div>
                 <input type="text" class="modal-input" id="relation-type-custom" placeholder="或自定义关系类型（如：邻居、房东、青梅竹马）">
             </div>
@@ -3376,7 +3440,7 @@
                 </select>
             </div>
             
-            <div style="font-size:11px; color:#999; margin-bottom:15px; text-align:center;">💡 可以直接输入任意数字</div>
+            <div style="font-size:11px; color:#999; margin-bottom:15px; text-align:center;">可以直接输入任意数字</div>
 
             <div class="modal-btns">
                 <button class="modal-btn btn-cancel" onclick="closeModal('fast-forward-modal')">取消</button>
@@ -4491,7 +4555,7 @@
             <!-- 说明 -->
             <div style="background:#FFF7FA; border-radius:12px; padding:16px; margin-bottom:20px; border:1px solid #f0e8ea;">
                 <div style="font-size:14px; color:#333; line-height:1.6;">
-                    💝 亲属卡可以让对方使用你的零钱消费，你可以随时查看消费记录或解绑。
+                    亲属卡可以让对方使用你的零钱消费，你可以随时查看消费记录或解绑。
                 </div>
             </div>
             
@@ -6071,7 +6135,7 @@
                         <div id="emei-store-title" style="font-size: 16px; font-weight: 600; color: #333; margin-bottom: 4px;"></div>
                         <div id="emei-store-desc" style="font-size: 12px; color: #999; margin-bottom: 6px;"></div>
                         <div style="display: flex; gap: 8px; font-size: 11px; color: #666;">
-                            <span>⭐ 4.8</span>
+                            <span>4.8</span>
                             <span>月售 <span id="emei-store-sales">999+</span></span>
                         </div>
                     </div>
@@ -6694,7 +6758,7 @@
 
                     <div class="diary-list" id="icityDiaryList">
                         <div style="text-align: center; padding: 60px 20px; color: #999; font-size: 14px;">
-                            <div style="margin-bottom: 10px;">📝</div>
+                            <div style="margin-bottom: 10px;"></div>
                             <div>还没有日记</div>
                             <div style="font-size: 12px; margin-top: 8px; color: #ccc;">点击右上角图标选择角色并生成日记</div>
                         </div>
@@ -7330,6 +7394,143 @@
                     <div style="text-align:center;padding:30px;color:#ccc;">加载中...</div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- ===== 亲密空间主页 ===== -->
+    <div class="wechat-page" id="intimate-space-page" style="background:#fafafa; display:none; z-index:205; flex-direction:column;">
+        <!-- 顶部导航 -->
+        <div style="position:sticky; top:0; z-index:10; background:rgba(255,255,255,0.96); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border-bottom:1px solid rgba(0,0,0,0.04);">
+            <div style="display:flex; align-items:center; padding:10px 20px; padding-top:44px; min-height:88px; box-sizing:border-box;">
+                <div onclick="hideIntimateSpacePage()" style="cursor:pointer; padding:4px;">
+                    <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:none; stroke:#262626; stroke-width:1.8;"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </div>
+                <div style="flex:1; text-align:center; font-size:16px; font-weight:600; color:#262626; letter-spacing:0.5px;">亲密空间</div>
+                <div style="width:28px;"></div>
+            </div>
+        </div>
+        <!-- 内容区 -->
+        <div id="intimate-space-content" style="overflow-y:auto; flex:1; padding-bottom:100px;">
+            <!-- 动态生成 -->
+        </div>
+        <!-- 底部按钮 -->
+        <div style="position:sticky; bottom:0; left:0; right:0; padding:16px 20px; padding-bottom:calc(16px + env(safe-area-inset-bottom)); background:rgba(255,255,255,0.96); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border-top:1px solid rgba(0,0,0,0.04);">
+            <div onclick="showIntimateCreateFlow()" style="display:flex; align-items:center; justify-content:center; gap:6px; padding:14px 0; background:#262626; border-radius:12px; cursor:pointer; transition:opacity 0.2s;" onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
+                <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:none; stroke:#fff; stroke-width:2;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                <span style="color:#fff; font-size:14px; font-weight:500; letter-spacing:0.5px;">建立亲密关系</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== 亲密空间 - 选择关系类型页面 ===== -->
+    <div class="wechat-page" id="intimate-type-page" style="background:#fafafa; display:none; z-index:210; flex-direction:column;">
+        <div style="position:sticky; top:0; z-index:10; background:rgba(255,255,255,0.96); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border-bottom:1px solid rgba(0,0,0,0.04);">
+            <div style="display:flex; align-items:center; padding:10px 20px; padding-top:44px; min-height:88px; box-sizing:border-box;">
+                <div onclick="hideIntimateTypePage()" style="cursor:pointer; padding:4px;">
+                    <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:none; stroke:#262626; stroke-width:1.8;"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </div>
+                <div style="flex:1; text-align:center; font-size:16px; font-weight:600; color:#262626; letter-spacing:0.5px;">选择关系</div>
+                <div style="width:28px;"></div>
+            </div>
+        </div>
+        <div style="overflow-y:auto; flex:1; padding:24px 20px;">
+            <div style="font-size:13px; color:#b0b0b0; text-align:center; margin-bottom:24px; letter-spacing:0.5px;">选择你们之间的亲密关系</div>
+            <div id="intimate-type-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+                <!-- 四个关系类型卡片 -->
+                <div class="intimate-type-card" onclick="selectIntimateType('couple')" style="background:#fff; border-radius:16px; padding:28px 16px; text-align:center; cursor:pointer; border:1.5px solid #efefef; transition:all 0.25s;">
+                    <div style="font-size:32px; margin-bottom:10px;">💕</div>
+                    <div style="font-size:15px; font-weight:600; color:#262626; margin-bottom:4px;">情侣</div>
+                    <div style="font-size:11px; color:#c7c7c7; letter-spacing:0.3px;">甜蜜恋人</div>
+                </div>
+                <div class="intimate-type-card" onclick="selectIntimateType('bestie')" style="background:#fff; border-radius:16px; padding:28px 16px; text-align:center; cursor:pointer; border:1.5px solid #efefef; transition:all 0.25s;">
+                    <div style="font-size:32px; margin-bottom:10px;">✨</div>
+                    <div style="font-size:15px; font-weight:600; color:#262626; margin-bottom:4px;">闺蜜</div>
+                    <div style="font-size:11px; color:#c7c7c7; letter-spacing:0.3px;">亲密姐妹</div>
+                </div>
+                <div class="intimate-type-card" onclick="selectIntimateType('bro')" style="background:#fff; border-radius:16px; padding:28px 16px; text-align:center; cursor:pointer; border:1.5px solid #efefef; transition:all 0.25s;">
+                    <div style="font-size:32px; margin-bottom:10px;">🤝</div>
+                    <div style="font-size:15px; font-weight:600; color:#262626; margin-bottom:4px;">基友</div>
+                    <div style="font-size:11px; color:#c7c7c7; letter-spacing:0.3px;">铁哥们儿</div>
+                </div>
+                <div class="intimate-type-card" onclick="selectIntimateType('side')" style="background:#fff; border-radius:16px; padding:28px 16px; text-align:center; cursor:pointer; border:1.5px solid #efefef; transition:all 0.25s;">
+                    <div style="font-size:32px; margin-bottom:10px;">🔥</div>
+                    <div style="font-size:15px; font-weight:600; color:#262626; margin-bottom:4px;">小三</div>
+                    <div style="font-size:11px; color:#c7c7c7; letter-spacing:0.3px;">秘密关系</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== 亲密空间 - 选择好友页面 ===== -->
+    <div class="wechat-page" id="intimate-friend-page" style="background:#fafafa; display:none; z-index:215; flex-direction:column;">
+        <div style="position:sticky; top:0; z-index:10; background:rgba(255,255,255,0.96); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border-bottom:1px solid rgba(0,0,0,0.04);">
+            <div style="display:flex; align-items:center; padding:10px 20px; padding-top:44px; min-height:88px; box-sizing:border-box;">
+                <div onclick="hideIntimateFriendPage()" style="cursor:pointer; padding:4px;">
+                    <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:none; stroke:#262626; stroke-width:1.8;"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </div>
+                <div style="flex:1; text-align:center; font-size:16px; font-weight:600; color:#262626; letter-spacing:0.5px;">选择好友</div>
+                <div style="width:28px;"></div>
+            </div>
+        </div>
+        <div id="intimate-friend-list" style="overflow-y:auto; flex:1; background:#fff;">
+            <!-- 动态生成好友列表 -->
+        </div>
+    </div>
+
+    <!-- ===== 亲密空间 - 空间详情页 ===== -->
+    <div class="wechat-page" id="intimate-detail-page" style="background:#fafafa; display:none; z-index:220; flex-direction:column;">
+        <div style="position:sticky; top:0; z-index:10; background:rgba(255,255,255,0.96); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border-bottom:1px solid rgba(0,0,0,0.04);">
+            <div style="display:flex; align-items:center; padding:10px 20px; padding-top:44px; min-height:88px; box-sizing:border-box;">
+                <div onclick="hideIntimateDetailPage()" style="cursor:pointer; padding:4px;">
+                    <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:none; stroke:#262626; stroke-width:1.8;"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </div>
+                <div style="flex:1; text-align:center; font-size:16px; font-weight:600; color:#262626; letter-spacing:0.5px;">亲密空间</div>
+                <div onclick="showIntimateManagePage()" style="cursor:pointer; padding:4px;">
+                    <svg viewBox="0 0 24 24" style="width:18px; height:18px; fill:none; stroke:#b0b0b0; stroke-width:1.8;"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
+                </div>
+            </div>
+        </div>
+        <div id="intimate-detail-content" style="overflow-y:auto; flex:1;">
+            <!-- 动态生成 -->
+        </div>
+    </div>
+
+    <!-- ===== 亲密空间 - 留言板页面 ===== -->
+    <div class="wechat-page" id="intimate-board-page" style="background:#fafafa; display:none; z-index:225; flex-direction:column;">
+        <div style="position:sticky; top:0; z-index:10; background:rgba(255,255,255,0.96); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border-bottom:1px solid rgba(0,0,0,0.04);">
+            <div style="display:flex; align-items:center; padding:10px 20px; padding-top:44px; min-height:88px; box-sizing:border-box;">
+                <div onclick="hideIntimateBoardPage()" style="cursor:pointer; padding:4px;">
+                    <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:none; stroke:#262626; stroke-width:1.8;"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </div>
+                <div style="flex:1; text-align:center; font-size:16px; font-weight:600; color:#262626; letter-spacing:0.5px;">留言板</div>
+                <div style="width:28px;"></div>
+            </div>
+        </div>
+        <div id="intimate-board-content" style="overflow-y:auto; flex:1; padding:16px 20px;">
+            <!-- 动态生成 -->
+        </div>
+        <!-- 留言输入区 -->
+        <div style="position:sticky; bottom:0; left:0; right:0; padding:12px 20px; padding-bottom:calc(12px + env(safe-area-inset-bottom)); background:rgba(255,255,255,0.96); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border-top:1px solid rgba(0,0,0,0.04);">
+            <div style="display:flex; gap:10px; align-items:center;">
+                <input type="text" id="intimate-board-input" placeholder="写一条留言..." style="flex:1; padding:10px 14px; border:1.5px solid #efefef; border-radius:10px; font-size:14px; outline:none; color:#262626; background:#fff; transition:border-color 0.2s;" onfocus="this.style.borderColor='#d0d0d0'" onblur="this.style.borderColor='#efefef'">
+                <div onclick="sendIntimateMessage()" style="padding:10px 16px; background:#262626; color:#fff; border-radius:10px; font-size:13px; font-weight:500; cursor:pointer; white-space:nowrap; transition:opacity 0.2s;" onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">发送</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== 亲密空间 - 关系管理页面 ===== -->
+    <div class="wechat-page" id="intimate-manage-page" style="background:#fafafa; display:none; z-index:230; flex-direction:column;">
+        <div style="position:sticky; top:0; z-index:10; background:rgba(255,255,255,0.96); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border-bottom:1px solid rgba(0,0,0,0.04);">
+            <div style="display:flex; align-items:center; padding:10px 20px; padding-top:44px; min-height:88px; box-sizing:border-box;">
+                <div onclick="hideIntimateManagePage()" style="cursor:pointer; padding:4px;">
+                    <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:none; stroke:#262626; stroke-width:1.8;"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </div>
+                <div style="flex:1; text-align:center; font-size:16px; font-weight:600; color:#262626; letter-spacing:0.5px;">关系管理</div>
+                <div style="width:28px;"></div>
+            </div>
+        </div>
+        <div id="intimate-manage-content" style="overflow-y:auto; flex:1; padding:16px 0;">
+            <!-- 动态生成 -->
         </div>
     </div>
 
