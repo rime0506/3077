@@ -284,6 +284,27 @@ db.version(80).stores({
     intimate_requests: '++id, accountId, fromCharId, toCharId, relationType, status, time' // 亲密关系申请表
 });
 
+// 版本81：添加离线聊天记录表 + 财务数据表（从localStorage迁移到IndexedDB，防止数据丢失）
+db.version(81).stores({
+    dexiData: 'key, value',
+    lorebooks: '++id, name',
+    characters: '++id, name, type',
+    sticker_categories: '++id, name',
+    moments: '++id, userId, time, ownerUserId',
+    friend_requests: '++id, fromCharId, toAccountId, status, time',
+    group_chats: '++id, name, ownerAccountId, created_at',
+    phone_recents: '++id, accountId, charId, time, type',
+    sms_messages: '++id, accountId, charId, time, read',
+    chat_summaries: '++id, [accountId+chatType+chatId], accountId, chatType, chatId, time',
+    avatar_library: '++id, category, tag, time',
+    avatar_categories: '++id, name, parentCategory, order, time',
+    chat_themes: '++id, name, accountId, time',
+    intimate_relations: '++id, accountId, myCharId, partnerCharId, relationType, status, createdAt',
+    intimate_requests: '++id, accountId, fromCharId, toCharId, relationType, status, time',
+    offline_chats: '&key, accountId, charId, updatedAt', // 离线聊天记录：从localStorage迁移
+    finance_data: '&key, updatedAt' // 财务数据：phone_balance, loanHistory, scratchHistory等
+});
+
 // 📦 数据迁移：将 localStorage 中的电话和短信记录迁移到 IndexedDB
 async function migratePhoneAndSmsToIndexedDB() {
     const migrationKey = 'phone_sms_migrated_to_indexeddb';
@@ -351,6 +372,302 @@ async function migratePhoneAndSmsToIndexedDB() {
     // 标记迁移完成
     localStorage.setItem(migrationKey, 'true');
     console.log('[Migration] 🎉 电话和短信数据迁移完成');
+}
+
+// 📦 数据迁移v3：将 localStorage 中的离线聊天记录和财务数据迁移到 IndexedDB
+async function migrateOfflineAndFinanceToIndexedDB() {
+    const migrationKey = 'offline_finance_migrated_to_indexeddb_v1';
+    if (localStorage.getItem(migrationKey) === 'true') {
+        return; // 已经迁移过
+    }
+    
+    console.log('[Migration-v3] 开始迁移离线聊天和财务数据到 IndexedDB...');
+    
+    try {
+        // 1. 迁移离线聊天记录 (格式: offline_chat_{accountId}_{charId})
+        const offlineChatKeys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith('offline_chat_')) {
+                offlineChatKeys.push(k);
+            }
+        }
+        
+        for (const lsKey of offlineChatKeys) {
+            try {
+                const rawData = localStorage.getItem(lsKey);
+                if (!rawData) continue;
+                const chatData = JSON.parse(rawData);
+                // 解析 key: offline_chat_{accountId}_{charId}
+                const parts = lsKey.replace('offline_chat_', '').split('_');
+                const accountId = parts[0] || '';
+                const charId = parts.slice(1).join('_') || '';
+                
+                await db.offline_chats.put({
+                    key: lsKey,
+                    accountId: accountId,
+                    charId: charId,
+                    messages: chatData,
+                    updatedAt: Date.now()
+                });
+                console.log(`[Migration-v3] ✅ 离线聊天已迁移: ${lsKey} (${chatData.length}条消息)`);
+                // 注意：不删除 localStorage 中的旧数据，保留作为备份
+                // 后续代码会优先从 IndexedDB 读取
+            } catch (e) {
+                console.error(`[Migration-v3] ❌ 离线聊天迁移失败: ${lsKey}`, e);
+            }
+        }
+        
+        // 2. 迁移财务数据
+        const financeKeys = ['phone_balance', 'phone_recharge_history', 'loanHistory', 'scratchHistory'];
+        for (const fKey of financeKeys) {
+            try {
+                const rawVal = localStorage.getItem(fKey);
+                if (rawVal === null) continue;
+                let parsedVal;
+                try { parsedVal = JSON.parse(rawVal); } catch { parsedVal = rawVal; }
+                
+                await db.finance_data.put({
+                    key: fKey,
+                    value: parsedVal,
+                    updatedAt: Date.now()
+                });
+                console.log(`[Migration-v3] ✅ 财务数据已迁移: ${fKey}`);
+                // 不删除 localStorage 旧数据，保留兼容
+            } catch (e) {
+                console.error(`[Migration-v3] ❌ 财务数据迁移失败: ${fKey}`, e);
+            }
+        }
+        
+        localStorage.setItem(migrationKey, 'true');
+        console.log('[Migration-v3] 🎉 离线聊天和财务数据迁移完成');
+    } catch (e) {
+        console.error('[Migration-v3] ❌ 迁移过程出错:', e);
+    }
+}
+
+// ==================== 🛡️ 数据安全层：防丢数据核心工具 ====================
+
+// 🔧 安全写入 IndexedDB，带重试 + 用户提醒
+// maxRetries: 最大重试次数, delayMs: 重试间隔毫秒
+async function safeDbPut(table, data, label, maxRetries = 3, delayMs = 500) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            await table.put(data);
+            return true; // 写入成功
+        } catch (err) {
+            console.error(`[SafeDB] ❌ ${label} 写入失败 (第${attempt}次):`, err.message);
+            
+            // 检查是否是配额不足
+            if (err.name === 'QuotaExceededError' || (err.inner && err.inner.name === 'QuotaExceededError')) {
+                console.error('[SafeDB] ⚠️ 存储空间不足！');
+                try {
+                    if (typeof showToast === 'function') {
+                        showToast('⚠️ 存储空间不足，部分数据可能无法保存！请导出备份后清理数据。');
+                    } else {
+                        alert('⚠️ 存储空间不足，部分数据可能无法保存！请尽快导出备份。');
+                    }
+                } catch(_) {}
+                return false; // 配额满了不重试
+            }
+            
+            if (attempt < maxRetries) {
+                await new Promise(r => setTimeout(r, delayMs * attempt)); // 递增等待
+            }
+        }
+    }
+    
+    // 所有重试都失败了
+    console.error(`[SafeDB] ❌❌ ${label} 写入彻底失败（已重试${maxRetries}次）`);
+    try {
+        if (typeof showToast === 'function') {
+            showToast('⚠️ 数据保存失败，请检查存储空间或刷新页面重试');
+        }
+    } catch(_) {}
+    return false;
+}
+
+// 🔧 安全写入群聊数据
+async function safeGroupChatPut(group, label) {
+    return await safeDbPut(db.group_chats, group, label || `群聊[${group.name || group.id}]`);
+}
+
+// 🔧 安全写入角色数据
+async function safeCharacterPut(char, label) {
+    return await safeDbPut(db.characters, char, label || `角色[${char.name || char.id}]`);
+}
+
+// 🔧 存储空间监控：检查 IndexedDB 使用情况
+async function checkStorageQuota() {
+    try {
+        if (navigator.storage && navigator.storage.estimate) {
+            const estimate = await navigator.storage.estimate();
+            const usedMB = (estimate.usage / 1024 / 1024).toFixed(1);
+            const quotaMB = (estimate.quota / 1024 / 1024).toFixed(1);
+            const usagePercent = ((estimate.usage / estimate.quota) * 100).toFixed(1);
+            
+            console.log(`[Storage] 已用: ${usedMB}MB / ${quotaMB}MB (${usagePercent}%)`);
+            
+            // 超过80%时警告
+            if (estimate.usage / estimate.quota > 0.8) {
+                console.warn('[Storage] ⚠️ 存储空间使用超过80%！建议导出备份并清理旧数据。');
+                try {
+                    if (typeof showToast === 'function') {
+                        showToast(`⚠️ 存储已用${usagePercent}%，建议导出备份`, 5000);
+                    }
+                } catch(_) {}
+            }
+            
+            return { used: estimate.usage, quota: estimate.quota, percent: parseFloat(usagePercent) };
+        }
+    } catch (e) {
+        console.warn('[Storage] 无法检测存储空间:', e);
+    }
+    return null;
+}
+
+// 🔧 定时自动保存守卫：防止浏览器崩溃/意外关闭导致内存数据丢失
+// 每60秒检查一次，如果有未保存的脏数据则自动持久化
+let _pendingDirtySaves = new Map(); // charId -> { char, accountId, history, timestamp }
+
+function markChatDirty(charId, char, accountId, history) {
+    _pendingDirtySaves.set(charId, {
+        char: char,
+        accountId: accountId,
+        history: [...history], // 拷贝快照
+        timestamp: Date.now()
+    });
+}
+
+async function flushDirtySaves() {
+    if (_pendingDirtySaves.size === 0) return;
+    
+    const entries = [..._pendingDirtySaves.entries()];
+    _pendingDirtySaves.clear();
+    
+    for (const [charId, data] of entries) {
+        try {
+            const freshChar = await db.characters.get(charId);
+            if (!freshChar) continue;
+            
+            // 只有当内存中的历史确实比DB中的新（更多消息）时才保存
+            const dbHistory = data.accountId 
+                ? (freshChar.chat_history_by_user?.[data.accountId] || [])
+                : (freshChar.chat_history || []);
+            
+            if (data.history.length > dbHistory.length) {
+                if (data.accountId) {
+                    if (!freshChar.chat_history_by_user) freshChar.chat_history_by_user = {};
+                    freshChar.chat_history_by_user[data.accountId] = data.history;
+                } else {
+                    freshChar.chat_history = data.history;
+                }
+                await safeCharacterPut(freshChar, `自动保存[${freshChar.name || charId}]`);
+                console.log(`[AutoSave] ✅ 已自动保存 ${freshChar.name || charId} 的聊天记录`);
+            }
+        } catch (e) {
+            console.error(`[AutoSave] ❌ 自动保存失败 charId=${charId}:`, e);
+        }
+    }
+}
+
+// 每60秒执行一次脏数据刷盘
+setInterval(flushDirtySaves, 60000);
+
+// 页面关闭/隐藏时立即刷盘
+window.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+        flushDirtySaves();
+    }
+});
+window.addEventListener('beforeunload', () => {
+    flushDirtySaves();
+});
+
+// 启动时检查存储空间
+setTimeout(checkStorageQuota, 5000);
+
+// ==================== 🛡️ 离线聊天数据安全读写 ====================
+// 优先使用 IndexedDB，兼容 localStorage 旧数据
+
+async function loadOfflineChatHistory(accountId, charId) {
+    const lsKey = `offline_chat_${accountId}_${charId}`;
+    try {
+        // 优先从 IndexedDB 读取
+        const record = await db.offline_chats.get(lsKey);
+        if (record && record.messages) {
+            return record.messages;
+        }
+    } catch (e) {
+        console.warn('[OfflineChat] IndexedDB读取失败，回退到localStorage:', e);
+    }
+    // 回退到 localStorage（兼容旧数据）
+    try {
+        return JSON.parse(localStorage.getItem(lsKey) || '[]');
+    } catch (e) {
+        return [];
+    }
+}
+
+async function saveOfflineChatHistory(accountId, charId, messages) {
+    const lsKey = `offline_chat_${accountId}_${charId}`;
+    try {
+        // 写入 IndexedDB（主存储）
+        await db.offline_chats.put({
+            key: lsKey,
+            accountId: accountId,
+            charId: String(charId),
+            messages: messages,
+            updatedAt: Date.now()
+        });
+    } catch (e) {
+        console.error('[OfflineChat] IndexedDB写入失败:', e);
+    }
+    // 同时写入 localStorage（兜底备份）
+    try {
+        localStorage.setItem(lsKey, JSON.stringify(messages));
+    } catch (e) {
+        console.warn('[OfflineChat] localStorage写入失败（可能空间不足）:', e);
+    }
+}
+
+// ==================== 🛡️ 财务数据安全读写 ====================
+
+async function loadFinanceData(key, defaultValue) {
+    try {
+        const record = await db.finance_data.get(key);
+        if (record && record.value !== undefined) {
+            return record.value;
+        }
+    } catch (e) {
+        console.warn(`[Finance] IndexedDB读取失败(${key})，回退到localStorage:`, e);
+    }
+    // 回退到 localStorage
+    try {
+        const raw = localStorage.getItem(key);
+        if (raw === null) return defaultValue;
+        try { return JSON.parse(raw); } catch { return raw; }
+    } catch (e) {
+        return defaultValue;
+    }
+}
+
+async function saveFinanceData(key, value) {
+    try {
+        await db.finance_data.put({
+            key: key,
+            value: value,
+            updatedAt: Date.now()
+        });
+    } catch (e) {
+        console.error(`[Finance] IndexedDB写入失败(${key}):`, e);
+    }
+    // 同时写入 localStorage 兜底
+    try {
+        localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) {
+        console.warn(`[Finance] localStorage写入失败(${key}):`, e);
+    }
 }
 
         let currentSelectIcon = '';
@@ -487,6 +804,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                 // 数据迁移（只在首次运行时有实际工作量）
                 await migrateAccountData();
                 await migratePhoneAndSmsToIndexedDB();
+                await migrateOfflineAndFinanceToIndexedDB();
                 
                 // 加载衣柜人物（非关键UI）
                 await loadWardrobeCharacter();
@@ -2484,7 +2802,7 @@ async function migratePhoneAndSmsToIndexedDB() {
                     // 自动修复：设置为好友
                     if (!f.wechat_status_by_user) f.wechat_status_by_user = {};
                     f.wechat_status_by_user[accountId] = 'friend';
-                    db.characters.put(f).catch(e => console.error('[查手机] 自动修复好友状态失败:', e));
+                    await safeCharacterPut(f, `自动修复好友状态[${f.name}]`);
                     console.log(`[查手机] 🔧 自动修复: ${f.name}(id=${f.id}) 在账号 ${accountId} 下设为好友`);
                 }
             }
@@ -2822,7 +3140,7 @@ async function migratePhoneAndSmsToIndexedDB() {
             const list = roleChar.phone_contacts_by_user[accountId];
             if (!list.includes(contactCharId)) {
                 list.push(contactCharId);
-                await db.characters.put(roleChar);
+                await safeCharacterPut(roleChar);
             }
         }
         
@@ -2833,7 +3151,7 @@ async function migratePhoneAndSmsToIndexedDB() {
             if (!roleChar.phone_contacts_by_user) return;
             if (!roleChar.phone_contacts_by_user[accountId]) return;
             roleChar.phone_contacts_by_user[accountId] = roleChar.phone_contacts_by_user[accountId].filter(id => id !== contactCharId);
-            await db.characters.put(roleChar);
+            await safeCharacterPut(roleChar);
         }
         
         // ★ 自动将角色的 relationships 关联NPC填充到通讯录中（默认好友）
@@ -2866,7 +3184,7 @@ async function migratePhoneAndSmsToIndexedDB() {
             }
             
             if (changed) {
-                await db.characters.put(roleChar);
+                await safeCharacterPut(roleChar);
                 console.log(`[自动填充通讯录] 已更新 ${roleChar.name} 的通讯录，当前联系人数: ${list.length}`);
             }
             
@@ -3493,7 +3811,7 @@ ${commenterInfos}
                     }
                 }
 
-                await db.characters.put(freshChar);
+                await safeCharacterPut(freshChar);
                 renderFpMomentsList();
                 console.log(`[FP朋友圈NPC] ✅ 批量生成完成: ${likers.length}人点赞, ${aiComments.length}条评论`);
 
@@ -3657,7 +3975,7 @@ ${commenterInfos}
         async function setFpWalletData(roleChar, accountId, data) {
             if (!roleChar.fp_wallet_by_user) roleChar.fp_wallet_by_user = {};
             roleChar.fp_wallet_by_user[accountId] = data;
-            await db.characters.put(roleChar);
+            await safeCharacterPut(roleChar);
         }
 
         async function updateFpWalletBalance() {
@@ -3895,7 +4213,7 @@ ${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主�
                     });
                     roleCharForChat.chat_history_by_user[fpNpcKey] = hist;
                 }
-                await db.characters.put(roleCharForChat);
+                await safeCharacterPut(roleCharForChat);
 
                 // ===== 处理钱包数据 =====
                 let walletResult = parsedData.wallet || { balance: '0.00', transactions: [] };
@@ -3915,7 +4233,7 @@ ${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主�
                     const charForRemark = await db.characters.get(parseInt(roleId));
                     if (!charForRemark.fp_remark_by_user) charForRemark.fp_remark_by_user = {};
                     charForRemark.fp_remark_by_user[accountId] = remark;
-                    await db.characters.put(charForRemark);
+                    await safeCharacterPut(charForRemark);
                     console.log('[FP生成] 备注生成:', remark);
                 }
 
@@ -3945,7 +4263,7 @@ ${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主�
                     // 按时间倒序排列（最新的在前）
                     processedMoments.sort((a, b) => b.time - a.time);
                     charForMoments.fp_moments_by_user[accountId] = processedMoments;
-                    await db.characters.put(charForMoments);
+                    await safeCharacterPut(charForMoments);
                     console.log('[FP生成] 好友朋友圈生成:', processedMoments.length, '条');
                 }
 
@@ -4129,7 +4447,7 @@ ${existingChatsContext.join('\n\n')}
                     console.log('[自主活动] 朋友圈追加:', parsedData.moments.length, '条');
                 }
                 
-                await db.characters.put(freshChar);
+                await safeCharacterPut(freshChar);
                 console.log('[自主活动] ✅ 数据生成完成，新增聊天消息:', totalNewMsgs);
                 
             } catch (e) {
@@ -7285,7 +7603,7 @@ async function saveCalendarTime() {
         char.timeOffsetEnabled = false;
     }
     
-    await db.characters.put(char);
+    await safeCharacterPut(char);
     
     hideCalendarPage();
     alert(useVirtual ? "时间设定已更新" : "已切换为现实时间");
@@ -10298,7 +10616,7 @@ ${(() => {
                 freshChar.identity.password = newPassword;
                 
                 // 保存到数据库
-                await db.characters.put(freshChar);
+                await safeCharacterPut(freshChar);
                 console.log('[acceptMessageReply] ✅ 已修改密码，新密码:', newPassword);
                 
                 // 清除已验证状态，强制下次登录需要重新输入密码
@@ -10422,7 +10740,7 @@ ${(() => {
                             }
                         }
                     }
-                    await db.characters.put(freshCharForFp);
+                    await safeCharacterPut(freshCharForFp);
                     console.log('[acceptMessageReply] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
                 }
                 
@@ -11067,7 +11385,7 @@ async function showWechatRegisterPage() {
                 }
             }
             
-            await db.characters.put(myChar);
+            await safeCharacterPut(myChar);
             
             // 刷新个人中心页面
             closeProfileSettings();
@@ -11439,7 +11757,7 @@ ${loreContext}
                 ...wechatData,
                 generatedAt: Date.now()
             };
-            await db.characters.put(roleChar);
+            await safeCharacterPut(roleChar);
             
             console.log('[generateRoleWechatData] 数据已保存:', wechatData);
             return wechatData;
@@ -11646,7 +11964,7 @@ ${loreContext}
             // 从好友列表中删除
             roleChar.generated_wechat_data.friends.splice(friendIndex, 1);
             
-            await db.characters.put(roleChar);
+            await safeCharacterPut(roleChar);
             
             showToast(`已删除好友"${friend.remark || friend.wx_nickname || friend.name}"`);
             
@@ -11686,7 +12004,7 @@ ${loreContext}
             friend.blacklisted = true;
             friend.blacklistedAt = new Date().toLocaleString();
             
-            await db.characters.put(roleChar);
+            await safeCharacterPut(roleChar);
             
             showToast(`已拉黑"${friend.remark || friend.wx_nickname || friend.name}"`);
             
@@ -11741,7 +12059,7 @@ ${loreContext}
             friend.lastMessage = message;
             friend.lastMessageTime = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
             
-            await db.characters.put(roleChar);
+            await safeCharacterPut(roleChar);
             
             // 清空输入框
             input.value = '';
@@ -12220,7 +12538,7 @@ ${loreContext}
                 if (!char.wechat_status_by_user) char.wechat_status_by_user = {};
                 char.wechat_status_by_user[accountId] = status;
             }
-            await db.characters.put(char);
+            await safeCharacterPut(char);
         }
 
         // 获取角色的聊天记录（按账号隔离）
@@ -12240,6 +12558,7 @@ ${loreContext}
 
         // 设置角色的聊天记录（按账号隔离）
         // 🔧 修复数据丢失：始终从DB读取最新角色数据再保存，避免用旧 char 对象覆盖并发写入的新数据
+        // 🛡️ 增强：带重试 + 错误提醒 + 脏数据标记，防止静默丢数据
         async function setChatHistory(char, accountId, history) {
             // ✅ 如果用户正在查看这个聊天，自动标记新消息为已读
             if (currentChatCharId === char.id) {
@@ -12250,8 +12569,19 @@ ${loreContext}
                 });
             }
             
+            // 🛡️ 先标记为脏数据，即使后续写入失败，定时器也能兜底保存
+            markChatDirty(char.id, char, accountId, history);
+            
             // 🔧 读取最新的角色数据，只更新聊天记录相关字段，保留其他字段的最新状态
-            const freshChar = await db.characters.get(char.id);
+            let freshChar;
+            try {
+                freshChar = await db.characters.get(char.id);
+            } catch (dbReadErr) {
+                console.error('[setChatHistory] ❌ 数据库读取失败:', dbReadErr);
+                // 读取失败时不丢弃数据，脏数据标记已打上，定时器会兜底
+                return;
+            }
+            
             if (!freshChar) {
                 console.warn('[setChatHistory] ⚠️ 角色不存在，跳过保存:', char.id);
                 return;
@@ -12273,7 +12603,14 @@ ${loreContext}
                 if (!char.chat_history_by_user) char.chat_history_by_user = {};
                 char.chat_history_by_user[accountId] = history;
             }
-            await db.characters.put(freshChar);
+            
+            // 🛡️ 使用安全写入（带重试 + 配额检测 + 用户提醒）
+            const writeSuccess = await safeCharacterPut(freshChar, `聊天记录[${freshChar.name || char.id}]`);
+            if (writeSuccess) {
+                // 写入成功，清除脏标记
+                _pendingDirtySaves.delete(char.id);
+            }
+            // 如果写入失败，脏标记保留，定时器会继续尝试保存
         }
 
         // 数据迁移：将旧结构迁移到新结构（不影响现有数据）
@@ -12330,7 +12667,7 @@ ${loreContext}
                 }
 
                 if (needSave) {
-                    await db.characters.put(char);
+                    await safeCharacterPut(char);
                     migratedCount++;
                 }
             }
@@ -12796,7 +13133,7 @@ ${loreContext}
             if (char) {
                 const _pinAid = getCurrentAccountId();
                 setCharPinned(char, _pinAid, !getCharPinned(char, _pinAid));
-                await db.characters.put(char);
+                await safeCharacterPut(char);
                 renderWechatList(document.getElementById('wechat-content'));
             }
         }
@@ -12807,7 +13144,7 @@ ${loreContext}
             const group = await db.group_chats.get(groupId);
             if (group) {
                 group.is_pinned = !group.is_pinned;
-                await db.group_chats.put(group);
+                await safeGroupChatPut(group);
                 renderWechatList(document.getElementById('wechat-content'));
             }
         }
@@ -12851,7 +13188,7 @@ ${loreContext}
                             nextCheckTime: null
                         };
                     }
-                    await db.characters.put(char);
+                    await safeCharacterPut(char);
                     
                     // 如果当前正在和这个好友聊天，关闭聊天窗口
                     if (currentChatCharId === id) {
@@ -13106,7 +13443,7 @@ ${loreContext}
             
             if (newContent !== null && newContent.trim()) {
                 char.thoughts[char.thoughts.length - 1].content = newContent.trim();
-                await db.characters.put(char);
+                await safeCharacterPut(char);
                 
                 // 更新显示
                 document.getElementById('thoughts-current-text').textContent = newContent.trim();
@@ -13122,7 +13459,7 @@ ${loreContext}
             if (!char || !char.thoughts || thoughtIndex < 0 || thoughtIndex >= char.thoughts.length) return;
             
             char.thoughts.splice(thoughtIndex, 1);
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             
             showToast('心声已删除');
             // 刷新心声弹窗
@@ -13143,7 +13480,7 @@ ${loreContext}
             if (!confirm('确定要删除当前心声吗？')) return;
             
             char.thoughts.pop(); // 删除最新的
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             
             showToast('心声已删除');
             // 刷新心声弹窗
@@ -13392,7 +13729,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     if (char.wait_friend_settings && char.wait_friend_settings[accountId]) {
                         char.wait_friend_settings[accountId].enabled = false;
                         char.wait_friend_settings[accountId].nextCheckTime = null;
-                        await db.characters.put(char);
+                        await safeCharacterPut(char);
                         console.log(`[AutoAcceptFriend] 已停止 ${char.name} 的自动快进检查`);
                     }
                     
@@ -13623,7 +13960,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             }
             
             group.updated_at = Date.now();
-            await db.group_chats.put(group);
+            await safeGroupChatPut(group);
             
             // 重置状态
             window._addingGroupMembers = false;
@@ -14058,7 +14395,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             }
             
             group.updated_at = Date.now();
-            await db.group_chats.put(group);
+            await safeGroupChatPut(group);
             
             closeModal('member-action-modal');
             await renderGroupMemberManageList(group);
@@ -14088,7 +14425,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             });
             
             group.updated_at = Date.now();
-            await db.group_chats.put(group);
+            await safeGroupChatPut(group);
             
             closeModal('member-action-modal');
             await renderGroupMemberManageList(group);
@@ -14140,7 +14477,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             }
             
             group.updated_at = Date.now();
-            await db.group_chats.put(group);
+            await safeGroupChatPut(group);
             
             closeModal('member-action-modal');
             await renderGroupMemberManageList(group);
@@ -14186,7 +14523,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             });
             
             group.updated_at = Date.now();
-            await db.group_chats.put(group);
+            await safeGroupChatPut(group);
             
             closeModal('member-action-modal');
             await renderGroupMemberManageList(group);
@@ -14247,7 +14584,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             
             group.updated_at = Date.now();
             
-            await db.group_chats.put(group);
+            await safeGroupChatPut(group);
             
             // 更新聊天窗口标题
             document.getElementById('chat-title').innerText = group.name;
@@ -14268,7 +14605,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 
                 group.avatar = avatarUrl;
                 group.updated_at = Date.now();
-                await db.group_chats.put(group);
+                await safeGroupChatPut(group);
                 
                 // 更新详情页头像
                 document.getElementById('group-detail-avatar').style.backgroundImage = `url(${avatarUrl})`;
@@ -14294,7 +14631,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             }];
             group.updated_at = Date.now();
             
-            await db.group_chats.put(group);
+            await safeGroupChatPut(group);
             await renderGroupChatBody(group);
             
             alert('聊天记录已清空');
@@ -14335,7 +14672,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 time: Date.now()
             });
             
-            await db.group_chats.put(group);
+            await safeGroupChatPut(group);
             await renderGroupMemberList(group);
             await renderGroupChatBody(group);
         }
@@ -15260,7 +15597,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             if (char.wait_friend_settings && char.wait_friend_settings[accountId]) {
                 char.wait_friend_settings[accountId].enabled = false;
                 char.wait_friend_settings[accountId].nextCheckTime = null;
-                await db.characters.put(char);
+                await safeCharacterPut(char);
                 console.log(`[AcceptFriend] 已停止 ${char.name} 的自动快进检查`);
             }
             
@@ -15474,7 +15811,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     nextCheckTime: null
                 };
             }
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             
             // 关闭聊天详情页但保持聊天窗口打开，显示等待界面
             hideChatDetail();
@@ -15528,7 +15865,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     nextCheckTime: null
                 };
             }
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             
             // 关闭聊天详情页但保持聊天窗口打开，显示等待界面
             hideChatDetail();
@@ -15668,7 +16005,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                         if (targetChar.wait_friend_settings && targetChar.wait_friend_settings[accountId]) {
                             targetChar.wait_friend_settings[accountId].enabled = false;
                             targetChar.wait_friend_settings[accountId].nextCheckTime = null;
-                            await db.characters.put(targetChar);
+                            await safeCharacterPut(targetChar);
                             console.log(`[AIAcceptFriend] 已停止 ${targetChar.name} 的自动快进检查`);
                         }
                         
@@ -15843,7 +16180,7 @@ ${history.length > 0 ? `\n你们之前的聊天记录：\n${recentMessages}` : '
                 settings.nextCheckTime = null;
             }
             
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             
             // 刷新界面
             if (currentChatCharId === charId) {
@@ -15878,7 +16215,7 @@ ${history.length > 0 ? `\n你们之前的聊天记录：\n${recentMessages}` : '
                     char.wait_friend_settings[accountId].lastCheckTime + interval * 60 * 1000;
             }
             
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             
             // 刷新界面
             if (currentChatCharId === charId) {
@@ -15918,7 +16255,7 @@ ${history.length > 0 ? `\n你们之前的聊天记录：\n${recentMessages}` : '
                 if (char) {
                     if (!char.timeOffset) char.timeOffset = 0;
                     char.timeOffset += minutesNum * 60 * 1000;
-                    await db.characters.put(char);
+                    await safeCharacterPut(char);
                 }
                 await checkCharacterSendFriendRequest(charId, minutesNum);
                 return;
@@ -15947,7 +16284,7 @@ ${history.length > 0 ? `\n你们之前的聊天记录：\n${recentMessages}` : '
             if (char) {
                 if (!char.timeOffset) char.timeOffset = 0;
                 char.timeOffset += minutesNum * 60 * 1000;
-                await db.characters.put(char);
+                await safeCharacterPut(char);
             }
             
             await checkCharacterSendFriendRequest(charId, minutesNum);
@@ -16032,7 +16369,7 @@ ${history.length > 0 ? `\n你们之前的聊天记录：\n${recentMessages}` : '
                 const char = await db.characters.get(charId);
                 if (!char.timeOffset) char.timeOffset = 0;
                 char.timeOffset += ms;
-                await db.characters.put(char);
+                await safeCharacterPut(char);
                 
                 console.log('[FastForwardBlocked] 时间已更新，开始检查被拉黑角色...');
                 
@@ -16429,7 +16766,7 @@ ${recentMessages || '（无记录）'}
                 const char = await db.characters.get(charId);
                 if (!char.timeOffset) char.timeOffset = 0;
                 char.timeOffset += ms;
-                await db.characters.put(char);
+                await safeCharacterPut(char);
                 
                 const accountId = getCurrentAccountId();
                 const myChar = await db.characters.get(parseInt(accountId));
@@ -16603,7 +16940,7 @@ ${recentMessages || '（无记录）'}
                 const char = await db.characters.get(charId);
                 if (!char.timeOffset) char.timeOffset = 0;
                 char.timeOffset += ms;
-                await db.characters.put(char);
+                await safeCharacterPut(char);
                 
                 const accountId = getCurrentAccountId();
                 const myChar = await db.characters.get(parseInt(accountId));
@@ -16918,7 +17255,7 @@ ${chatContext || '（没有聊天记录）'}
                             freshChar.wait_friend_settings[accountId].nextCheckTime = 
                                 Date.now() + freshChar.wait_friend_settings[accountId].interval * 60 * 1000;
                         }
-                        await db.characters.put(freshChar);
+                        await safeCharacterPut(freshChar);
                     }
                 } else {
                     // 角色决定发送好友申请，将多条消息拆分
@@ -16991,7 +17328,7 @@ ${chatContext || '（没有聊天记录）'}
                             freshChar.wait_friend_settings[accountId].nextCheckTime = 
                                 Date.now() + freshChar.wait_friend_settings[accountId].interval * 60 * 1000;
                         }
-                        await db.characters.put(freshChar);
+                        await safeCharacterPut(freshChar);
                     }
                     
                     // 刷新通讯录红点
@@ -17192,7 +17529,7 @@ ${chatContext || '（没有聊天记录）'}
             const accountId = getCurrentAccountId();
             if (char.chat_hidden_by_user && char.chat_hidden_by_user[accountId]) {
                 char.chat_hidden_by_user[accountId] = false;
-                db.characters.put(char).catch(e => console.error('清除隐藏标记失败:', e));
+                safeCharacterPut(char, '清除隐藏标记').catch(e => console.error('清除隐藏标记失败:', e));
             }
             
             // 根据好友状态显示或隐藏输入框
@@ -17719,7 +18056,7 @@ async function saveChatDetail() {
     const selectedBubbleOption = document.querySelector('.bubble-style-option.selected');
     char.bubble_style = selectedBubbleOption ? selectedBubbleOption.dataset.style : 'default';
     
-    await db.characters.put(char);
+    await safeCharacterPut(char);
     
     // 实时更新聊天标题（按账号隔离）
     document.getElementById('chat-title').innerText = getCharDisplayName(char, getCurrentAccountId());
@@ -17799,7 +18136,7 @@ async function saveMountedStickers() {
     
     const char = await db.characters.get(currentChatCharId);
     char.mounted_sticker_categories = mountedIds.length > 0 ? mountedIds : null;
-    await db.characters.put(char);
+    await safeCharacterPut(char);
     
     updateMountedStickerCount();
     hideMountStickerModal();
@@ -17897,7 +18234,7 @@ async function selectMountUser(userId) {
     
     const char = await db.characters.get(currentChatCharId);
     char.linked_user_id = userId;
-    await db.characters.put(char);
+    await safeCharacterPut(char);
     
     // 更新显示
     updateMountedUserDisplay();
@@ -17911,7 +18248,7 @@ async function unmountUser() {
     
     const char = await db.characters.get(currentChatCharId);
     char.linked_user_id = null;
-    await db.characters.put(char);
+    await safeCharacterPut(char);
     
     // 更新显示
     updateMountedUserDisplay();
@@ -17960,7 +18297,7 @@ window.unmountUser = unmountUser;
                     const char = await db.characters.get(currentChatCharId);
                     const _aid = getCurrentAccountId();
                     setCharAvatar(char, _aid, base64);
-                    await db.characters.put(char);
+                    await safeCharacterPut(char);
                     
                     // ✅ 强制刷新聊天界面头像（forceRender=true，防止缓存跳过导致头像不更新）
                     renderChatBody(char, true); 
@@ -17988,7 +18325,7 @@ window.unmountUser = unmountUser;
                     
                     const char = await db.characters.get(currentChatCharId);
                     char.chat_background = base64;
-                    await db.characters.put(char);
+                    await safeCharacterPut(char);
                     
                     // 立即应用背景图到聊天界面
                     applyChatBackground(char);
@@ -18004,7 +18341,7 @@ window.unmountUser = unmountUser;
             
             const char = await db.characters.get(currentChatCharId);
             char.chat_background = null;
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             
             const bgPreview = document.getElementById('detail-chat-bg-preview');
             bgPreview.style.backgroundImage = '';
@@ -18930,7 +19267,7 @@ ${existingChatsContext.join('\n\n')}
                     console.log('[ScheduledActivity] 朋友圈追加:', parsedData.moments.length, '条');
                 }
 
-                await db.characters.put(freshChar);
+                await safeCharacterPut(freshChar);
                 lastScheduledActivityTime.set(char.id, Date.now());
                 console.log(`[ScheduledActivity] ✅ ${char.name} 数据生成完成，新增聊天消息: ${totalNewMsgs}`);
 
@@ -19069,19 +19406,15 @@ ${existingChatsContext.join('\n\n')}
                 // 计算虚拟时间
                 const virtualTimeStr = getFormattedVirtualTime(char);
 
-                // ★ 读取线下模式聊天记录，用于后续合并到统一时间线
+                // ★ 读取线下模式聊天记录，用于后续合并到统一时间线（优先IndexedDB）
                 let _offlineHistoryAuto = [];
                 let _hasOfflineMemoryAuto = false;
                 try {
-                    const offlineKeyAuto = `offline_chat_${accountId}_${char.id}`;
-                    const offlineHistoryRawAuto = localStorage.getItem(offlineKeyAuto);
-                    if (offlineHistoryRawAuto) {
-                        const parsed = JSON.parse(offlineHistoryRawAuto);
-                        if (parsed && parsed.length > 0) {
-                            _offlineHistoryAuto = parsed;
-                            _hasOfflineMemoryAuto = true;
-                            console.log('[triggerAutoChat] ✅ 已加载线下模式历史，条数:', parsed.length);
-                        }
+                    const parsed = await loadOfflineChatHistory(accountId, char.id);
+                    if (parsed && parsed.length > 0) {
+                        _offlineHistoryAuto = parsed;
+                        _hasOfflineMemoryAuto = true;
+                        console.log('[triggerAutoChat] ✅ 已加载线下模式历史，条数:', parsed.length);
                     }
                 } catch (e) {
                     console.warn('[triggerAutoChat] 读取线下模式历史失败:', e);
@@ -19771,7 +20104,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                                 records: [],
                                 createdAt: Date.now()
                             });
-                            await db.characters.put(freshChar);
+                            await safeCharacterPut(freshChar);
                             
                             // 在用户数据中添加"我收到的"
                             if (user) {
@@ -19784,7 +20117,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                                     records: [],
                                     createdAt: Date.now()
                                 });
-                                await db.characters.put(user);
+                                await safeCharacterPut(user);
                             }
                             
                             // 发送亲属卡消息到聊天
@@ -20293,7 +20626,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                             const freshChar = await db.characters.get(char.id);
                             const oldNickname = getCharWxNickname(freshChar, accountId) || freshChar.name;
                             setCharWxNickname(freshChar, accountId, newNickname);
-                            await db.characters.put(freshChar);
+                            await safeCharacterPut(freshChar);
                             
                             const nicknameText = `${oldNickname} 将网名改为 "${newNickname}"`;
                             let history = getChatHistory(freshChar, accountId);
@@ -20326,7 +20659,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                             const newSignature = signatureMatchAuto[1].trim();
                             const freshChar = await db.characters.get(char.id);
                             freshChar.wx_signature = newSignature;
-                            await db.characters.put(freshChar);
+                            await safeCharacterPut(freshChar);
                             
                             const sigText = `${freshChar.wx_nickname || freshChar.name} 更新了个性签名: "${newSignature}"`;
                             let history = getChatHistory(freshChar, accountId);
@@ -20601,7 +20934,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                                     }
                                 }
                             }
-                            await db.characters.put(freshCharForFp);
+                            await safeCharacterPut(freshCharForFp);
                             console.log('[triggerAutoChat] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
                         }
                         
@@ -20919,7 +21252,7 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
             
             const newStickers = await Promise.all(promises);
             char.custom_stickers.push(...newStickers);
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             
             renderStickerList(char.custom_stickers);
             input.value = '';
@@ -20932,7 +21265,7 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
             
             const char = await db.characters.get(currentChatCharId);
             char.custom_stickers.splice(index, 1);
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             
             renderStickerList(char.custom_stickers);
         }
@@ -21145,7 +21478,7 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
             group.chat_history.push(msg);
             group.updated_at = Date.now();
             
-            await db.group_chats.put(group);
+            await safeGroupChatPut(group);
             
             // 🔥 优化：只有在有引用时才重新渲染，否则只追加消息HTML
             if (msg.quote) {
@@ -21660,7 +21993,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                                     dmCharRecord.chat_hidden_by_user[_dmAccId] = false;
                                 }
                                 
-                                await db.characters.put(dmCharRecord);
+                                await safeCharacterPut(dmCharRecord);
                                 console.log(`[群聊小窗] ${dmCharName} 单独给你发了 ${dmSegments.length} 条消息`);
                                 
                                 // 不在该角色私聊页时弹提示
@@ -21872,7 +22205,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                                 }
                                 // 扣除余额
                                 sender.identity.balance = (balance - totalAmount).toFixed(2);
-                                await db.characters.put(sender);
+                                await safeCharacterPut(sender);
                             }
                             
                             // 生成红包ID
@@ -22009,7 +22342,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                                 let balance = parseFloat(claimer.identity.balance || 0);
                                 balance += claimAmount;
                                 claimer.identity.balance = balance.toFixed(2);
-                                await db.characters.put(claimer);
+                                await safeCharacterPut(claimer);
                             }
                             
                             const claimerName = memberMap[senderId]?.remark || memberMap[senderId]?.name || reply.name;
@@ -22068,7 +22401,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     }
                     
                     updatedGroup.updated_at = Date.now();
-                    await db.group_chats.put(updatedGroup);
+                    await safeGroupChatPut(updatedGroup);
                     
                     // 重新渲染群聊
                     await renderGroupChatBody(updatedGroup);
@@ -23051,7 +23384,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     if (!char.wechat_status_by_user) char.wechat_status_by_user = {};
                     char.wechat_status_by_user[accountId] = 'friend';
                     // 异步保存，不阻塞渲染
-                    db.characters.put(char).catch(e => console.error('保存联机好友状态失败:', e));
+                    safeCharacterPut(char, '联机好友状态').catch(e => console.error('保存联机好友状态失败:', e));
                 }
             }
             
@@ -23841,7 +24174,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     const grp = await db.group_chats.get(window.currentGroupChatId);
                     if (!grp || !grp.chat_history) return;
                     grp.chat_history[editIndex].content = newContent;
-                    await db.group_chats.put(grp);
+                    await safeGroupChatPut(grp);
                     
                     // 直接更新DOM，不刷新整个群聊
                     const chatBody = document.getElementById('chat-body');
@@ -23927,7 +24260,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     recalledContent: msg.recalledContent
                 });
                 
-                await db.group_chats.put(group);
+                await safeGroupChatPut(group);
                 await renderGroupChatBody(group);
                 return;
             }
@@ -24141,7 +24474,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                 if (!group || !group.chat_history) return;
                 
                 group.chat_history.splice(activeMsgIndex, 1);
-                await db.group_chats.put(group);
+                await safeGroupChatPut(group);
                 await renderGroupChatBody(group);
                 return;
             }
@@ -24352,7 +24685,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                 
                 const newHistory = group.chat_history.filter((_, idx) => !selectedIndices.has(idx));
                 group.chat_history = newHistory;
-                await db.group_chats.put(group);
+                await safeGroupChatPut(group);
                 
                 exitSelectionMode();
                 // 重新渲染会自动处理时间戳
@@ -24370,7 +24703,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             const newHistory = history.filter((_, idx) => !selectedIndices.has(idx));
             
             await setChatHistory(char, accountId, newHistory);
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             
             // 🔧 只删除DOM元素，不重新渲染整个界面 - 使用data-index属性查找
             const chatBody = document.getElementById('chat-body');
@@ -24464,7 +24797,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     time: Date.now()
                 });
                 group.updated_at = Date.now();
-                await db.group_chats.put(group);
+                await safeGroupChatPut(group);
                 
                 await renderGroupChatBody(group);
                 closeChatPanel();
@@ -24644,7 +24977,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     time: Date.now()
                 });
                 group.updated_at = Date.now();
-                await db.group_chats.put(group);
+                await safeGroupChatPut(group);
                 
                 await renderGroupChatBody(group);
                 return;
@@ -24710,7 +25043,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                         time: Date.now()
                     });
                     group.updated_at = Date.now();
-                    await db.group_chats.put(group);
+                    await safeGroupChatPut(group);
                     
                     await renderGroupChatBody(group);
                 };
@@ -25342,7 +25675,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     time: Date.now()
                 });
                 group.updated_at = Date.now();
-                await db.group_chats.put(group);
+                await safeGroupChatPut(group);
                 
                 await renderGroupChatBody(group);
                 return;
@@ -25505,7 +25838,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     // 更新虚拟时间偏移
                     if (!char.timeOffset) char.timeOffset = 0;
                     char.timeOffset += ms;
-                    await db.characters.put(char);
+                    await safeCharacterPut(char);
                     console.log(`[FastForward] Updated time offset by +${ms}ms (${unitText})`);
                 }
             }
@@ -25704,19 +26037,19 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                                 loginSuccess = true;
                                 loginMethod = '无密码';
                                 char.knows_user_password = true;
-                                await db.characters.put(char);
+                                await safeCharacterPut(char);
                             } else if (isHighPriv) {
                                 // 高权限人设，特殊手段破解，直接成功
                                 loginSuccess = true;
                                 loginMethod = '特殊手段破解';
                                 char.knows_user_password = true;
-                                await db.characters.put(char);
+                                await safeCharacterPut(char);
                             } else if (guessedPw && guessedPw === myChar.identity.password) {
                                 // 普通人设，猜对了密码
                                 loginSuccess = true;
                                 loginMethod = '猜对密码';
                                 char.knows_user_password = true;
-                                await db.characters.put(char);
+                                await safeCharacterPut(char);
                             } else {
                                 // 普通人设，没猜或猜错了
                                 loginSuccess = false;
@@ -25876,7 +26209,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                                 // 更新未读计数
                                 if (!char.unread_count_by_user) char.unread_count_by_user = {};
                                 char.unread_count_by_user[accountId] = (char.unread_count_by_user[accountId] || 0) + afterMessages.length;
-                                await db.characters.put(char);
+                                await safeCharacterPut(char);
                                 
                                 // 逐条显示消息通知
                                 for (let i = 0; i < afterMessages.length; i++) {
@@ -27155,27 +27488,23 @@ messages:
                     }
                 }
 
-                // 2.5 ★ 线上线下统一时间线：将线下消息合并到fullHistory中按时间排序
+                // 2.5 ★ 线上线下统一时间线：将线下消息合并到fullHistory中按时间排序（优先IndexedDB）
                 let _hasOfflineMemory = false;
                 try {
-                    const offlineKey = `offline_chat_${accountId}_${targetCharId}`;
-                    const offlineHistoryRaw = localStorage.getItem(offlineKey);
-                    if (offlineHistoryRaw) {
-                        const offlineHistory = JSON.parse(offlineHistoryRaw);
-                        if (offlineHistory && offlineHistory.length > 0) {
-                            _hasOfflineMemory = true;
-                            // 将线下消息标记后合并到fullHistory
-                            const offlineMsgs = offlineHistory.map(h => ({
-                                role: h.role === 'user' ? 'user' : 'char', // 统一角色标识
-                                content: h.content || '',
-                                time: h.time || 0,
-                                _isOffline: true // 标记为线下消息
-                            }));
-                            fullHistory = [...fullHistory, ...offlineMsgs];
-                            // 按时间排序，实现统一时间线
-                            fullHistory.sort((a, b) => (a.time || 0) - (b.time || 0));
-                            console.log('[triggerAiReply] ✅ 线上线下合并完成，线下消息:', offlineMsgs.length, '总消息:', fullHistory.length);
-                        }
+                    const offlineHistory = await loadOfflineChatHistory(accountId, targetCharId);
+                    if (offlineHistory && offlineHistory.length > 0) {
+                        _hasOfflineMemory = true;
+                        // 将线下消息标记后合并到fullHistory
+                        const offlineMsgs = offlineHistory.map(h => ({
+                            role: h.role === 'user' ? 'user' : 'char', // 统一角色标识
+                            content: h.content || '',
+                            time: h.time || 0,
+                            _isOffline: true // 标记为线下消息
+                        }));
+                        fullHistory = [...fullHistory, ...offlineMsgs];
+                        // 按时间排序，实现统一时间线
+                        fullHistory.sort((a, b) => (a.time || 0) - (b.time || 0));
+                        console.log('[triggerAiReply] ✅ 线上线下合并完成，线下消息:', offlineMsgs.length, '总消息:', fullHistory.length);
                     }
                 } catch (e) {
                     console.warn('[triggerAiReply] 合并线下消息失败:', e);
@@ -28524,7 +28853,7 @@ ${checkResult.checkResult}
                         freshChar.identity.password = newPassword;
                         
                         // 保存到数据库
-                        await db.characters.put(freshChar);
+                        await safeCharacterPut(freshChar);
                         console.log('[TriggerAI] ✅ 已修改密码，新密码:', newPassword);
                         
                         // 清除已验证状态，强制下次登录需要重新输入密码
@@ -28671,7 +29000,7 @@ ${checkResult.checkResult}
                             const freshChar = await db.characters.get(targetCharId);
                             const oldNickname = getCharWxNickname(freshChar, accountId) || freshChar.name;
                             setCharWxNickname(freshChar, accountId, newNickname);
-                            await db.characters.put(freshChar);
+                            await safeCharacterPut(freshChar);
                             const nicknameText = `${oldNickname} 将网名改为 "${newNickname}"`;
                             console.log(`[TriggerAI] 预处理改网名: ${nicknameText}`);
                             await insertSystemMsg(nicknameText, 'set_nickname');
@@ -28697,7 +29026,7 @@ ${checkResult.checkResult}
                             const newSignature = sigMatchPre[1].trim();
                             const freshChar = await db.characters.get(targetCharId);
                             freshChar.wx_signature = newSignature;
-                            await db.characters.put(freshChar);
+                            await safeCharacterPut(freshChar);
                             const sigText = `${freshChar.wx_nickname || freshChar.name} 更新了个性签名: "${newSignature}"`;
                             console.log(`[TriggerAI] 预处理改签名: ${sigText}`);
                             await insertSystemMsg(sigText, 'set_signature');
@@ -28931,7 +29260,7 @@ ${checkResult.checkResult}
                             records: [],
                             createdAt: Date.now()
                         });
-                        await db.characters.put(freshChar);
+                        await safeCharacterPut(freshChar);
                         
                         // 在用户数据中添加"我收到的"
                         if (user) {
@@ -28944,7 +29273,7 @@ ${checkResult.checkResult}
                                 records: [],
                                 createdAt: Date.now()
                             });
-                            await db.characters.put(user);
+                            await safeCharacterPut(user);
                         }
                         
                         // 发送亲属卡消息到聊天
@@ -29747,7 +30076,7 @@ ${checkResult.checkResult}
                             const freshChar = await db.characters.get(targetCharId);
                             const oldNickname = getCharWxNickname(freshChar, accountId) || freshChar.name;
                             setCharWxNickname(freshChar, accountId, newNickname);
-                            await db.characters.put(freshChar);
+                            await safeCharacterPut(freshChar);
                             
                             const nicknameText = `${oldNickname} 将网名改为 "${newNickname}"`;
                             let history = getChatHistory(freshChar, accountId);
@@ -29778,7 +30107,7 @@ ${checkResult.checkResult}
                             const newSignature = signatureMatchReply[1].trim();
                             const freshChar = await db.characters.get(targetCharId);
                             freshChar.wx_signature = newSignature;
-                            await db.characters.put(freshChar);
+                            await safeCharacterPut(freshChar);
                             
                             const sigText = `${freshChar.wx_nickname || freshChar.name} 更新了个性签名: "${newSignature}"`;
                             let history = getChatHistory(freshChar, accountId);
@@ -30212,7 +30541,7 @@ ${checkResult.checkResult}
             const deleteCount = actualEndIndex - lastAiMessageStartIndex + 1;
             history.splice(lastAiMessageStartIndex, deleteCount);
             await setChatHistory(char, accountId, history);
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             
             // 重新渲染聊天界面（移除AI回复消息）
             renderChatBody(char);
@@ -30300,7 +30629,7 @@ ${checkResult.checkResult}
             
             group.chat_history = history;
             group.updated_at = Date.now();
-            await db.group_chats.put(group);
+            await safeGroupChatPut(group);
             
             // 重新渲染群聊界面
             await renderGroupChatBody(group);
@@ -30672,7 +31001,7 @@ function showCharacterPage() {
                     const oldTarget = await db.characters.get(oldRel.targetId);
                     if (oldTarget && oldTarget.relationships) {
                         oldTarget.relationships = oldTarget.relationships.filter(r => r.targetId !== editingCharId);
-                        await db.characters.put(oldTarget);
+                        await safeCharacterPut(oldTarget);
                     }
                 }
                 // 更新关系
@@ -30698,7 +31027,7 @@ function showCharacterPage() {
                 });
             }
             
-            await db.characters.put(currentChar);
+            await safeCharacterPut(currentChar);
             
             // 双向关系：在对方的关系列表中也添加
             if (bidirectional) {
@@ -30712,7 +31041,7 @@ function showCharacterPage() {
                     relation: reverseType,
                     desc: desc
                 });
-                await db.characters.put(targetChar);
+                await safeCharacterPut(targetChar);
             }
             
             // 刷新关系列表
@@ -30772,13 +31101,13 @@ function showCharacterPage() {
                 const targetChar = await db.characters.get(rel.targetId);
                 if (targetChar && targetChar.relationships) {
                     targetChar.relationships = targetChar.relationships.filter(r => r.targetId !== editingCharId);
-                    await db.characters.put(targetChar);
+                    await safeCharacterPut(targetChar);
                 }
             }
             
             // 删除当前角色的关系
             currentChar.relationships.splice(index, 1);
-            await db.characters.put(currentChar);
+            await safeCharacterPut(currentChar);
             
             // 刷新列表
             renderRelationList(currentChar);
@@ -30927,7 +31256,7 @@ ${loreContext}
                 }
                 
                 // 保存主角更新
-                await db.characters.put(sourceChar);
+                await safeCharacterPut(sourceChar);
 
                 // 6. 刷新界面
                 alert(`✅ 成功生成 ${newCount} 个 NPC！\n\n💡 提示：你可以在「角色档案 > NPC」标签页中查看和编辑这些生成的NPC。`);
@@ -31011,7 +31340,7 @@ ${loreContext}
             };
             
             if (editingCharId) {
-                await db.characters.put(charData); // 使用 put 覆盖完整对象
+                await safeCharacterPut(charData); // 使用 put 覆盖完整对象
             } else {
                 await db.characters.add(charData);
             }
@@ -33813,7 +34142,7 @@ async function sendGlobalSticker(catId, url) {
         };
         group.chat_history.push(msg);
         group.updated_at = Date.now();
-        await db.group_chats.put(group);
+        await safeGroupChatPut(group);
         
         await appendUserGroupMessageToUI(msg, group);
         closeChatPanel();
@@ -34005,7 +34334,7 @@ function generateVirtualPhoneNumber(id) {
     return '13' + Math.abs(hash).toString().substring(0, 9).padEnd(9, '0');
 }
 
-// 余额管理
+// 余额管理（localStorage同步访问 + IndexedDB异步备份，双重保障）
 function getPhoneBalance() {
     const balance = localStorage.getItem('phone_balance');
     return balance ? parseFloat(balance) : 50.0; // 默认50元
@@ -34013,6 +34342,8 @@ function getPhoneBalance() {
 
 function setPhoneBalance(amount) {
     localStorage.setItem('phone_balance', amount.toFixed(2));
+    // 异步备份到IndexedDB（不阻塞主流程）
+    saveFinanceData('phone_balance', amount.toFixed(2)).catch(e => console.warn('[Finance] phone_balance备份失败:', e));
 }
 
 function addPhoneBalance(amount) {
@@ -34186,7 +34517,7 @@ async function showPaymentMethodSelection(amount, description) {
                     });
                     
                     // 保存到用户数据
-                    await db.characters.put(user);
+                    await safeCharacterPut(user);
                     
                     // 通知付款方（角色）
                     const payerChar = await db.characters.get(card.charId);
@@ -34219,6 +34550,7 @@ function addRechargeRecord(amount) {
         history.pop();
     }
     localStorage.setItem('phone_recharge_history', JSON.stringify(history));
+    saveFinanceData('phone_recharge_history', history).catch(e => console.warn('[Finance] phone_recharge_history备份失败:', e));
 }
 
 // 显示充值页面
@@ -34444,7 +34776,7 @@ async function submitLoan() {
         
         if (!user.identity) user.identity = {};
         user.identity.balance = userBalance.toFixed(2);
-        await db.characters.put(user);
+        await safeCharacterPut(user);
         
         // 更新余额显示
         await updateBalancePageDisplay();
@@ -34473,6 +34805,7 @@ async function submitLoan() {
         let loanHistory = JSON.parse(localStorage.getItem('loanHistory') || '[]');
         loanHistory.unshift(loanRecord);
         localStorage.setItem('loanHistory', JSON.stringify(loanHistory));
+        saveFinanceData('loanHistory', loanHistory).catch(e => console.warn('[Finance] loanHistory备份失败:', e));
         
         // 显示成功提示
         alert(`借款成功\n\n借款金额：¥${selectedLoanAmount.toLocaleString()}\n已添加到钱包余额`);
@@ -34732,7 +35065,7 @@ async function submitRepay() {
         userBalance = userBalance - selectedRepayAmount;
         if (!user.identity) user.identity = {};
         user.identity.balance = userBalance.toFixed(2);
-        await db.characters.put(user);
+        await safeCharacterPut(user);
         
         // 更新余额显示
         await updateRepayBalance();
@@ -34759,6 +35092,7 @@ async function submitRepay() {
             
             loanHistory[loanIndex] = loan;
             localStorage.setItem('loanHistory', JSON.stringify(loanHistory));
+            saveFinanceData('loanHistory', loanHistory).catch(e => console.warn('[Finance] loanHistory备份失败:', e));
             
             // 更新当前显示的借款信息
             currentRepayLoan = loan;
@@ -34834,6 +35168,7 @@ async function checkOverdueLoans() {
     // 如果有变化，保存更新
     if (hasChanges) {
         localStorage.setItem('loanHistory', JSON.stringify(loanHistory));
+        saveFinanceData('loanHistory', loanHistory).catch(e => console.warn('[Finance] loanHistory备份失败:', e));
         // 刷新借款记录显示
         if (typeof loadLoanHistory === 'function') {
             loadLoanHistory();
@@ -34984,7 +35319,7 @@ async function addLoanReminderToCharContext(charId, message, borrowerName) {
     });
     
     // 保存到数据库
-    await db.characters.put(char);
+    await safeCharacterPut(char);
     
     console.log(`[借款提醒] 已添加到角色 ${char.name} 的上下文`);
 }
@@ -35259,7 +35594,7 @@ async function buyScratchCard() {
     userBalance = userBalance - SCRATCH_CARD_PRICE;
     if (!user.identity) user.identity = {};
     user.identity.balance = userBalance.toFixed(2);
-    await db.characters.put(user);
+    await safeCharacterPut(user);
     
     // 更新余额显示
     await updateScratchBalance();
@@ -35595,7 +35930,7 @@ async function addScratchPrize(amount) {
     
     if (!user.identity) user.identity = {};
     user.identity.balance = userBalance.toFixed(2);
-    await db.characters.put(user);
+    await safeCharacterPut(user);
     
     // 更新显示
     await updateScratchBalance();
@@ -35622,6 +35957,7 @@ function saveScratchRecord(record) {
         history = history.slice(0, 50);
     }
     localStorage.setItem('scratchHistory', JSON.stringify(history));
+    saveFinanceData('scratchHistory', history).catch(e => console.warn('[Finance] scratchHistory备份失败:', e));
 }
 
 // 加载历史记录
@@ -35948,7 +36284,7 @@ function handleCoverChange(input) {
             if (user) {
                 if (!user.identity) user.identity = {};
                 user.identity.cover = base64;
-                await db.characters.put(user);
+                await safeCharacterPut(user);
             }
         }
         // 同时也存一份本地缓存，作为兜底
@@ -36238,7 +36574,7 @@ async function doPublishFpMoment() {
     if (!roleChar.fp_moments_by_user) roleChar.fp_moments_by_user = {};
     if (!roleChar.fp_moments_by_user[accountId]) roleChar.fp_moments_by_user[accountId] = [];
     roleChar.fp_moments_by_user[accountId].push(newMoment);
-    await db.characters.put(roleChar);
+    await safeCharacterPut(roleChar);
 
     console.log('[FP朋友圈] ✅ 以角色身份发布朋友圈:', text);
 
@@ -37670,7 +38006,7 @@ async function addTransaction(type, amount, title, desc) {
         user.identity.transactions = user.identity.transactions.slice(-100);
     }
     
-    await db.characters.put(user);
+    await safeCharacterPut(user);
 }
 
 // ========== 亲属卡页面 ==========
@@ -38009,7 +38345,7 @@ async function confirmGiveFamilyCard() {
             createdAt: Date.now()
         });
         
-        await db.characters.put(user);
+        await safeCharacterPut(user);
         
         // 同时在角色那边添加收到的亲属卡记录
         if (!char.identity) char.identity = {};
@@ -38023,7 +38359,7 @@ async function confirmGiveFamilyCard() {
             createdAt: Date.now()
         });
         
-        await db.characters.put(char);
+        await safeCharacterPut(char);
         
         // 发送亲属卡消息到聊天
         let history = getChatHistory(char, accountId);
@@ -38065,13 +38401,13 @@ async function cancelFamilyCard(charId, type) {
     if (type === 'given') {
         // 从我赠送的列表中移除
         user.identity.familyCardsGiven = (user.identity.familyCardsGiven || []).filter(c => c.charId !== charId);
-        await db.characters.put(user);
+        await safeCharacterPut(user);
         
         // 从对方收到的列表中移除
         const char = await db.characters.get(charId);
         if (char && char.identity) {
             char.identity.familyCardsReceived = (char.identity.familyCardsReceived || []).filter(c => c.charId !== parseInt(currentMyCharId));
-            await db.characters.put(char);
+            await safeCharacterPut(char);
         }
     }
     
@@ -38154,7 +38490,7 @@ async function charUseFamilyCard(charId, amount, desc) {
         time: Date.now()
     });
     
-    await db.characters.put(user);
+    await safeCharacterPut(user);
     
     // 同时更新角色那边的记录
     const char = await db.characters.get(charId);
@@ -38167,7 +38503,7 @@ async function charUseFamilyCard(charId, amount, desc) {
                 desc: desc,
                 time: Date.now()
             });
-            await db.characters.put(char);
+            await safeCharacterPut(char);
         }
     }
     
@@ -38334,7 +38670,7 @@ ${fullCharacterInfo}
         // 保存到数据库
         if (!user.identity) user.identity = {};
         user.identity.balance = balance;
-        await db.characters.put(user);
+        await safeCharacterPut(user);
 
         // 更新界面
         document.getElementById('balance-amount-display').innerText = `¥${balance}`;
@@ -38551,7 +38887,7 @@ async function sendGroupRedPacket() {
     // 扣款
     const newBalance = currentBalance - amount;
     user.identity.balance = newBalance.toFixed(2);
-    await db.characters.put(user);
+    await safeCharacterPut(user);
     
     // 构建红包消息
     const group = await db.group_chats.get(window.currentGroupChatId);
@@ -38576,7 +38912,7 @@ async function sendGroupRedPacket() {
         time: Date.now()
     });
     group.updated_at = Date.now();
-    await db.group_chats.put(group);
+    await safeGroupChatPut(group);
     
     // 记录账单
     await addTransaction('expense', amount, '发红包', `${group.name} · ${count}个红包`);
@@ -38873,7 +39209,7 @@ async function claimRedPacket() {
     
     // 更新红包消息
     group.chat_history[msgIndex].content = JSON.stringify(data);
-    await db.group_chats.put(group);
+    await safeGroupChatPut(group);
     
     // 增加余额
     const user = await db.characters.get(myId);
@@ -38882,7 +39218,7 @@ async function claimRedPacket() {
         let balance = parseFloat(user.identity.balance || 0);
         balance += claimAmount;
         user.identity.balance = balance.toFixed(2);
-        await db.characters.put(user);
+        await safeCharacterPut(user);
     }
     
     // 记录账单（收入）
@@ -38939,7 +39275,7 @@ async function receiveGroupTransfer(msgId) {
     data.receivedAt = Date.now();
     
     group.chat_history[msgIndex].content = JSON.stringify(data);
-    await db.group_chats.put(group);
+    await safeGroupChatPut(group);
     
     // 增加余额
     if (currentMyCharId) {
@@ -38949,7 +39285,7 @@ async function receiveGroupTransfer(msgId) {
             let balance = parseFloat(user.identity.balance || 0);
             balance += parseFloat(data.amount);
             user.identity.balance = balance.toFixed(2);
-            await db.characters.put(user);
+            await safeCharacterPut(user);
         }
     }
     
@@ -39206,7 +39542,7 @@ async function doTransfer() {
     // 2. 扣款
     const newBalance = currentBalance - amountVal;
     user.identity.balance = newBalance.toFixed(2);
-    await db.characters.put(user);
+    await safeCharacterPut(user);
     
     // 3. 判断是群聊专属转账还是私聊转账
     if (window.currentGroupChatId && exclusiveTransferTarget) {
@@ -39236,7 +39572,7 @@ async function doTransfer() {
         if (!group.chat_history) group.chat_history = [];
         group.chat_history.push(msg);
         group.updated_at = Date.now();
-        await db.group_chats.put(group);
+        await safeGroupChatPut(group);
         
         // 记录账单
         await addTransaction('expense', amountVal, '转账', `转给${exclusiveTransferTarget.displayName}`);
@@ -39412,7 +39748,7 @@ async function handleTransferAction(action) {
                  
                  if (!user.identity) user.identity = {};
                  user.identity.balance = newBalance.toFixed(2);
-                 await db.characters.put(user);
+                 await safeCharacterPut(user);
                  
                  // 添加收入记录到账单
                  await addTransaction('income', data.amount, '微信转账', `来自${char.name}${data.desc ? ' - ' + data.desc : ''}`);
@@ -43059,7 +43395,7 @@ async function processAiCheckAccount(char, aiReplyText) {
             // 🔥 记录角色已知道用户密码（用于拉黑后自行解除）
             if (!char.knows_user_password) {
                 char.knows_user_password = true;
-                await db.characters.put(char);
+                await safeCharacterPut(char);
                 console.log(`[processAiCheckAccount] 📝 已记录 ${char.name} 知道用户密码`);
             }
         } else {
@@ -43078,7 +43414,7 @@ async function processAiCheckAccount(char, aiReplyText) {
         // 🔥 无密码场景也记录为已知（因为知道没有密码也算知道怎么登录）
         if (!char.knows_user_password) {
             char.knows_user_password = true;
-            await db.characters.put(char);
+            await safeCharacterPut(char);
             console.log(`[processAiCheckAccount] 📝 已记录 ${char.name} 知道用户无密码`);
         }
     } else {
@@ -43226,7 +43562,7 @@ async function processShuraActions(char, replyText) {
                     // 更新最后一条消息显示
                     targetChar.lastMsg = messages[messages.length - 1];
                     targetChar.lastMsgTime = Date.now() + (messages.length - 1) * 500;
-                    await db.characters.put(targetChar);
+                    await safeCharacterPut(targetChar);
                     
                     console.log(`[修罗场] ✅ 已以用户身份发送 ${messages.length} 条消息给 ${action.friendName}`);
                     executedActions.push({ ...action, success: true, messageCount: messages.length });
@@ -43352,7 +43688,7 @@ async function saveShuraLog(operatorChar, action) {
         operatorChar.shura_operations = [];
     }
     operatorChar.shura_operations.push(log);
-    await db.characters.put(operatorChar);
+    await safeCharacterPut(operatorChar);
     
     console.log('[修罗场] 操作日志已保存:', log);
 }
@@ -43498,7 +43834,7 @@ async function acceptIncomingCall() {
         time: Date.now()
     });
     await setChatHistory(char, accountId, history);
-    await db.characters.put(char);
+    await safeCharacterPut(char);
     
     // 设置视频通话角色ID，直接进入视频通话页面
     videoCallCharId = charId;
@@ -43545,7 +43881,7 @@ async function recordMissedCall(charId, reason) {
         time: Date.now()
     });
     await setChatHistory(char, accountId, history);
-    await db.characters.put(char);
+    await safeCharacterPut(char);
     
     // 发送系统通知
     sendSystemNotification(`未接来电`, `${displayName} 给你打了个电话`);
@@ -44438,9 +44774,8 @@ async function showOfflineMode() {
 
     offlineModeCharId = currentChatCharId;
     
-    // 加载线下模式历史记录
-    const key = `offline_chat_${accountId}_${offlineModeCharId}`;
-    offlineModeHistory = JSON.parse(localStorage.getItem(key) || '[]');
+    // 加载线下模式历史记录（优先IndexedDB，兼容localStorage旧数据）
+    offlineModeHistory = await loadOfflineChatHistory(accountId, offlineModeCharId);
 
     // 设置标题
     const title = document.getElementById('offline-chat-title');
@@ -44702,10 +45037,9 @@ async function handleOfflineMsgEdit() {
         // 更新消息
         offlineModeHistory[editIndex].content = newContent;
         
-        // 保存到localStorage
+        // 保存到IndexedDB（同时兜底localStorage）
         const accountId = getCurrentAccountId();
-        const key = `offline_chat_${accountId}_${editCharId}`;
-        localStorage.setItem(key, JSON.stringify(offlineModeHistory));
+        await saveOfflineChatHistory(accountId, editCharId, offlineModeHistory);
         
         // 刷新显示
         const char = await db.characters.get(editCharId);
@@ -44726,10 +45060,9 @@ async function handleOfflineMsgDelete() {
     // 删除消息
     offlineModeHistory.splice(savedIndex, 1);
     
-    // 保存到localStorage
+    // 保存到IndexedDB（同时兜底localStorage）
     const accountId = getCurrentAccountId();
-    const key = `offline_chat_${accountId}_${savedCharId}`;
-    localStorage.setItem(key, JSON.stringify(offlineModeHistory));
+    await saveOfflineChatHistory(accountId, savedCharId, offlineModeHistory);
     
     // 刷新显示
     const char = await db.characters.get(savedCharId);
@@ -44778,9 +45111,9 @@ async function sendOfflineMessage() {
     const userMsg = { role: 'user', content: text, time: Date.now() };
     offlineModeHistory.push(userMsg);
     
-    // 保存到localStorage
+    // 保存到IndexedDB（同时兜底localStorage）
     const key = `offline_chat_${accountId}_${offlineModeCharId}`;
-    localStorage.setItem(key, JSON.stringify(offlineModeHistory));
+    await saveOfflineChatHistory(accountId, offlineModeCharId, offlineModeHistory);
 
     // 刷新显示
     renderOfflineChatBody(char);
@@ -44923,8 +45256,8 @@ ${customPreset ? `\n## 📌 额外设定\n${customPreset}` : ''}`;
     const aiMsg = { role: 'assistant', content: reply, time: Date.now() };
     offlineModeHistory.push(aiMsg);
     
-    // 保存
-    localStorage.setItem(storageKey, JSON.stringify(offlineModeHistory));
+    // 保存到IndexedDB（同时兜底localStorage）
+    await saveOfflineChatHistory(accountId, char.id, offlineModeHistory);
     
     // 刷新显示
     renderOfflineChatBody(char);
@@ -44955,8 +45288,8 @@ async function rerollOfflineMessage() {
     const accountId = getCurrentAccountId();
     const key = `offline_chat_${accountId}_${offlineModeCharId}`;
     
-    // 保存移除后的历史
-    localStorage.setItem(key, JSON.stringify(offlineModeHistory));
+    // 保存移除后的历史到IndexedDB（同时兜底localStorage）
+    await saveOfflineChatHistory(accountId, offlineModeCharId, offlineModeHistory);
     
     // 刷新显示
     renderOfflineChatBody(char);
@@ -45036,12 +45369,19 @@ function clearOfflineChatHistory() {
     if (!confirm('确定要清空线下聊天记录吗？此操作不可恢复。')) return;
     
     const accountId = getCurrentAccountId();
-    const key = `offline_chat_${accountId}_${offlineModeCharId}`;
-    localStorage.removeItem(key);
     offlineModeHistory = [];
     
-    // 刷新显示
+    // 清空两处存储
     (async () => {
+        const lsKey = `offline_chat_${accountId}_${offlineModeCharId}`;
+        try {
+            await db.offline_chats.delete(lsKey);
+        } catch (e) { console.warn('[OfflineChat] IndexedDB删除失败:', e); }
+        try {
+            localStorage.removeItem(lsKey);
+        } catch (e) {}
+        
+        // 刷新显示
         const char = await db.characters.get(offlineModeCharId);
         if (char) renderOfflineChatBody(char);
     })();
@@ -46843,7 +47183,7 @@ async function handleOnlineIncomingMessage(data) {
     if (data.from_avatar && data.from_avatar !== _curOnlineAvatar) {
         console.log('[Online] 更新好友头像:', data.from_wx_account);
         setCharAvatar(targetChar, _onlineAid, data.from_avatar);
-        await db.characters.put(targetChar);
+        await safeCharacterPut(targetChar);
         targetChar = await db.characters.get(targetChar.id);
     }
     
@@ -46855,7 +47195,7 @@ async function handleOnlineIncomingMessage(data) {
         if (!targetChar.wechat_status_by_user) targetChar.wechat_status_by_user = {};
         targetChar.wechat_status_by_user[accountId] = 'friend';
         // 更新后重新获取，确保后续逻辑使用最新数据
-        await db.characters.put(targetChar);
+        await safeCharacterPut(targetChar);
         targetChar = await db.characters.get(targetChar.id);
     }
     
@@ -47020,7 +47360,7 @@ async function handleFamilyCardUsed(data) {
             time: Date.now()
         });
         
-        await db.characters.put(user);
+        await safeCharacterPut(user);
     }
 }
 
@@ -47690,7 +48030,7 @@ async function updateLocalOnlineGroupLastMessage(onlineGroupId, message) {
         group.chat_history.push(chatMessage);
         group.updated_at = Date.now();
         
-        await db.group_chats.put(group);
+        await safeGroupChatPut(group);
         
         // 刷新聊天列表（如果正在显示）
         if (document.querySelector('.wechat-tab-item.active')?.innerText.includes('微信')) {
@@ -49178,7 +49518,7 @@ async function sendOnlineGroupRedPacket() {
     // 扣款
     const newBalance = currentBalance - amount;
     user.identity.balance = newBalance.toFixed(2);
-    await db.characters.put(user);
+    await safeCharacterPut(user);
     
     // 构建红包数据
     const redPacketData = {
@@ -49363,7 +49703,7 @@ async function handleRedPacketClaimed(data) {
             let balance = parseFloat(user.identity.balance || 0);
             balance += claimAmountNum;
             user.identity.balance = balance.toFixed(2);
-            await db.characters.put(user);
+            await safeCharacterPut(user);
             
             // 记录账单
             const group = onlineGroups.find(g => g.id === currentOnlineGroupId);
@@ -50103,7 +50443,7 @@ async function setOnlineGroupBackground(input) {
             if (groups.length > 0) {
                 const group = groups[0];
                 group.chat_background = base64;
-                await db.group_chats.put(group);
+                await safeGroupChatPut(group);
                 
                 // 应用背景图
                 applyOnlineGroupBackground(groupId);
@@ -50137,7 +50477,7 @@ async function clearOnlineGroupBackground(groupId) {
         if (groups.length > 0) {
             const group = groups[0];
             group.chat_background = null;
-            await db.group_chats.put(group);
+            await safeGroupChatPut(group);
             
             // 应用背景图（清除）
             applyOnlineGroupBackground(groupId);
@@ -50887,7 +51227,7 @@ async function useAvatarAsProfile() {
     if (avatar.url !== oldAvatar) {
         markUserAvatarChanged(myChar);
     }
-    await db.characters.put(myChar);
+    await safeCharacterPut(myChar);
     
     hideAvatarPreview();
     showToast('头像设置成功');
@@ -51109,7 +51449,7 @@ async function executeChangeAvatar(charId, accountId) {
         const currentAccountId = accountId || getCurrentAccountId();
         const oldAvatar = getCharAvatar(freshChar, currentAccountId);
         setCharAvatar(freshChar, currentAccountId, selectedAvatar.url);
-        await db.characters.put(freshChar);
+        await safeCharacterPut(freshChar);
         
         console.log(`[换头像] ${freshChar.name} 换了新头像 (旧: ${oldAvatar?.substring(0, 50)}... → 新: ${selectedAvatar.url.substring(0, 50)}...)`);
         
@@ -51246,7 +51586,7 @@ async function acceptCoupleAvatar(btn, av1Id, av2Id, charId) {
         const _coupleAid = getCurrentAccountId();
         if (char) {
             setCharAvatar(char, _coupleAid, charAvatar);
-            await db.characters.put(char);
+            await safeCharacterPut(char);
         }
         
         // 更新用户头像
@@ -51258,7 +51598,7 @@ async function acceptCoupleAvatar(btn, av1Id, av2Id, charId) {
                 if (userAvatar !== oldAvatar) {
                     markUserAvatarChanged(myChar);
                 }
-                await db.characters.put(myChar);
+                await safeCharacterPut(myChar);
             }
         }
         
@@ -51319,7 +51659,7 @@ async function executeRevertCoupleAvatar(charId, accountId) {
         
         const _revertAid = getCurrentAccountId();
         setCharAvatar(char, _revertAid, selectedAvatar.url);
-        await db.characters.put(char);
+        await safeCharacterPut(char);
         
         console.log(`[换回单人头像] ${char.name} 换回了单人头像`);
         
@@ -51385,7 +51725,7 @@ async function executeUseImageAsAvatar(charId, accountId, imageIndex) {
         // 更新角色头像（按账号隔离）
         const _imgAid = getCurrentAccountId();
         setCharAvatar(char, _imgAid, selectedImage.url);
-        await db.characters.put(char);
+        await safeCharacterPut(char);
         
         console.log(`[使用图片头像] ${char.name} 使用了用户发送的图片作为头像`);
         
@@ -52488,7 +52828,7 @@ async function payWithWallet(amount) {
     
     // 扣款
     myChar.identity.balance = (balance - amount).toFixed(2);
-    await db.characters.put(myChar);
+    await safeCharacterPut(myChar);
     
     // 发送订单卡片
     await sendEmeiOrderCard();
@@ -52711,7 +53051,7 @@ async function handlePaymentRequest(btn) {
         
         // 扣款
         myChar.identity.balance = (balance - amount).toFixed(2);
-        await db.characters.put(myChar);
+        await safeCharacterPut(myChar);
         
         // 更新余额显示
         await updateBalancePageDisplay();
@@ -56612,7 +56952,7 @@ async function applyChatTheme() {
 
         // 更新角色的主题ID
         char.chatThemeId = selectedThemeIdForApply;
-        await db.characters.put(char);
+        await safeCharacterPut(char);
 
         // 应用主题样式
         await applyThemeToChat(selectedThemeIdForApply);
@@ -56898,7 +57238,7 @@ async function applyGroupChatTheme() {
 
         // 更新群聊的主题ID
         group.chatThemeId = selectedThemeIdForApply;
-        await db.group_chats.put(group);
+        await safeGroupChatPut(group);
 
         // 应用主题样式
         await applyThemeToChat(selectedThemeIdForApply);
@@ -57927,7 +58267,7 @@ async function moqiSendDrawingToFriend(charId) {
         history.push(newMsg);
         if (!char.chat_history_by_user) char.chat_history_by_user = {};
         char.chat_history_by_user[accountId] = history;
-        await db.characters.put(char);
+        await safeCharacterPut(char);
         // 追加到聊天 UI
         if (typeof window._appendShopCardToChat === 'function') {
             window._appendShopCardToChat(charId, newMsg);
@@ -58020,7 +58360,7 @@ async function moqiSendDrawingToFriend(charId) {
             if (!char.chat_history_by_user) char.chat_history_by_user = {};
             char.chat_history_by_user[accountId] = history;
         }
-        await db.characters.put(char);
+        await safeCharacterPut(char);
     }
 
     // 获取好友列表
@@ -58633,6 +58973,7 @@ async function moqiSendDrawingToFriend(charId) {
     }
     function saveInstallmentPlans(plans) {
         localStorage.setItem(SHOP_INST_KEY, JSON.stringify(plans));
+        saveFinanceData(SHOP_INST_KEY, plans).catch(e => console.warn('[Finance] installmentPlans备份失败:', e));
     }
 
     // 创建分期计划
@@ -58666,7 +59007,7 @@ async function moqiSendDrawingToFriend(charId) {
         let balance = parseFloat(user.identity.balance || 0);
         balance -= amount;
         user.identity.balance = balance.toFixed(2);
-        await db.characters.put(user);
+        await safeCharacterPut(user);
         console.log('[购物分期] 扣款成功: ¥' + amount.toFixed(2) + ' | 余额: ¥' + balance.toFixed(2) + ' | ' + desc);
         return true;
     }
@@ -58919,7 +59260,7 @@ async function moqiSendDrawingToFriend(charId) {
                         card.usedThisMonth = (card.usedThisMonth || 0) + finalAmount;
                         if (!card.records) card.records = [];
                         card.records.push({ amount: finalAmount, desc: '购物消费', time: Date.now() });
-                        await db.characters.put(user);
+                        await safeCharacterPut(user);
                     }
                 }
             }
