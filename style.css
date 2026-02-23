@@ -48,17 +48,17 @@ body {
             position: relative;
             padding: 0 8px;
             -webkit-overflow-scrolling: touch; /* iOS 流畅滚动 */
-            will-change: scroll-position; /* 提示浏览器预分配合成层 */
-            contain: layout style; /* 限制重排范围 */
+            /* will-change: scroll-position;  ← 性能优化：移除，长期存在会强制占用合成层显存 */
+            /* contain: layout style;          ← 性能优化：移除，iOS Safari 对 contain 支持不稳定，可能导致滚动重绘异常 */
         }
         
         /* #home-page 样式已移除，以便恢复默认文档流和滚动行为 */
         /* 顶部磨砂小组件 */
         .top-widget {
             margin: 60px 24px 30px; /* 增加底部间距 */
-            background: rgba(255, 255, 255, 0.8);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
+            background: rgba(255, 255, 255, 0.92);
+            /* backdrop-filter: blur(10px);    ← 性能优化：移除毛玻璃，改用高不透明度背景 */
+            /* -webkit-backdrop-filter: blur(10px); */
             border-radius: 2rem;
             padding: 16px;
             display: flex;
@@ -357,9 +357,9 @@ body {
             transform: translateX(-50%);
             width: calc(100% - 32px);
             height: 90px;
-            background: rgba(255, 255, 255, 0.8);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
+            background: rgba(255, 255, 255, 0.92);
+            /* backdrop-filter: blur(10px);    ← 性能优化：移除毛玻璃，改用高不透明度背景 */
+            /* -webkit-backdrop-filter: blur(10px); */
             border-radius: 2.5rem;
             display: flex;
             justify-content: space-around;
@@ -412,6 +412,7 @@ body {
         /* 拖拽模式下，所有未被拖拽的图标进行抖动 */
         body.dragging-mode .grid > div:not(.sortable-drag) {
             animation: jiggle 0.25s infinite linear;
+            will-change: transform; /* 性能优化：提升到合成层，让 GPU 处理动画避免 CPU repaint */
             cursor: move;
         }
         /* 防止长按选中文字/图片，优化拖拽体验 */
@@ -2371,6 +2372,7 @@ body {
             display: none;
             flex-direction: column;
             animation: slideLeft 0.3s ease;
+            overflow: hidden;
         }
         @keyframes slideLeft {
             from { transform: translateX(100%); }
@@ -2446,9 +2448,9 @@ body {
     padding-bottom: env(safe-area-inset-bottom);
 }
         
-        /* 线下模式输入框区域 - 与线上私聊页面保持一致的高度 */
+        /* 线下模式输入框区域 - 与线上私聊页面保持一致 */
         #offline-chat-footer {
-            padding: 10px 16px 30px 16px !important;
+            /* 继承 .chat-footer 的样式，不做额外覆盖 */
         }
         /* 引用预览区域 */
         .quote-preview {

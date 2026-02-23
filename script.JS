@@ -47,15 +47,47 @@ if (document.readyState === 'loading') {
     }
 }
 
-// iOS 100vh 修复：动态计算视口高度
-function setVh() {
-    // 获取视口高度，不包含浏览器 UI（如 Safari 底部栏）
-    let vh = window.innerHeight + 'px';
-    document.documentElement.style.setProperty('--vh', vh);
+// 移动端虚拟键盘适配
+// 原理：键盘弹起时 visualViewport.height 缩小，但 window.innerHeight（100vh）不变
+// 通过给当前可见的 chat-window 加 padding-bottom 把内容往上挤，窗口本身仍然全屏覆盖不露桌面
+let _kbLastPadding = 0;
+function handleKeyboardResize() {
+    const vp = window.visualViewport;
+    if (!vp) return;
+    // 键盘高度 = 布局视口 - 可视视口
+    const kbHeight = Math.max(0, Math.round(window.innerHeight - vp.height));
+    if (kbHeight === _kbLastPadding) return;
+    _kbLastPadding = kbHeight;
+    
+    // 给所有可能在前台的聊天窗口设置 padding-bottom（多加一点余量让输入框更明显）
+    const extraPush = 10;
+    const targets = document.querySelectorAll('.chat-window');
+    targets.forEach(el => {
+        if (el.style.display !== 'none' && el.style.display !== '') {
+            el.style.paddingBottom = kbHeight > 50 ? (kbHeight + extraPush) + 'px' : '0';
+        }
+    });
+    
+    // 键盘弹起时自动滚动聊天到底部
+    if (kbHeight > 50) {
+        requestAnimationFrame(() => {
+            // 线上聊天
+            const chatBody = document.getElementById('chat-body');
+            if (chatBody && chatBody.offsetParent !== null) {
+                chatBody.scrollTop = chatBody.scrollHeight;
+            }
+            // 线下聊天
+            const offlineBody = document.getElementById('offline-chat-body');
+            if (offlineBody && offlineBody.offsetParent !== null) {
+                offlineBody.scrollTop = offlineBody.scrollHeight;
+            }
+        });
+    }
 }
-// 初始化并监听 resize
-setVh();
-window.addEventListener('resize', setVh);
+// 监听 visualViewport resize（键盘弹起/收起都会触发）
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', handleKeyboardResize);
+}
 
 // 初始化DEXie数据库
 const db = new Dexie('DesktopDB');
@@ -363,8 +395,44 @@ async function migratePhoneAndSmsToIndexedDB() {
             }
         }
 
+        // ===== 图片压缩工具函数 =====
+        function compressImage(dataUrl, maxWidth = 800, quality = 0.75) {
+            return new Promise((resolve) => {
+                // 如果不是base64或体积很小，直接返回
+                if (!dataUrl || !dataUrl.startsWith('data:image')) {
+                    resolve(dataUrl);
+                    return;
+                }
+                const img = new Image();
+                img.onload = () => {
+                    let w = img.width, h = img.height;
+                    if (w > maxWidth) {
+                        h = Math.round(h * maxWidth / w);
+                        w = maxWidth;
+                    }
+                    const canvas = document.createElement('canvas');
+                    canvas.width = w;
+                    canvas.height = h;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, w, h);
+                    const compressed = canvas.toDataURL('image/jpeg', quality);
+                    // 如果压缩后反而更大，返回原图
+                    resolve(compressed.length < dataUrl.length ? compressed : dataUrl);
+                };
+                img.onerror = () => resolve(dataUrl);
+                img.src = dataUrl;
+            });
+        }
+
         // 页面加载初始化 — DOM就绪后立即启动，不等图片等资源
         document.addEventListener('DOMContentLoaded', async function() {
+            // ========== 请求持久化存储，防止浏览器自动清理数据 ==========
+            if (navigator.storage && navigator.storage.persist) {
+                navigator.storage.persist().then(granted => {
+                    console.log(granted ? '[Storage] ✓ 已获得持久化存储权限' : '[Storage] ✗ 持久化存储请求被拒绝');
+                });
+            }
+
             // ========== 第一阶段：界面恢复（优先让用户看到内容、可以点击） ==========
             checkFirstVisitDisclaimer(); // 首次访问弹出免责声明
             checkUpdateNotice(); // 更新公告（每个版本只弹一次）
@@ -4525,13 +4593,14 @@ ${timeStr}
             }
         }
         
-        // 各项自定义方法（修改后自动保存到Dexie）
+        // 各项自定义方法（修改后自动保存到Dexie，上传图片自动压缩）
         function setWallpaper(input) {
             const file = input.files[0];
             if (file) {
                 const reader = new FileReader();
-                reader.onload = e => {
-                    applyWallpaper(e.target.result);
+                reader.onload = async e => {
+                    const compressed = await compressImage(e.target.result, 1200, 0.8);
+                    applyWallpaper(compressed);
                 };
                 reader.readAsDataURL(file);
             }
@@ -4545,8 +4614,9 @@ ${timeStr}
             const file = input.files[0];
             if (file && currentSelectIcon) {
                 const reader = new FileReader();
-                reader.onload = e => {
-                    applyIcon(currentSelectIcon, e.target.result);
+                reader.onload = async e => {
+                    const compressed = await compressImage(e.target.result, 256, 0.8);
+                    applyIcon(currentSelectIcon, compressed);
                 };
                 reader.readAsDataURL(file);
             }
@@ -4556,8 +4626,9 @@ ${timeStr}
             const file = input.files[0];
             if (file) {
                 const reader = new FileReader();
-                reader.onload = e => {
-                    applyWidgetIcon(e.target.result);
+                reader.onload = async e => {
+                    const compressed = await compressImage(e.target.result, 256, 0.8);
+                    applyWidgetIcon(compressed);
                 };
                 reader.readAsDataURL(file);
             }
@@ -4567,8 +4638,9 @@ ${timeStr}
             const file = input.files[0];
             if (file) {
                 const reader = new FileReader();
-                reader.onload = e => {
-                    applyPhoto(pos, e.target.result);
+                reader.onload = async e => {
+                    const compressed = await compressImage(e.target.result, 800, 0.75);
+                    applyPhoto(pos, compressed);
                 };
                 reader.readAsDataURL(file);
             }
@@ -4578,8 +4650,9 @@ ${timeStr}
             const file = input.files[0];
             if (file) {
                 const reader = new FileReader();
-                reader.onload = e => {
-                    applyAvatar(id, e.target.result);
+                reader.onload = async e => {
+                    const compressed = await compressImage(e.target.result, 400, 0.8);
+                    applyAvatar(id, compressed);
                 };
                 reader.readAsDataURL(file);
             }
@@ -4672,8 +4745,9 @@ ${timeStr}
                 const file = this.files[0];
                 if (file && _imgPickerCallback) {
                     const reader = new FileReader();
-                    reader.onload = e => {
-                        _imgPickerCallback(e.target.result);
+                    reader.onload = async e => {
+                        const compressed = await compressImage(e.target.result, 1200, 0.8);
+                        _imgPickerCallback(compressed);
                         closeImagePicker();
                     };
                     reader.readAsDataURL(file);
@@ -12150,6 +12224,7 @@ ${loreContext}
         }
 
         // 设置角色的聊天记录（按账号隔离）
+        // 🔧 修复数据丢失：始终从DB读取最新角色数据再保存，避免用旧 char 对象覆盖并发写入的新数据
         async function setChatHistory(char, accountId, history) {
             // ✅ 如果用户正在查看这个聊天，自动标记新消息为已读
             if (currentChatCharId === char.id) {
@@ -12160,19 +12235,30 @@ ${loreContext}
                 });
             }
             
-            // ✅ 如果有新消息（非空历史），自动清除聊天列表隐藏标记
-            if (history && history.length > 0 && char.chat_hidden_by_user && accountId && char.chat_hidden_by_user[accountId]) {
-                char.chat_hidden_by_user[accountId] = false;
+            // 🔧 读取最新的角色数据，只更新聊天记录相关字段，保留其他字段的最新状态
+            const freshChar = await db.characters.get(char.id);
+            if (!freshChar) {
+                console.warn('[setChatHistory] ⚠️ 角色不存在，跳过保存:', char.id);
+                return;
+            }
+            
+            // ✅ 如果有新消息（非空历史），自动清除聊天列表隐藏标记（在最新数据上操作）
+            if (history && history.length > 0 && freshChar.chat_hidden_by_user && accountId && freshChar.chat_hidden_by_user[accountId]) {
+                freshChar.chat_hidden_by_user[accountId] = false;
             }
             
             if (!accountId) {
                 // 兼容旧代码：如果没有账号ID，使用旧结构
-                char.chat_history = history;
+                freshChar.chat_history = history;
+                char.chat_history = history; // 同步更新调用方的引用
             } else {
+                if (!freshChar.chat_history_by_user) freshChar.chat_history_by_user = {};
+                freshChar.chat_history_by_user[accountId] = history;
+                // 同步更新调用方的引用
                 if (!char.chat_history_by_user) char.chat_history_by_user = {};
                 char.chat_history_by_user[accountId] = history;
             }
-            await db.characters.put(char);
+            await db.characters.put(freshChar);
         }
 
         // 数据迁移：将旧结构迁移到新结构（不影响现有数据）
@@ -16386,7 +16472,10 @@ ${recentMessages || '（无记录）'}
                     if (freshCharForThought.thoughts.length > 50) {
                         freshCharForThought.thoughts = freshCharForThought.thoughts.slice(-50);
                     }
-                    await db.characters.put(freshCharForThought);
+                    // 🔧 修复数据丢失：使用 update() 只更新 thoughts 字段
+                    await db.characters.update(charId, {
+                        thoughts: freshCharForThought.thoughts
+                    });
                 }
                 
                 if (result.will_add_back) {
@@ -16574,7 +16663,10 @@ ${smsContext ? '对方还通过短信试图联系你。' : ''}
                     if (freshCharForThought.thoughts.length > 50) {
                         freshCharForThought.thoughts = freshCharForThought.thoughts.slice(-50);
                     }
-                    await db.characters.put(freshCharForThought);
+                    // 🔧 修复数据丢失：使用 update() 只更新 thoughts 字段
+                    await db.characters.update(charId, {
+                        thoughts: freshCharForThought.thoughts
+                    });
                 }
                 
                 if (result.will_unblock) {
@@ -17841,8 +17933,14 @@ window.unmountUser = unmountUser;
                     setCharAvatar(char, _aid, base64);
                     await db.characters.put(char);
                     
-                    // 刷新聊天界面头像（如果在聊天中）
-                    renderChatBody(char); 
+                    // ✅ 强制刷新聊天界面头像（forceRender=true，防止缓存跳过导致头像不更新）
+                    renderChatBody(char, true); 
+                    
+                    // ✅ 刷新微信聊天列表中的头像
+                    const wechatContent = document.getElementById('wechat-content');
+                    if (wechatContent) {
+                        renderWechatList(wechatContent);
+                    }
                 };
                 reader.readAsDataURL(file);
             }
@@ -17948,6 +18046,30 @@ window.unmountUser = unmountUser;
             html = html.replace(/data:text\/html/gi, '');
             
             return html;
+        }
+
+        // 将用户自定义CSS的选择器限定在指定作用域内
+        function scopeBubbleCSS(cssText, scopeSelector) {
+            // 按 } 拆分出每个CSS规则块
+            const result = [];
+            // 简单解析：找到每个 selector { ... } 块
+            const ruleRegex = /([^{}]+)\{([^{}]*)\}/g;
+            let match;
+            while ((match = ruleRegex.exec(cssText)) !== null) {
+                const rawSelector = match[1].trim();
+                const body = match[2].trim();
+                if (!rawSelector || !body) continue;
+                // 对每个逗号分隔的选择器都加上作用域前缀
+                const scopedSelectors = rawSelector.split(',').map(sel => {
+                    sel = sel.trim();
+                    if (!sel) return '';
+                    // 如果用户已经写了作用域前缀，不重复加
+                    if (sel.startsWith(scopeSelector)) return sel;
+                    return scopeSelector + ' ' + sel;
+                }).filter(Boolean).join(',\n');
+                result.push(scopedSelectors + ' {\n  ' + body + '\n}');
+            }
+            return result.join('\n');
         }
 
         // 严格过滤CSS中的JavaScript
@@ -18204,33 +18326,17 @@ window.unmountUser = unmountUser;
                 const cssText = char.custom_bubble_css.trim();
                 
                 // 🔧 判断用户输入的是"纯属性"还是"带选择器的完整CSS规则"
-                // 如果包含 { 和 }，说明是完整CSS规则，直接注入
+                // 如果包含 { 和 }，说明是完整CSS规则
                 const isFullCSS = cssText.includes('{') && cssText.includes('}');
                 
                 if (isFullCSS) {
-                    // 完整CSS规则模式：直接注入，先重置默认样式
+                    // 完整CSS规则模式：将选择器限定在 #chat-body 内，不做全局重置
                     console.log('[applyCustomStyles] 完整CSS规则模式');
-                    styleTag.textContent = `
-                        /* 重置默认气泡样式 */
-                        .message-row.other .message-content:not(.card-message):not(.image-only) {
-                            background: none !important;
-                            border: none !important;
-                            box-shadow: none !important;
-                        }
-                        .message-row.self .message-content:not(.card-message):not(.image-only) {
-                            background: none !important;
-                            border: none !important;
-                            box-shadow: none !important;
-                        }
-                        .message-row.other .message-content::before,
-                        .message-row.self .message-content::after {
-                            display: none !important;
-                        }
-                        /* 用户自定义CSS规则 */
-                        ${cssText}
-                    `;
+                    // 给用户的选择器加上 #chat-body 作用域前缀，避免影响其他页面
+                    const scopedCSS = scopeBubbleCSS(cssText, '#chat-body');
+                    styleTag.textContent = scopedCSS;
                 } else {
-                    // 纯属性模式：自动加 !important 并包裹在气泡选择器中
+                    // 纯属性模式：自动加 !important 并同时应用到 other 和 self 气泡
                     console.log('[applyCustomStyles] 纯属性模式');
                     const addImportant = (text) => {
                         return text
@@ -18247,26 +18353,13 @@ window.unmountUser = unmountUser;
                     
                     const importantCSS = addImportant(cssText);
                     
+                    // 直接应用到气泡上，不做 background:none 的重置
+                    // 用户写了什么属性就覆盖什么，没写的保持默认
                     styleTag.textContent = `
-                        /* 重置默认气泡样式 */
-                        .message-row.other .message-content:not(.card-message):not(.image-only) {
-                            background: none !important;
-                            border: none !important;
-                            box-shadow: none !important;
-                            border-radius: 18px !important;
+                        #chat-body .message-row.other .message-content:not(.card-message):not(.image-only) {
+                            ${importantCSS}
                         }
-                        .message-row.self .message-content:not(.card-message):not(.image-only) {
-                            background: none !important;
-                            border: none !important;
-                            box-shadow: none !important;
-                            border-radius: 18px !important;
-                        }
-                        .message-row.other .message-content::before,
-                        .message-row.self .message-content::after {
-                            display: none !important;
-                        }
-                        /* 应用用户自定义属性到所有消息气泡 */
-                        .message-row .message-content:not(.card-message):not(.image-only) {
+                        #chat-body .message-row.self .message-content:not(.card-message):not(.image-only) {
                             ${importantCSS}
                         }
                     `;
@@ -18786,7 +18879,10 @@ ${existingChatsContext.join('\n\n')}
                     if (myChar && myChar.type === 'user') {
                         avatarChangeNotice = getUserAvatarChangeNotice(char, accountId, myChar);
                         if (avatarChangeNotice) {
-                            await db.characters.put(char);
+                            // 🔧 修复数据丢失：使用 update() 只更新特定字段，避免用旧 char 覆盖并发写入的新数据
+                            await db.characters.update(char.id, {
+                                userAvatarNoticeMap: char.userAvatarNoticeMap
+                            });
                         }
                     }
                 }
@@ -19180,7 +19276,10 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                             if (freshChar.thoughts.length > 50) {
                                 freshChar.thoughts = freshChar.thoughts.slice(-50);
                             }
-                            await db.characters.put(freshChar);
+                            // 🔧 修复数据丢失：使用 update() 只更新 thoughts 字段，避免覆盖并发写入的聊天记录
+                            await db.characters.update(char.id, {
+                                thoughts: freshChar.thoughts
+                            });
                         }
                     }
                 
@@ -22668,6 +22767,7 @@ ${groupContextStr}
             
             body.innerHTML = '';
             currentRenderedCount = 0; // 重置渲染计数
+            isLoadingMoreMessages = false; // 🔧 修复：重置加载锁，防止异常后永久卡死
             
             // 切换多选模式样式
             if (isSelectionMode) {
@@ -22841,13 +22941,16 @@ ${groupContextStr}
             const messagesToRender = history.slice(startIndex);
             currentRenderedCount = messagesToRender.length;
 
+            // 🚀 性能优化：使用 DocumentFragment 批量插入，避免逐条 appendChild 触发多次 reflow
+            const fragment = document.createDocumentFragment();
+
             // 如果还有更多消息，添加"加载更多"按钮
             if (startIndex > 0) {
                 const loadMoreBtn = document.createElement('div');
                 loadMoreBtn.id = 'load-more-btn';
                 loadMoreBtn.style.cssText = 'text-align:center; padding:12px; margin:8px 0;';
                 loadMoreBtn.innerHTML = `<button onclick="loadMoreMessages()" style="background:#f0f0f0; border:none; padding:8px 20px; border-radius:16px; color:#666; font-size:13px; cursor:pointer;">加载更早的消息 (${startIndex}条)</button>`;
-                body.appendChild(loadMoreBtn);
+                fragment.appendChild(loadMoreBtn);
             }
 
             messagesToRender.forEach((msg, relativeIndex) => {
@@ -22865,7 +22968,7 @@ ${groupContextStr}
                     const timeStamp = document.createElement('div');
                     timeStamp.className = 'message-timestamp';
                     timeStamp.textContent = formatMessageTime(renderMsg.time, prevMsgTime, timeOffset);
-                    body.appendChild(timeStamp);
+                    fragment.appendChild(timeStamp);
                 }
                 
                 const row = createMessageElement(renderMsg, absoluteIndex, renderCharAvatar, renderUserAvatar, prevMsgTime, renderCharName);
@@ -22888,8 +22991,11 @@ ${groupContextStr}
                     }
                 }
                 
-                body.appendChild(row);
+                fragment.appendChild(row);
             });
+
+            // 一次性插入所有消息到 DOM（只触发一次 reflow）
+            body.appendChild(fragment);
             
             // 如果是被拉黑状态，不需要在底部添加电话记录区域，因为已经改到桌面应用了
             /*
@@ -22974,88 +23080,103 @@ ${groupContextStr}
             
             isLoadingMoreMessages = true;
             
-            const char = await db.characters.get(currentChatCharId);
-            const accountId = getCurrentAccountId();
-            const history = getChatHistory(char, accountId);
-            const body = document.getElementById('chat-body');
-            
-            // 计算要加载的消息范围
-            const renderWindow = 50;
-            const totalMessages = history.length;
-            const nextSliceStart = totalMessages - currentRenderedCount - renderWindow;
-            const nextSliceEnd = totalMessages - currentRenderedCount;
-            
-            if (nextSliceStart < 0 || nextSliceEnd <= 0) {
-                isLoadingMoreMessages = false;
-                return;
-            }
-            
-            const messagesToPrepend = history.slice(Math.max(0, nextSliceStart), nextSliceEnd);
-            
-            if (messagesToPrepend.length === 0) {
-                isLoadingMoreMessages = false;
-                return;
-            }
-            
-            // 保存当前滚动位置
-            const oldScrollHeight = body.scrollHeight;
-            
-            // 移除旧的"加载更多"按钮
-            const oldLoadMoreBtn = document.getElementById('load-more-btn');
-            if (oldLoadMoreBtn) {
-                oldLoadMoreBtn.remove();
-            }
-            
-            // 如果还有更多消息，添加新的"加载更多"按钮
-            const newStartIndex = Math.max(0, nextSliceStart);
-            if (newStartIndex > 0) {
-                const loadMoreBtn = document.createElement('div');
-                loadMoreBtn.id = 'load-more-btn';
-                loadMoreBtn.style.cssText = 'text-align:center; padding:12px; margin:8px 0;';
-                loadMoreBtn.innerHTML = `<button onclick="loadMoreMessages()" style="background:#f0f0f0; border:none; padding:8px 20px; border-radius:16px; color:#666; font-size:13px; cursor:pointer;">加载更早的消息 (${newStartIndex}条)</button>`;
-                body.insertBefore(loadMoreBtn, body.firstChild);
-            }
-            
-            // 准备要添加的消息元素
-            const userAvatarUrl = await getUserAvatarUrl(char.linked_user_id);
-            const timeOffset = getEffectiveTimeOffset(char);
-            const fragment = document.createDocumentFragment();
-            
-            messagesToPrepend.forEach((msg, relativeIndex) => {
-                const absoluteIndex = newStartIndex + relativeIndex;
-                const prevMsgTime = absoluteIndex > 0 ? history[absoluteIndex - 1].time : null;
+            try {
+                const char = await db.characters.get(currentChatCharId);
+                if (!char) {
+                    console.warn('[loadMoreMessages] 角色不存在:', currentChatCharId);
+                    return;
+                }
+                const accountId = getCurrentAccountId();
+                const history = getChatHistory(char, accountId);
+                const body = document.getElementById('chat-body');
+                if (!body) return;
                 
-                // 添加时间戳
-                if (msg.role !== 'system' && shouldShowTimestamp(msg.time, prevMsgTime)) {
-                    const timeStamp = document.createElement('div');
-                    timeStamp.className = 'message-timestamp';
-                    timeStamp.textContent = formatMessageTime(msg.time, prevMsgTime, timeOffset);
-                    fragment.appendChild(timeStamp);
+                // 计算要加载的消息范围
+                const renderWindow = 50;
+                const totalMessages = history.length;
+                const nextSliceEnd = totalMessages - currentRenderedCount;
+                
+                // 🔧 修复：nextSliceEnd <= 0 表示所有消息都已加载，直接返回
+                if (nextSliceEnd <= 0) {
+                    // 移除多余的"加载更多"按钮
+                    const oldBtn = document.getElementById('load-more-btn');
+                    if (oldBtn) oldBtn.remove();
+                    return;
                 }
                 
-                const _ldAvatar = getCharAvatar(char, accountId);
-                const _ldName = getCharDisplayName(char, accountId);
-                const row = createMessageElement(msg, absoluteIndex, _ldAvatar, userAvatarUrl, prevMsgTime, _ldName);
-                fragment.appendChild(row);
-            });
-            
-            // 插入消息到顶部
-            const firstMessage = body.querySelector('.message-row, .message-system');
-            if (firstMessage) {
-                body.insertBefore(fragment, firstMessage);
-            } else {
-                body.appendChild(fragment);
+                // 🔧 修复：nextSliceStart 可以 < 0，用 Math.max(0, ...) 处理即可
+                // 之前 nextSliceStart < 0 直接 return 会导致剩余不足50条的消息永远无法加载
+                const nextSliceStart = Math.max(0, nextSliceEnd - renderWindow);
+                
+                const messagesToPrepend = history.slice(nextSliceStart, nextSliceEnd);
+                
+                if (messagesToPrepend.length === 0) {
+                    return;
+                }
+                
+                // 保存当前滚动位置
+                const oldScrollHeight = body.scrollHeight;
+                
+                // 移除旧的"加载更多"按钮
+                const oldLoadMoreBtn = document.getElementById('load-more-btn');
+                if (oldLoadMoreBtn) {
+                    oldLoadMoreBtn.remove();
+                }
+                
+                // 如果还有更多消息，添加新的"加载更多"按钮
+                if (nextSliceStart > 0) {
+                    const loadMoreBtn = document.createElement('div');
+                    loadMoreBtn.id = 'load-more-btn';
+                    loadMoreBtn.style.cssText = 'text-align:center; padding:12px; margin:8px 0;';
+                    loadMoreBtn.innerHTML = `<button onclick="loadMoreMessages()" style="background:#f0f0f0; border:none; padding:8px 20px; border-radius:16px; color:#666; font-size:13px; cursor:pointer;">加载更早的消息 (${nextSliceStart}条)</button>`;
+                    body.insertBefore(loadMoreBtn, body.firstChild);
+                }
+                
+                // 准备要添加的消息元素
+                const userAvatarUrl = await getUserAvatarUrl(char.linked_user_id);
+                const timeOffset = getEffectiveTimeOffset(char);
+                const fragment = document.createDocumentFragment();
+                
+                messagesToPrepend.forEach((msg, relativeIndex) => {
+                    const absoluteIndex = nextSliceStart + relativeIndex;
+                    const prevMsgTime = absoluteIndex > 0 ? history[absoluteIndex - 1].time : null;
+                    
+                    // 添加时间戳
+                    if (msg.role !== 'system' && shouldShowTimestamp(msg.time, prevMsgTime)) {
+                        const timeStamp = document.createElement('div');
+                        timeStamp.className = 'message-timestamp';
+                        timeStamp.textContent = formatMessageTime(msg.time, prevMsgTime, timeOffset);
+                        fragment.appendChild(timeStamp);
+                    }
+                    
+                    const _ldAvatar = getCharAvatar(char, accountId);
+                    const _ldName = getCharDisplayName(char, accountId);
+                    const row = createMessageElement(msg, absoluteIndex, _ldAvatar, userAvatarUrl, prevMsgTime, _ldName);
+                    fragment.appendChild(row);
+                });
+                
+                // 插入消息到顶部
+                const firstMessage = body.querySelector('.message-row, .message-system');
+                if (firstMessage) {
+                    body.insertBefore(fragment, firstMessage);
+                } else {
+                    body.appendChild(fragment);
+                }
+                
+                // 恢复滚动位置
+                const newScrollHeight = body.scrollHeight;
+                body.scrollTop = newScrollHeight - oldScrollHeight;
+                
+                // 更新已渲染计数
+                currentRenderedCount += messagesToPrepend.length;
+                
+                console.log(`[loadMoreMessages] 加载了 ${messagesToPrepend.length} 条消息，总计已渲染 ${currentRenderedCount} 条`);
+            } catch (err) {
+                console.error('[loadMoreMessages] 加载历史消息出错:', err);
+            } finally {
+                // 🔧 修复：无论成功还是失败，都必须重置标记，否则按钮会永久失效
+                isLoadingMoreMessages = false;
             }
-            
-            // 恢复滚动位置
-            const newScrollHeight = body.scrollHeight;
-            body.scrollTop = newScrollHeight - oldScrollHeight;
-            
-            // 更新已渲染计数
-            currentRenderedCount += messagesToPrepend.length;
-            
-            isLoadingMoreMessages = false;
-            console.log(`[loadMoreMessages] 加载了 ${messagesToPrepend.length} 条消息，总计已渲染 ${currentRenderedCount} 条`);
         }
         
         // 暴露到全局作用域，供 HTML onclick 使用
@@ -23989,6 +24110,7 @@ ${groupContextStr}
             if (chatBody) {
                 // 倒序删除，避免索引变化
                 const sortedIndices = Array.from(selectedIndices).sort((a, b) => b - a);
+                let deletedDomCount = 0;
                 sortedIndices.forEach(idx => {
                     // 使用data-index属性精确查找消息元素
                     const msgEl = chatBody.querySelector(`[data-index="${idx}"]`);
@@ -24002,8 +24124,11 @@ ${groupContextStr}
                             }
                         }
                         msgEl.remove();
+                        deletedDomCount++;
                     }
                 });
+                // 🔧 修复：同步更新已渲染计数，防止"加载更多"按钮的计算出错
+                currentRenderedCount = Math.max(0, currentRenderedCount - deletedDomCount);
             }
             
             exitSelectionMode();
@@ -25033,6 +25158,26 @@ ${groupContextStr}
                 }
             }, 300);
         }
+
+        // 聊天输入框获得焦点时：关闭面板 + 等键盘弹起后滚到底部
+        function onChatInputFocus() {
+            closeChatPanel();
+            // 延迟滚动，等待键盘弹起和 visualViewport 高度更新
+            setTimeout(() => {
+                const body = document.getElementById('chat-body');
+                if (body) body.scrollTop = body.scrollHeight;
+            }, 350);
+        }
+        window.onChatInputFocus = onChatInputFocus;
+
+        // 线下模式输入框获得焦点时：等键盘弹起后滚到底部
+        function onOfflineChatInputFocus() {
+            setTimeout(() => {
+                const body = document.getElementById('offline-chat-body');
+                if (body) body.scrollTop = body.scrollHeight;
+            }, 350);
+        }
+        window.onOfflineChatInputFocus = onOfflineChatInputFocus;
 
         function handleChatInputChange(input) {
             const hasText = input.value.trim().length > 0;
@@ -26695,7 +26840,10 @@ messages:
                     if (accountUserChar && accountUserChar.type === 'user') {
                         avatarChangeNotice = getUserAvatarChangeNotice(char, accountId, accountUserChar);
                         if (avatarChangeNotice) {
-                            await db.characters.put(char);
+                            // 🔧 修复数据丢失：使用 update() 只更新特定字段，避免用旧 char 覆盖并发写入的新数据
+                            await db.characters.update(targetCharId, {
+                                userAvatarNoticeMap: char.userAvatarNoticeMap
+                            });
                         }
                     }
                 }
@@ -26733,7 +26881,10 @@ messages:
                         
                         // 标记为已读
                         char.loanReminders.forEach(r => r.read = true);
-                        await db.characters.put(char);
+                        // 🔧 修复数据丢失：使用 update() 只更新特定字段，避免用旧 char 覆盖并发写入的新数据
+                        await db.characters.update(targetCharId, {
+                            loanReminders: char.loanReminders
+                        });
                     }
                 }
 
@@ -27869,7 +28020,10 @@ ${checkResult.checkResult}
                             if (freshChar.thoughts.length > 50) {
                                 freshChar.thoughts = freshChar.thoughts.slice(-50);
                             }
-                            await db.characters.put(freshChar);
+                            // 🔧 修复数据丢失：使用 update() 只更新 thoughts 字段，避免覆盖并发写入的聊天记录
+                            await db.characters.update(targetCharId, {
+                                thoughts: freshChar.thoughts
+                            });
                         }
                     }
 
@@ -29542,7 +29696,10 @@ ${checkResult.checkResult}
                                     content: thought,
                                     time: _vNow()
                                 });
-                                await db.characters.put(freshChar);
+                                // 🔧 修复数据丢失：使用 update() 只更新 thoughts 字段，避免覆盖并发写入的聊天记录
+                                await db.characters.update(targetCharId, {
+                                    thoughts: freshChar.thoughts
+                                });
                             }
                             const newMsg = buildCharMessage(part, !!char.foreign_lang_mode, extraFields);
                             
@@ -29602,7 +29759,15 @@ ${checkResult.checkResult}
                                     }
                                 }
                             }
-                            await db.characters.put(freshCharForFp);
+                            // 🔧 修复数据丢失：使用 update() 只更新标记字段，避免覆盖并发写入的聊天记录
+                            const fpUpdatePayload = {};
+                            if (freshCharForFp.chat_history_by_user) {
+                                fpUpdatePayload.chat_history_by_user = freshCharForFp.chat_history_by_user;
+                            }
+                            if (freshCharForFp.fp_moments_by_user) {
+                                fpUpdatePayload.fp_moments_by_user = freshCharForFp.fp_moments_by_user;
+                            }
+                            await db.characters.update(targetCharId, fpUpdatePayload);
                             console.log('[triggerAiReply] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
                         }
                         
@@ -32860,12 +33025,51 @@ async function batchImportStickersFromText(input) {
             const zip = await JSZip.loadAsync(arrayBuffer);
             const docXml = await zip.file('word/document.xml').async('string');
             
-            // 简单提取文本内容（提取 <w:t> 标签中的文本）
-            const textMatches = docXml.match(/<w:t[^>]*>([^<]+)<\/w:t>/g) || [];
-            const extractedText = textMatches.map(match => {
-                const content = match.replace(/<w:t[^>]*>/, '').replace(/<\/w:t>/, '');
-                return content;
-            }).join('');
+            // ── 1. 先提取超链接 URL 映射（Word 把链接地址存在 rels 文件里） ──
+            const hyperlinkMap = {};
+            try {
+                const relsFile = zip.file('word/_rels/document.xml.rels');
+                if (relsFile) {
+                    const relsXml = await relsFile.async('string');
+                    const relRegex = /<Relationship[^>]+Id="([^"]+)"[^>]+Target="([^"]+)"[^>]*>/g;
+                    let relMatch;
+                    while ((relMatch = relRegex.exec(relsXml)) !== null) {
+                        hyperlinkMap[relMatch[1]] = relMatch[2];
+                    }
+                }
+            } catch(e) { /* rels 文件读取失败不影响主流程 */ }
+            
+            // ── 2. 按段落（<w:p>）提取文本，保留换行 ──
+            const paragraphs = docXml.split(/<\/w:p>/);
+            const lines = [];
+            
+            for (const para of paragraphs) {
+                let lineText = '';
+                
+                // 处理超链接节点：<w:hyperlink r:id="rId5"><w:r><w:t>显示文字</w:t></w:r></w:hyperlink>
+                // 优先使用 rels 中的真实 URL 而非显示文本
+                let processedPara = para.replace(/<w:hyperlink[^>]*r:id="([^"]*)"[^>]*>([\s\S]*?)<\/w:hyperlink>/g, (fullMatch, rId, innerXml) => {
+                    const realUrl = hyperlinkMap[rId];
+                    if (realUrl && (realUrl.startsWith('http://') || realUrl.startsWith('https://'))) {
+                        lineText += realUrl;
+                        return ''; // 已处理，从剩余 XML 中移除
+                    }
+                    return fullMatch; // 无有效 URL，保留原样让后续 <w:t> 提取
+                });
+                
+                // 提取剩余的 <w:t> 标签文本
+                const textMatches = processedPara.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
+                for (const tm of textMatches) {
+                    const content = tm.replace(/<w:t[^>]*>/, '').replace(/<\/w:t>/, '');
+                    lineText += content;
+                }
+                
+                lineText = lineText.trim();
+                if (lineText) lines.push(lineText);
+            }
+            
+            const extractedText = lines.join('\n');
+            console.log('[DOCX导入] 提取到', lines.length, '行文本');
             
             // 处理提取的文本
             await processStickerText(extractedText, input);
@@ -32912,14 +33116,43 @@ async function processStickerText(text, input) {
             const line = lines[i].trim();
             if (!line) continue;
             
-            // 解析格式：描述：url 或 描述:url（支持中文和英文冒号）
-            const match = line.match(/^(.+?)[：:]\s*(.+)$/);
-            if (match) {
-                const description = match[1].trim();
-                const url = match[2].trim();
+            // 解析格式：描述：url 或 描述:url
+            // 支持中英文冒号（：:）、冒号后有空格/全角空格/多余空格、冒号前有空格
+            // 也支持「描述 url」用空格分隔的情况（当没有冒号时，以最后一个http开头的部分为URL）
+            let description = '';
+            let url = '';
+            let parsed = false;
+            
+            // 方式1：用冒号分隔（中文：、英文:）
+            const colonMatch = line.match(/^(.+?)\s*[：:]\s*(.+)$/);
+            if (colonMatch) {
+                description = colonMatch[1].trim();
+                url = colonMatch[2].trim();
+                parsed = true;
+            }
+            
+            // 方式2：没匹配到冒号，尝试用空格分隔（描述 + 空格 + URL）
+            if (!parsed) {
+                const spaceMatch = line.match(/^(.+?)\s+(https?:\/\/.+)$/i);
+                if (spaceMatch) {
+                    description = spaceMatch[1].trim();
+                    url = spaceMatch[2].trim();
+                    parsed = true;
+                }
+            }
+            
+            // 方式3：整行就是一个URL
+            if (!parsed && (line.startsWith('http://') || line.startsWith('https://') || line.startsWith('data:image'))) {
+                url = line;
+                parsed = true;
+            }
+            
+            if (parsed && url) {
+                // 清理 URL：去掉首尾空白、全角空格
+                url = url.replace(/[\s\u3000]+$/, '').replace(/^[\s\u3000]+/, '');
                 
                 // 验证URL格式
-                if (url && (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:image'))) {
+                if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:image')) {
                     stickers.push({
                         url: url,
                         description: description,
@@ -32931,18 +33164,8 @@ async function processStickerText(text, input) {
                     errors.push(`第${i+1}行：URL格式不正确 - ${line}`);
                 }
             } else {
-                // 如果没有冒号，尝试作为纯URL处理
-                if (line.startsWith('http://') || line.startsWith('https://') || line.startsWith('data:image')) {
-                    stickers.push({
-                        url: line,
-                        description: '',
-                        created_at: Date.now()
-                    });
-                    successCount++;
-                } else {
-                    failCount++;
-                    errors.push(`第${i+1}行：格式不正确 - ${line}`);
-                }
+                failCount++;
+                errors.push(`第${i+1}行：格式不正确 - ${line}`);
             }
         }
         
@@ -33019,74 +33242,85 @@ async function updateChatStickerPanel() {
     const contentContainer = document.getElementById('sticker-content');
     if (!tabsContainer || !contentContainer) return;
     
-    // 获取所有表情包分类（用户可以看到所有）
-    const allCategories = await db.sticker_categories.toArray();
-    
-    if (allCategories.length === 0) {
-        tabsContainer.innerHTML = '';
-        contentContainer.innerHTML = `<div style="text-align:center; grid-column:span 4; color:#999; margin-top:20px;">暂无表情包<br>请去【我-表情】添加</div>`;
-        return;
+    try {
+        // 获取所有表情包分类（用户可以看到所有）
+        const allCategories = await db.sticker_categories.toArray();
+        
+        if (allCategories.length === 0) {
+            tabsContainer.innerHTML = '';
+            contentContainer.innerHTML = `<div style="text-align:center; grid-column:span 4; color:#999; margin-top:20px;">暂无表情包<br>请去【我-表情】添加</div>`;
+            return;
+        }
+        
+        // 获取当前角色挂载的分类ID（用于限制发送）
+        let mountedIds = [];
+        if (currentChatCharId) {
+            const char = await db.characters.get(currentChatCharId);
+            mountedIds = char?.mounted_sticker_categories || [];
+        }
+        
+        // 过滤出有有效表情包的分类（确保stickers数组存在且有url有效的表情）
+        const validCategories = allCategories.filter(cat => {
+            if (!cat.stickers || cat.stickers.length === 0) return false;
+            // 至少有一个url有效的表情
+            return cat.stickers.some(s => s && s.url);
+        });
+        
+        if (validCategories.length === 0) {
+            tabsContainer.innerHTML = '';
+            contentContainer.innerHTML = `<div style="text-align:center; grid-column:span 4; color:#999; margin-top:20px;">暂无表情包<br>请去【我-表情】添加</div>`;
+            return;
+        }
+        
+        // 如果还没有选中的分类，默认选中第一个
+        if (!currentActiveStickerCategoryId || !validCategories.find(c => c.id === currentActiveStickerCategoryId)) {
+            currentActiveStickerCategoryId = validCategories[0].id;
+        }
+        
+        // 生成分类标签
+        let tabsHtml = '';
+        for (const cat of validCategories) {
+            const isActive = cat.id === currentActiveStickerCategoryId;
+            const isMounted = mountedIds.includes(cat.id);
+            const mountTag = isMounted ? '✓' : '';
+            tabsHtml += `
+                <div class="sticker-category-tab ${isActive ? 'active' : ''}" onclick="switchStickerCategory(${cat.id})" style="
+                    flex-shrink: 0;
+                    padding: 10px 16px;
+                    font-size: 13px;
+                    color: ${isActive ? 'var(--ins-pink)' : '#666'};
+                    border-bottom: 2px solid ${isActive ? 'var(--ins-pink)' : 'transparent'};
+                    cursor: pointer;
+                    white-space: nowrap;
+                    transition: all 0.2s;
+                ">
+                    ${cat.name} ${mountTag}
+                </div>
+            `;
+        }
+        tabsContainer.innerHTML = tabsHtml;
+        
+        // 显示当前选中分类的表情包
+        const currentCategory = validCategories.find(c => c.id === currentActiveStickerCategoryId);
+        if (!currentCategory) return;
+        
+        let contentHtml = '';
+        currentCategory.stickers.forEach(s => {
+            // ✅ 跳过无效的表情包条目（url缺失或非字符串）
+            if (!s || !s.url || typeof s.url !== 'string') return;
+            const safeUrl = s.url.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+            const safeDesc = (s.description || '').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            contentHtml += `<div class="emoji-item" onclick="sendGlobalSticker(${currentCategory.id}, '${safeUrl}')" style="display:flex; flex-direction:column; align-items:center; gap:4px; cursor:pointer;">
+                <img src="${s.url}" style="width:60px; height:60px; border-radius:8px; object-fit:cover;" onerror="this.onerror=null; this.style.cssText='width:60px; height:60px; display:flex; align-items:center; justify-content:center; background:#f5f5f5; border-radius:8px;'; this.outerHTML='<div style=\\'width:60px; height:60px; display:flex; align-items:center; justify-content:center; background:#f5f5f5; border-radius:8px; color:#ccc; font-size:10px;\\'>失败</div>';" />
+                ${safeDesc ? `<div style="font-size:10px; color:#999; text-align:center; max-width:60px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${safeDesc}</div>` : ''}
+            </div>`;
+        });
+        
+        contentContainer.innerHTML = contentHtml || `<div style="text-align:center; grid-column:span 4; color:#999; margin-top:20px;">该分类下暂无有效表情包</div>`;
+    } catch (e) {
+        console.error('[表情包面板] 加载失败:', e);
+        contentContainer.innerHTML = `<div style="text-align:center; grid-column:span 4; color:#999; margin-top:20px;">表情包加载失败<br>请刷新页面重试</div>`;
     }
-    
-    // 获取当前角色挂载的分类ID（用于限制发送）
-    let mountedIds = [];
-    if (currentChatCharId) {
-        const char = await db.characters.get(currentChatCharId);
-        mountedIds = char.mounted_sticker_categories || [];
-    }
-    
-    // 过滤出有表情包的分类
-    const validCategories = allCategories.filter(cat => cat.stickers && cat.stickers.length > 0);
-    
-    if (validCategories.length === 0) {
-        tabsContainer.innerHTML = '';
-        contentContainer.innerHTML = `<div style="text-align:center; grid-column:span 4; color:#999; margin-top:20px;">暂无表情包<br>请去【我-表情】添加</div>`;
-        return;
-    }
-    
-    // 如果还没有选中的分类，默认选中第一个
-    if (!currentActiveStickerCategoryId || !validCategories.find(c => c.id === currentActiveStickerCategoryId)) {
-        currentActiveStickerCategoryId = validCategories[0].id;
-    }
-    
-    // 生成分类标签
-    let tabsHtml = '';
-    for (const cat of validCategories) {
-        const isActive = cat.id === currentActiveStickerCategoryId;
-        const isMounted = mountedIds.includes(cat.id);
-        const mountTag = isMounted ? '✓' : '';
-        tabsHtml += `
-            <div class="sticker-category-tab ${isActive ? 'active' : ''}" onclick="switchStickerCategory(${cat.id})" style="
-                flex-shrink: 0;
-                padding: 10px 16px;
-                font-size: 13px;
-                color: ${isActive ? 'var(--ins-pink)' : '#666'};
-                border-bottom: 2px solid ${isActive ? 'var(--ins-pink)' : 'transparent'};
-                cursor: pointer;
-                white-space: nowrap;
-                transition: all 0.2s;
-            ">
-                ${cat.name} ${mountTag}
-            </div>
-        `;
-    }
-    tabsContainer.innerHTML = tabsHtml;
-    
-    // 显示当前选中分类的表情包
-    const currentCategory = validCategories.find(c => c.id === currentActiveStickerCategoryId);
-    if (!currentCategory) return;
-    
-    let contentHtml = '';
-    currentCategory.stickers.forEach(s => {
-        const safeUrl = s.url.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-        const safeDesc = (s.description || '').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        contentHtml += `<div class="emoji-item" onclick="sendGlobalSticker(${currentCategory.id}, '${safeUrl}')" style="display:flex; flex-direction:column; align-items:center; gap:4px; cursor:pointer;">
-            <img src="${s.url}" style="width:60px; height:60px; border-radius:8px; object-fit:cover;" onerror="this.onerror=null; this.style.cssText='width:60px; height:60px; display:flex; align-items:center; justify-content:center; background:#f5f5f5; border-radius:8px;'; this.outerHTML='<div style=\\'width:60px; height:60px; display:flex; align-items:center; justify-content:center; background:#f5f5f5; border-radius:8px; color:#ccc; font-size:10px;\\'>失败</div>';" />
-            ${safeDesc ? `<div style="font-size:10px; color:#999; text-align:center; max-width:60px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${safeDesc}</div>` : ''}
-        </div>`;
-    });
-    
-    contentContainer.innerHTML = contentHtml;
 }
 
 // 切换表情包分类
@@ -33143,6 +33377,8 @@ async function searchStickers(keyword) {
     
     let contentHtml = '';
     matchedStickers.forEach(s => {
+        // ✅ 跳过无效的表情包条目
+        if (!s || !s.url || typeof s.url !== 'string') return;
         const safeUrl = s.url.replace(/'/g, "\\'").replace(/"/g, '&quot;');
         const safeDesc = (s.description || '').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         contentHtml += `<div class="emoji-item" onclick="sendGlobalSticker(${s.categoryId}, '${safeUrl}')" style="display:flex; flex-direction:column; align-items:center; gap:4px; cursor:pointer;">
@@ -33204,6 +33440,7 @@ async function detectAndSuggestStickers(inputText) {
         // 显示推荐的表情包
         let html = '';
         matchedStickers.forEach(s => {
+            if (!s || !s.url || typeof s.url !== 'string') return;
             const safeUrl = s.url.replace(/'/g, "\\'").replace(/"/g, '&quot;');
             html += `<div onclick="sendSuggestedSticker(${s.categoryId}, '${safeUrl}')" style="
                 display: inline-flex;
@@ -47912,6 +48149,7 @@ async function loadOnlineGroupStickers() {
     const contentContainer = document.getElementById('online-group-sticker-content');
     if (!tabsContainer || !contentContainer) return;
     
+    try {
     // 获取所有表情包分类
     const allCategories = await db.sticker_categories.toArray();
     
@@ -47921,8 +48159,11 @@ async function loadOnlineGroupStickers() {
         return;
     }
     
-    // 过滤出有表情包的分类
-    const validCategories = allCategories.filter(cat => cat.stickers && cat.stickers.length > 0);
+    // 过滤出有有效表情包的分类（确保stickers数组存在且有url有效的表情）
+    const validCategories = allCategories.filter(cat => {
+        if (!cat.stickers || cat.stickers.length === 0) return false;
+        return cat.stickers.some(s => s && s.url);
+    });
     
     if (validCategories.length === 0) {
         tabsContainer.innerHTML = '';
@@ -47962,6 +48203,8 @@ async function loadOnlineGroupStickers() {
     
     let contentHtml = '';
     currentCategory.stickers.forEach(s => {
+        // ✅ 跳过无效的表情包条目（url缺失或非字符串）
+        if (!s || !s.url || typeof s.url !== 'string') return;
         const safeUrl = s.url.replace(/'/g, "\\'").replace(/"/g, '&quot;');
         const safeDesc = (s.description || '').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         contentHtml += `<div class="emoji-item" onclick="sendOnlineGroupSticker('${safeUrl}')" style="display:flex; flex-direction:column; align-items:center; gap:4px; cursor:pointer;">
@@ -47970,7 +48213,11 @@ async function loadOnlineGroupStickers() {
         </div>`;
     });
     
-    contentContainer.innerHTML = contentHtml;
+    contentContainer.innerHTML = contentHtml || `<div style="text-align:center; grid-column:span 4; color:#999; margin-top:20px;">该分类下暂无有效表情包</div>`;
+    } catch (e) {
+        console.error('[联机群聊表情包面板] 加载失败:', e);
+        contentContainer.innerHTML = `<div style="text-align:center; grid-column:span 4; color:#999; margin-top:20px;">表情包加载失败<br>请刷新页面重试</div>`;
+    }
 }
 
 // 切换联机群聊表情包分类
@@ -50563,10 +50810,10 @@ async function executeChangeAvatar(charId, accountId) {
         
         // 🔥 修复：刷新UI - 不论是否在当前聊天页都刷新相关UI
         if (currentChatCharId === charId) {
-            // 重新渲染整个聊天页面，确保所有头像立即更新
+            // 重新渲染整个聊天页面，确保所有头像立即更新（forceRender=true 防止缓存跳过）
             const updatedChar = await db.characters.get(charId);
             if (updatedChar) {
-                renderChatBody(updatedChar);
+                renderChatBody(updatedChar, true);
             }
             // 更新聊天标题栏的头像（如果有的话）
             const chatHeaderAvatar = document.querySelector('#chat-page .chat-header .msg-avatar, #chat-page .chat-header img');
