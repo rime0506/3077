@@ -43,18 +43,18 @@ body {
 .phone {
     width: 100vw;
     height: var(--app-height, 100vh);
-    overflow-y: auto; /* 允许垂直滚动 */
-            overflow-x: hidden; /* 禁止水平滚动 */
-            position: relative;
-            padding: 0 8px;
-            -webkit-overflow-scrolling: touch; /* iOS 流畅滚动 */
-            /* will-change: scroll-position;  ← 性能优化：移除，长期存在会强制占用合成层显存 */
-            /* contain: layout style;          ← 性能优化：移除，iOS Safari 对 contain 支持不稳定，可能导致滚动重绘异常 */
+    overflow: hidden;
+    position: relative;
+    padding: 0 8px;
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
         }
         
         /* #home-page 样式已移除，以便恢复默认文档流和滚动行为 */
         /* 顶部磨砂小组件 */
         .top-widget {
+            flex-shrink: 0;
             margin: 60px 24px 30px; /* 增加底部间距 */
             background: rgba(255, 255, 255, 0.92);
             /* backdrop-filter: blur(10px);    ← 性能优化：移除毛玻璃，改用高不透明度背景 */
@@ -129,11 +129,15 @@ body {
         }
         /* 多页桌面容器 */
         .desktop-pages-wrapper {
-            overflow: hidden;
+            overflow-x: hidden;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
             width: 100%;
             position: relative;
             z-index: 10;
             touch-action: pan-y pinch-zoom;
+            flex: 1;
+            min-height: 0;
         }
         .desktop-pages-track {
             display: flex;
@@ -154,9 +158,10 @@ body {
             justify-content: center;
             align-items: center;
             gap: 8px;
-            padding: 8px 0 0;
+            padding: 8px 0;
             z-index: 15;
             position: relative;
+            flex-shrink: 0;
         }
         .page-dot {
             width: 7px;
@@ -173,7 +178,7 @@ body {
         /* 应用容器 */
         .app-container {
             margin: 50px 24px 0; /* 增加上方间距，整体下移 */
-            padding-bottom: 120px;
+            padding-bottom: 20px;
             z-index: 10;
             position: relative;
         }
@@ -351,20 +356,17 @@ body {
         }
         /* 底部磨砂Dock栏 */
         .dock {
-            position: fixed;
-            bottom: 24px;
-            left: 50%;
-            transform: translateX(-50%);
             width: calc(100% - 32px);
             height: 90px;
             background: rgba(255, 255, 255, 0.92);
-            /* backdrop-filter: blur(10px);    ← 性能优化：移除毛玻璃，改用高不透明度背景 */
-            /* -webkit-backdrop-filter: blur(10px); */
             border-radius: 2.5rem;
             display: flex;
             justify-content: space-around;
             align-items: center;
             z-index: 20;
+            flex-shrink: 0;
+            margin: 0 auto 20px;
+            align-self: center;
         }
         .dock-icon .icon {
             width: 56px;

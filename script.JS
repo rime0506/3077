@@ -12,7 +12,7 @@ const manifest = {
     "name": "芽芽机",
     "short_name": "芽芽机",
     "start_url": ".",
-    "display": "standalone",
+    "display": "fullscreen",
     "background_color": "#ffffff",
     "theme_color": "#ffffff",
     "orientation": "portrait",
@@ -18486,7 +18486,7 @@ window.unmountUser = unmountUser;
             console.log('[Sync] 纯前端模式：角色数据存储在本地，无需同步到后端');
         }
         
-        // 注册 Service Worker（纯前端版本：仅用于 PWA 和本地通知）
+        // 注册 Service Worker（内联方式，不依赖外部sw.js文件）
         async function registerServiceWorkerAndSubscribe() {
             if (!('serviceWorker' in navigator)) {
                 console.log('[SW] Not supported');
@@ -18495,16 +18495,76 @@ window.unmountUser = unmountUser;
             }
             
             try {
-                // 注册 Service Worker（独立文件，用于 PWA 功能）
-                const registration = await navigator.serviceWorker.register('./sw.js');
-                console.log('[SW] Registered:', registration);
+                // 内联 Service Worker 代码
+                const swCode = `
+const CACHE_NAME = 'ins-desktop-v1';
+
+self.addEventListener('install', function(event) {
+    event.waitUntil(
+        caches.open(CACHE_NAME).then(function(cache) {
+            console.log('[SW] Cache opened');
+            return Promise.resolve();
+        }).catch(function(err) {
+            console.warn('[SW] Cache init failed:', err);
+            return Promise.resolve();
+        })
+    );
+    self.skipWaiting();
+});
+
+self.addEventListener('activate', function(event) {
+    event.waitUntil(
+        caches.keys().then(function(names) {
+            return Promise.all(
+                names.filter(function(n) { return n !== CACHE_NAME; })
+                    .map(function(n) { return caches.delete(n); })
+            );
+        }).then(function() { return self.clients.claim(); })
+    );
+});
+
+self.addEventListener('notificationclick', function(event) {
+    event.notification.close();
+    event.waitUntil(
+        clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
+            for (var i = 0; i < clientList.length; i++) {
+                if ('focus' in clientList[i]) return clientList[i].focus();
+            }
+            if (clients.openWindow) return clients.openWindow('./');
+        })
+    );
+});
+
+self.addEventListener('message', function(event) {
+    if (event.data && event.data.type === 'SHOW_NOTIFICATION') {
+        var d = event.data.data;
+        self.registration.showNotification(d.title || '', {
+            body: d.body || '',
+            icon: d.icon || '',
+            tag: d.tag || 'default',
+            data: d.data || {}
+        });
+    }
+});
+`;
+                const swBlob = new Blob([swCode], { type: 'application/javascript' });
+                const swUrl = URL.createObjectURL(swBlob);
+                
+                const registration = await navigator.serviceWorker.register(swUrl);
+                console.log('[SW] Registered (inline):', registration.scope);
                 showDebugToast('✓ Service Worker已注册');
                 
-                // 等待激活
                 await navigator.serviceWorker.ready;
-                console.log('[ServiceWorker] Ready');
+                console.log('[SW] Ready');
                 
-                // 请求通知权限（用于本地通知）
+                // 监听 SW 消息
+                navigator.serviceWorker.addEventListener('message', event => {
+                    if (event.data && event.data.type === 'OPEN_CHAT' && event.data.chatId) {
+                        if (typeof openChat === 'function') openChat(event.data.chatId);
+                    }
+                });
+                
+                // 请求通知权限
                 if ('Notification' in window) {
                     const permission = await Notification.requestPermission();
                     if (permission === 'granted') {
@@ -18516,13 +18576,11 @@ window.unmountUser = unmountUser;
                     }
                 }
                 
-                // 纯前端模式：不需要 Web Push 后端订阅
-                // 通知将通过前端的 Notification API 直接发送
-                console.log('[Push] 纯前端模式：使用本地 Notification API 发送通知');
+                console.log('[SW] 内联模式就绪');
                 showDebugToast('✓ 本地通知已就绪', true);
                 
             } catch (err) {
-                console.error('[ServiceWorker] Error:', err);
+                console.error('[SW] Error:', err);
                 showDebugToast(`✗ Service Worker错误: ${err.message}`);
             }
         }
