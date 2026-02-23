@@ -47,6 +47,21 @@ if (document.readyState === 'loading') {
     }
 }
 
+// ========== 移动端视口高度适配 ==========
+// 问题：部分手机浏览器 100vh 包含了地址栏/工具栏高度，导致内容溢出可见区域
+// 方案：用 window.innerHeight（真实可见高度）设置 CSS 变量 --app-height
+// 注意：window.innerHeight 在键盘弹起时不会变（和 visualViewport.height 不同），所以不会露桌面
+function setAppHeight() {
+    const h = window.innerHeight;
+    document.documentElement.style.setProperty('--app-height', h + 'px');
+}
+setAppHeight();
+window.addEventListener('resize', setAppHeight);
+// orientationchange 在部分旧安卓上比 resize 更可靠
+window.addEventListener('orientationchange', () => {
+    setTimeout(setAppHeight, 150);
+});
+
 // 移动端虚拟键盘适配
 // 原理：键盘弹起时 visualViewport.height 缩小，但 window.innerHeight（100vh）不变
 // 通过给当前可见的 chat-window 加 padding-bottom 把内容往上挤，窗口本身仍然全屏覆盖不露桌面
@@ -13690,6 +13705,9 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             document.getElementById('group-detail-mute').checked = group.is_muted || false;
             document.getElementById('group-detail-pin').checked = group.is_pinned || false;
             
+            // 设置上下文条数（默认25条）
+            document.getElementById('group-detail-context-count').value = group.context_message_count || 25;
+            
             // 设置自动总结设置
             document.getElementById('group-detail-auto-summary-switch').checked = group.auto_summary_enabled || false;
             document.getElementById('group-detail-summary-interval').value = group.summary_interval || '';
@@ -14218,6 +14236,10 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             const lorebookIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
             group.lorebookIds = lorebookIds.length > 0 ? lorebookIds : null;
             
+            // 上下文条数设置
+            const contextCount = parseInt(document.getElementById('group-detail-context-count').value);
+            group.context_message_count = contextCount > 0 ? contextCount : 25;
+            
             // 自动总结设置
             group.auto_summary_enabled = document.getElementById('group-detail-auto-summary-switch').checked;
             const summaryInterval = parseInt(document.getElementById('group-detail-summary-interval').value);
@@ -14710,6 +14732,13 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 } else {
                     // 群成员发的消息
                     const senderChar = msg.senderId ? memberMap[msg.senderId] : null;
+                    
+                    // 🔧 修复：跳过senderId为空或找不到对应成员的消息，避免显示"未知成员"
+                    if (!senderChar && msg.role === 'char') {
+                        msgIndex++;
+                        continue;
+                    }
+                    
                     // 优先使用群昵称，其次用备注名，最后用原名
                     const memberNicknames = group.memberNicknames || {};
                     const senderName = memberNicknames[msg.senderId] || (senderChar ? (senderChar.remark || senderChar.wx_nickname || senderChar.name) : '未知成员');
@@ -19066,6 +19095,7 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
 4. 像真实微信聊天一样分多条发送。
 5. 严禁只发送标点符号。每一条消息都必须有实际文字内容。
 6. 语气要自然、口语化，符合人设。
+7. 真人发微信很少在句尾加句号，你也尽量不要用句号结尾。
 
 请务必输出格式如：第一条消息内容|||第二条消息内容|||第三条消息内容
 
@@ -21150,6 +21180,8 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
                 // 构建成员列表描述（包含管理员标识和群昵称）
                 const adminIds = group.adminIds || [];
                 const memberNicknames = group.memberNicknames || {};
+                const validMemberNames = []; // 收集所有合法角色名
+                const invitableNpcsMap = {}; // 每个成员可邀请的NPC朋友
                 const membersList = group.memberIds.map(memberId => {
                     const char = memberMap[memberId];
                     if (!char) return null;
@@ -21160,8 +21192,25 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
                     if (isAdmin) roleText += ' [管理员]';
                     if (isMuted) roleText += ' [已禁言 - 不能发言]';
                     const nicknameText = nickname ? ` (群昵称: ${nickname})` : '';
-                    return `- ${getCharDisplayName(char, getCurrentAccountId())}${nicknameText}${roleText}: ${char.description || '无特别设定'}`;
+                    const displayName = getCharDisplayName(char, getCurrentAccountId());
+                    validMemberNames.push(displayName);
+                    // 收集该角色可邀请进群的NPC朋友（有真实关联的）
+                    if (char.relationships && char.relationships.length > 0) {
+                        const invitable = char.relationships.filter(r => r.targetId && !group.memberIds.includes(r.targetId));
+                        if (invitable.length > 0) {
+                            invitableNpcsMap[displayName] = invitable.map(r => `${r.targetName}(${r.relation})`);
+                        }
+                    }
+                    return `- ${displayName}${nicknameText}${roleText}: ${char.description || '无特别设定'}`;
                 }).filter(Boolean).join('\n');
+                
+                // 构建可邀请朋友的提示文本
+                let invitableNpcsText = '';
+                const invitableEntries = Object.entries(invitableNpcsMap);
+                if (invitableEntries.length > 0) {
+                    const lines = invitableEntries.map(([name, npcs]) => `${name}的朋友: ${npcs.join(' ')}`);
+                    invitableNpcsText = `\n可以被拉进群的朋友\n${lines.join('\n')}\n`;
+                }
                 
                 // 获取世界书上下文（合并群聊的世界书和所有成员的世界书）
                 let loreContext = "";
@@ -21188,9 +21237,10 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
                     }
                 }
                 
-                // 构建群聊上下文
+                // 构建群聊上下文（使用自定义的上下文条数，默认25条）
+                const groupContextCount = group.context_message_count || 25;
                 const groupHistory = group.chat_history || [];
-                const recentGroupHistory = groupHistory.slice(-25);
+                const recentGroupHistory = groupHistory.slice(-groupContextCount);
                 
                 // 收集未领完的红包信息
                 let pendingRedPackets = [];
@@ -21247,98 +21297,130 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
                     
                     if (m.role === 'user') return `${myNickname}: ${content}`;
                     const sender = m.senderId ? memberMap[m.senderId] : null;
+                    if (!sender && m.role === 'char') return null; // 🔧 过滤掉找不到成员的历史消息，避免"未知成员"污染上下文
                     const senderName = sender ? (sender.remark || sender.wx_nickname || sender.name) : '未知成员';
                     return `${senderName}: ${content}`;
-                }).join('\n');
+                }).filter(Boolean).join('\n');
                 
                 // 计算虚拟时间
                 const virtualTimeStr = getFormattedVirtualTime(0);
+                
+                // 🔗 群聊↔私聊记忆互通：获取每个成员与用户的私聊最近摘要
+                let privateChatMemoryContext = '';
+                try {
+                    const _pcAccountId = getCurrentAccountId();
+                    if (_pcAccountId) {
+                        const pcSnippets = [];
+                        for (const memberId of availableMembers) {
+                            const charData = await db.characters.get(memberId);
+                            if (!charData) continue;
+                            
+                            // 兼容新旧数据结构
+                            const charHistory = _pcAccountId 
+                                ? (charData.chat_history_by_user?.[_pcAccountId] || [])
+                                : (charData.chat_history || []);
+                            if (charHistory.length === 0) continue;
+                            
+                            // 取最近5条私聊消息做摘要
+                            const recentPrivate = charHistory.slice(-5);
+                            const charDisplayName = charData.remark || charData.wx_nickname || charData.name;
+                            
+                            const privateSummary = recentPrivate.map(m => {
+                                const who = m.role === 'user' ? myNickname : charDisplayName;
+                                const text = (m.content || '').replace(/\[img:[^\]]*\]/g, '[图片]').replace(/\[voice:[^\]]*\]/g, '[语音]').replace(/\[sticker:[^\]]*\]/g, '[表情]');
+                                return `${who}: ${text.substring(0, 60)}`;
+                            }).join('\n');
+                            
+                            if (privateSummary) {
+                                pcSnippets.push(`[${charDisplayName}与${myNickname}的私聊近况]\n${privateSummary}`);
+                            }
+                        }
+                        
+                        if (pcSnippets.length > 0) {
+                            privateChatMemoryContext = `\n# 群成员与用户的私聊近况（角色可参考，但不要直接引用私聊内容）\n${pcSnippets.join('\n\n')}\n`;
+                            console.log('[triggerGroupMemberReply] ✅ 私聊记忆互通已注入，涉及成员数:', pcSnippets.length);
+                        }
+                    }
+                } catch (pcErr) {
+                    console.warn('[triggerGroupMemberReply] 私聊记忆互通构建失败:', pcErr);
+                }
                 
                 // 构建系统提示 - 让AI一次性生成多个角色的回复
                 const minReplies = Math.max(4, availableMembers.length * 2);
                 const maxReplies = Math.max(8, availableMembers.length * 3);
                 
-                let systemPrompt = `# 核心任务：群聊导演
-你是一个群聊导演，负责扮演群里的所有角色。你的任务是让他们进行一场生动、热烈的对话。
-⚠️ 重要：你扮演的是群里的多个角色，不是发送消息的用户！每个角色都有独立的性格和想法。
+                let systemPrompt = `你是群聊导演 负责扮演群里的所有角色
+你扮演的是群成员 不是用户
+每个角色有独立的性格和想法
 
-# 输出格式铁律 (最高优先级)
-- 你的回复【必须】是一个JSON数组
-- 数组中的每个对象格式: {"name": "角色名", "content": "发言内容"}
-- 【必须】生成 ${minReplies} 到 ${maxReplies} 条消息
-- 【必须】让大部分角色都参与发言
-- 每个角色应该发送 2-4 条消息
-- 角色之间要有来回的对话互动
+回复必须是JSON数组
+格式 {"name": "角色名", "content": "内容"}
+生成 ${minReplies} 到 ${maxReplies} 条消息
+大部分角色都要参与
+每个角色发 2-4 条
+角色之间要有来回互动
 
-# 当前时间
+当前时间
 ${virtualTimeStr}
 
-# 群聊信息
-- 群名称: ${group.name}
-- 用户昵称: ${myNickname}
+群名 ${group.name}
+用户昵称 ${myNickname}
 ${pendingRedPackets.length > 0 ? `
-# 🧧 群里有未领完的红包！
-${pendingRedPackets.map(rp => `- 红包ID: ${rp.id}, 祝福语: "${rp.wish}", 还剩 ${rp.remaining} 个可领 (已领取的成员ID: ${rp.claimed.join(',') || '无'})`).join('\n')}
-提示：角色们看到红包会积极去抢！用 {"type": "claim_redpacket", "name": "角色名", "redpacketId": "红包ID"} 来抢红包
-注意：每个角色只能领取一次，已领取的成员不能再领！
+群里有未领完的红包
+${pendingRedPackets.map(rp => `红包ID ${rp.id} "${rp.wish}" 还剩${rp.remaining}个 已领的 ${rp.claimed.join(',') || '无'}`).join('\n')}
+看到红包角色们会积极去抢 用 {"type": "claim_redpacket", "name": "角色名", "redpacketId": "红包ID"}
+每个角色只能领一次
 ` : ''}${loreContext}
 
-# 群成员列表及人设 (你扮演的角色)
+群成员及人设
 ${membersList}
-
-# 最近的群聊历史
+${invitableNpcsText}${privateChatMemoryContext}
+最近聊天记录
 ${groupContextStr}
 
-# 角色扮演核心规则
-1. **热烈讨论**: 这是一个活跃的群聊，角色们【必须】积极互动，形成热烈的讨论氛围
-2. **角色互动**: 角色之间【必须】互相回应、补充、调侃或反驳
-3. **连续发言**: 同一个角色可以连续发多条消息，模拟真人打字习惯
-4. **禁言规则**: 标记为[已禁言]的角色【绝对不能】发言
-5. **管理员权限**: 标记为[管理员]的角色可以使用 kick_member 和 mute_member 指令
-6. **禁止出戏**: 绝不能透露你是AI
-7. **消息风格**: 每条消息简短（1句话），可以用"|||"分隔多句话表示连发
-8. **群昵称功能**: 角色可以随时修改自己的群昵称，这很常见！角色们经常会改群昵称来玩梗、调侃、表达心情
+规则
+这是活跃的群聊 角色们要积极互动
+角色之间互相回应 补充 调侃 反驳
+同一个角色可以连发多条 像真人打字一样
+标记[已禁言]的角色不能发言
+标记[管理员]的角色可以踢人和禁言
+不能出戏 不能透露你是AI
+每条消息简短 一两句话就够 可以用|||连发
+真人发微信很少用句号 你也一样
+角色可以随时改群昵称来玩梗 很常见
+name字段只能用这些名字 ${validMemberNames.join(' ')}
+严禁虚构不存在的群成员 但可以通过invite_npc拉朋友进群
 
-# 可用指令类型
-- **普通发言**: {"type": "text", "name": "角色名", "content": "发言内容"}
-- **修改群昵称**: {"type": "change_nickname", "name": "角色名", "nickname": "新群昵称"} ← 角色可以随时修改自己的群昵称！
-- **发送红包**: {"type": "send_redpacket", "name": "角色名", "redpacketType": "普通红包类型", "totalAmount": 总金额数字, "count": 红包个数, "wish": "祝福语", "targetName": "指定接收者角色名(可选)"} ← 角色可以发送红包活跃气氛！
-  - redpacketType可选值: "lucky"(拼手气红包), "normal"(普通红包), "single"(专属红包-指定某人)
-  - 拼手气红包：每个人领到的金额随机，增加趣味性
-  - 普通红包：每个人领到的金额相同，公平分配
-  - 专属红包：只有指定的targetName角色可以领取，count必须为1
-  - 示例1: {"type": "send_redpacket", "name": "角色A", "redpacketType": "lucky", "totalAmount": 10, "count": 5, "wish": "大家周末快乐！"}
-  - 示例2: {"type": "send_redpacket", "name": "角色B", "redpacketType": "normal", "totalAmount": 20, "count": 10, "wish": "恭喜发财"}
-  - 示例3: {"type": "send_redpacket", "name": "角色C", "redpacketType": "single", "totalAmount": 5.20, "count": 1, "wish": "生日快乐~", "targetName": "角色D"}
-- **领取红包**: {"type": "claim_redpacket", "name": "角色名", "redpacketId": "红包ID"} ← 看到红包时角色可以抢红包！
-- **踢出成员** (仅管理员): {"type": "kick_member", "name": "操作者角色名", "target": "被踢者角色名"}
-- **禁言成员** (仅管理员): {"type": "mute_member", "name": "操作者角色名", "target": "被禁言者角色名", "mute": true}
-- **解除禁言** (仅管理员): {"type": "mute_member", "name": "操作者角色名", "target": "被解禁者角色名", "mute": false}
+可用指令
+普通发言 {"name": "角色名", "content": "内容"} type可以省略
+改群昵称 {"type": "change_nickname", "name": "角色名", "nickname": "新昵称"}
+拉朋友进群 {"type": "invite_npc", "name": "操作者角色名", "target": "朋友名字"} 只能拉自己的朋友
+发红包 {"type": "send_redpacket", "name": "角色名", "redpacketType": "lucky或normal或single", "totalAmount": 金额, "count": 个数, "wish": "祝福语"}
+  lucky拼手气 normal平分 single专属红包需加"targetName"
+抢红包 {"type": "claim_redpacket", "name": "角色名", "redpacketId": "红包ID"}
+踢人 {"type": "kick_member", "name": "管理员名", "target": "被踢者名"}
+禁言 {"type": "mute_member", "name": "管理员名", "target": "目标名", "mute": true}
+解禁 {"type": "mute_member", "name": "管理员名", "target": "目标名", "mute": false}
+私聊 {"type": "dm", "name": "角色名", "content": "内容"} 消息发到角色和${myNickname}的私聊 用|||连发多条
 
-注意：普通发言可以省略 type 字段，直接用 {"name": "角色名", "content": "内容"}
-提示：角色们可以根据聊天内容、心情、玩梗等原因修改自己的群昵称，这是很自然的行为
-提示：如果聊天记录中有未领完的红包，角色们会积极抢红包！
-提示：角色们可以在适当的场合发红包，比如：过节、生日、表达感谢、活跃气氛、玩梗等场景。发红包是群聊互动的重要方式！
+角色有合适的场合可以发红包 过节 生日 活跃气氛
+角色有话想私下跟${myNickname}说可以用dm
+发红包后其他角色就可以用claim_redpacket抢
+角色聊到某个朋友时可以顺手把朋友拉进群 用invite_npc
 
-# 示例输出格式（注意消息数量要多！）
+示例
 [
   {"name": "角色A", "content": "哇 你说的这个|||我也遇到过"},
-  {"name": "角色B", "content": "真的吗？"},
+  {"name": "角色B", "content": "真的吗"},
   {"type": "change_nickname", "name": "角色A", "nickname": "话痨本痨"},
-  {"name": "角色A", "content": "对啊对啊|||我改个群昵称玩"},
-  {"name": "角色C", "content": "我也想说这个！|||之前就想吐槽了"},
-  {"type": "send_redpacket", "name": "角色A", "redpacketType": "lucky", "totalAmount": 8.88, "count": 3, "wish": "大家开心一下~"},
-  {"name": "角色B", "content": "哇！有红包！"},
-  {"type": "claim_redpacket", "name": "角色B", "redpacketId": "需要等红包发送后才知道ID"},
-  {"name": "角色C", "content": "抢到了吗哈哈"},
-  {"type": "change_nickname", "name": "角色B", "nickname": "手速第一"},
+  {"name": "角色A", "content": "对啊对啊|||改个昵称玩"},
+  {"name": "角色C", "content": "我也想说|||之前就想吐槽了"},
+  {"name": "角色B", "content": "哈哈哈"},
   {"name": "角色A", "content": "笑死"},
   {"name": "角色C", "content": "你们太好笑了|||不行了"}
 ]
 
-注意：发送红包后，红包会立即出现在群聊中，其他角色就可以用 claim_redpacket 指令抢红包了！
-
-现在，请根据以上信息，生成群聊中多个角色的【大量】回复。记住要生成 ${minReplies}-${maxReplies} 条消息！只输出JSON数组，不要有其他内容。`;
+根据以上信息生成群聊中多个角色的回复 ${minReplies}-${maxReplies}条 只输出JSON数组`;
 
                 // 准备对话历史
                 const messages = [
@@ -21348,6 +21430,13 @@ ${groupContextStr}
                 
                 // 调用AI
                 let aiResponse = await callAI(messages);
+                
+                // 检查API是否返回了错误信息而非正常回复
+                if (!aiResponse || typeof aiResponse !== 'string' || aiResponse.startsWith('请求失败') || aiResponse.startsWith('错误') || aiResponse.startsWith('Error')) {
+                    console.error('[triggerGroupMemberReply] API返回错误:', aiResponse);
+                    showToast('AI接口请求失败 请重试');
+                    return;
+                }
                 
                 // 解析JSON数组
                 let replies = [];
@@ -21471,6 +21560,70 @@ ${groupContextStr}
                             continue;
                         }
                         
+                        // 处理开小窗（群聊角色单独给用户发私聊）指令
+                        if (reply.type === 'dm' && reply.content) {
+                            if (!senderId) continue;
+                            
+                            try {
+                                const dmSenderChar = memberMap[senderId];
+                                if (!dmSenderChar) continue;
+                                
+                                const _dmAccId = getCurrentAccountId();
+                                const dmCharRecord = await db.characters.get(senderId);
+                                if (!dmCharRecord) continue;
+                                
+                                // 把小窗消息写入该角色的私聊记录
+                                const dmSegments = reply.content.split('|||').map(s => s.trim()).filter(s => s.length > 0);
+                                
+                                let dmHistory;
+                                if (_dmAccId) {
+                                    if (!dmCharRecord.chat_history_by_user) dmCharRecord.chat_history_by_user = {};
+                                    if (!dmCharRecord.chat_history_by_user[_dmAccId]) dmCharRecord.chat_history_by_user[_dmAccId] = [];
+                                    dmHistory = dmCharRecord.chat_history_by_user[_dmAccId];
+                                } else {
+                                    if (!dmCharRecord.chat_history) dmCharRecord.chat_history = [];
+                                    dmHistory = dmCharRecord.chat_history;
+                                }
+                                
+                                const dmCharName = dmSenderChar.remark || dmSenderChar.wx_nickname || dmSenderChar.name || reply.name;
+                                
+                                for (const seg of dmSegments) {
+                                    dmHistory.push({
+                                        role: 'char',
+                                        content: seg,
+                                        time: Date.now() + msgIndex * 50,
+                                        _srcGroup: group.name // 标记消息来源
+                                    });
+                                    msgIndex++;
+                                }
+                                
+                                // 让私聊出现在聊天列表
+                                if (_dmAccId && dmCharRecord.chat_hidden_by_user && dmCharRecord.chat_hidden_by_user[_dmAccId]) {
+                                    dmCharRecord.chat_hidden_by_user[_dmAccId] = false;
+                                }
+                                
+                                await db.characters.put(dmCharRecord);
+                                console.log(`[群聊小窗] ${dmCharName} 单独给你发了 ${dmSegments.length} 条消息`);
+                                
+                                // 不在该角色私聊页时弹提示
+                                if (currentChatCharId !== senderId) {
+                                    showToast(`${dmCharName} 单独找你说了些话`);
+                                }
+                                
+                                // 群聊中留一条系统提示
+                                updatedGroup.chat_history.push({
+                                    role: 'system',
+                                    content: `${dmCharName}开了个小窗单独找你`,
+                                    time: Date.now() + msgIndex * 50,
+                                    _isDmNotice: true
+                                });
+                                msgIndex++;
+                            } catch (dmErr) {
+                                console.error('[群聊小窗] 处理失败:', dmErr);
+                            }
+                            continue;
+                        }
+                        
                         // 处理管理员指令
                         if (reply.type === 'kick_member' && reply.target) {
                             // 检查操作者是否是管理员
@@ -21561,6 +21714,54 @@ ${groupContextStr}
                                 });
                             }
                             msgIndex++;
+                            continue;
+                        }
+                        
+                        // 处理拉朋友进群指令
+                        if (reply.type === 'invite_npc' && reply.target) {
+                            if (!senderId) continue;
+                            const inviter = memberMap[senderId];
+                            if (!inviter || !inviter.relationships) continue;
+                            
+                            // 在邀请者的关系列表中查找目标NPC
+                            const targetRel = inviter.relationships.find(r => {
+                                if (!r.targetId) return false;
+                                return r.targetName === reply.target || r.targetName.includes(reply.target) || reply.target.includes(r.targetName);
+                            });
+                            
+                            if (!targetRel) {
+                                console.warn(`[群聊拉人] ${inviter.name} 的关系中找不到 "${reply.target}"`);
+                                continue;
+                            }
+                            
+                            // 检查NPC是否已在群里
+                            if (updatedGroup.memberIds.includes(targetRel.targetId)) {
+                                console.log(`[群聊拉人] ${targetRel.targetName} 已经在群里了`);
+                                continue;
+                            }
+                            
+                            // 从数据库获取NPC确认存在
+                            const npcChar = await db.characters.get(targetRel.targetId);
+                            if (!npcChar) {
+                                console.warn(`[群聊拉人] NPC "${targetRel.targetName}" (id=${targetRel.targetId}) 在数据库中不存在`);
+                                continue;
+                            }
+                            
+                            // 加入群聊
+                            updatedGroup.memberIds.push(targetRel.targetId);
+                            memberMap[targetRel.targetId] = npcChar; // 更新memberMap供后续消息使用
+                            
+                            const inviterName = getCharDisplayName(inviter, getCurrentAccountId()) || reply.name;
+                            const npcDisplayName = getCharDisplayName(npcChar, getCurrentAccountId());
+                            validMemberNames.push(npcDisplayName); // 加入合法名字列表
+                            
+                            updatedGroup.chat_history.push({
+                                role: 'system',
+                                content: `${inviterName} 邀请 ${npcDisplayName} 加入了群聊`,
+                                time: Date.now() + msgIndex * 50
+                            });
+                            msgIndex++;
+                            console.log(`[群聊拉人] ✅ ${inviterName} 把 ${npcDisplayName} 拉进了群`);
                             continue;
                         }
                         
@@ -21768,8 +21969,14 @@ ${groupContextStr}
                         // 普通发言
                         if (!reply.name || !reply.content) continue;
                         
+                        // 🔧 修复：找不到成员ID的消息直接跳过，防止"未知成员"
+                        if (!senderId) {
+                            console.warn(`[群聊回复] 跳过非群成员角色 "${reply.name}" 的发言`);
+                            continue;
+                        }
+                        
                         // 检查是否被禁言
-                        if (senderId && updatedGroup.mutedMembers.includes(senderId)) {
+                        if (updatedGroup.mutedMembers.includes(senderId)) {
                             continue;
                         }
                         
@@ -21807,6 +22014,8 @@ ${groupContextStr}
                     
                     // 重新渲染群聊
                     await renderGroupChatBody(updatedGroup);
+                    // 刷新群成员列表（可能有新成员通过invite_npc加入）
+                    await renderGroupMemberList(updatedGroup);
                     
                     // ✅ 群聊回复完成后，检查是否需要自动总结
                     try {
@@ -27123,6 +27332,52 @@ ${hasPassword ? `---
                     console.warn('[triggerAiReply] 检测亲密关系邀请失败:', e);
                 }
 
+                // 🔗 群聊↔私聊记忆互通：获取该角色所在群聊的最近动态
+                let groupMemoryContext = '';
+                try {
+                    const accountId_gm = getCurrentAccountId();
+                    if (accountId_gm) {
+                        const allGroups = await db.group_chats.where('ownerAccountId').equals(accountId_gm).toArray();
+                        const charGroups = allGroups.filter(g => g.memberIds && g.memberIds.includes(targetCharId));
+                        
+                        if (charGroups.length > 0) {
+                            let groupSnippets = [];
+                            for (const g of charGroups) {
+                                const gHistory = g.chat_history || [];
+                                if (gHistory.length === 0) continue;
+                                
+                                // 取最近10条消息做摘要
+                                const recentMsgs = gHistory.slice(-10);
+                                const gMemberMap = {};
+                                for (const mid of (g.memberIds || [])) {
+                                    const mc = await db.characters.get(mid);
+                                    if (mc) gMemberMap[mid] = mc;
+                                }
+                                
+                                const snippet = recentMsgs.map(m => {
+                                    if (m.role === 'system') return `[系统] ${(m.content || '').substring(0, 50)}`;
+                                    if (m.role === 'user') return `${g.myNickname || userName || '我'}: ${(m.content || '').substring(0, 80)}`;
+                                    const sc = m.senderId ? gMemberMap[m.senderId] : null;
+                                    if (!sc) return null;
+                                    const sn = sc.remark || sc.wx_nickname || sc.name;
+                                    return `${sn}: ${(m.content || '').substring(0, 80)}`;
+                                }).filter(Boolean).join('\n');
+                                
+                                if (snippet) {
+                                    groupSnippets.push(`【群聊"${g.name}"最近动态】\n${snippet}`);
+                                }
+                            }
+                            
+                            if (groupSnippets.length > 0) {
+                                groupMemoryContext = `\n## 你和对方共同所在群聊的最近动态\n以下是你们共同参与的群聊中最近发生的事，你可以在私聊中自然地引用这些事件。\n${groupSnippets.join('\n\n')}\n`;
+                                console.log('[triggerAiReply] ✅ 群聊记忆互通已注入，群聊数:', charGroups.length);
+                            }
+                        }
+                    }
+                } catch (gmErr) {
+                    console.warn('[triggerAiReply] 群聊记忆互通构建失败:', gmErr);
+                }
+
                  let systemPrompt = `# 角色扮演任务
 
 【当前时间】
@@ -27181,6 +27436,7 @@ ${loreContext}
 ${summaryMemoryContext ? `## 记忆摘要
 ${summaryMemoryContext}
 ` : ''}
+${groupMemoryContext}
 ${_hasOfflineMemory ? `\n## ★ 线上线下统一世界观
 注意：你和对方的互动包含【微信聊天】和【线下见面】两个场景，它们是同一段关系。
 - 带有 [线下见面] 前缀的消息是你们当面交流时说的话/做的事
@@ -27253,6 +27509,7 @@ ${char.foreign_lang_mode ? `
 每条消息简短自然
 符合微信聊天习惯
 严禁把所有话挤在一条消息里
+真人发微信很少在句尾加句号 你也一样 尽量不要用句号结尾
 
 可以：
 
@@ -32642,7 +32899,7 @@ function showStickerPage() {
     page.style.top = '0';
     page.style.left = '0';
     page.style.width = '100vw';
-    page.style.height = '100vh';
+    page.style.height = 'var(--app-height, 100vh)';
     page.style.zIndex = '200';
     page.style.display = 'flex';
     console.log('[showStickerPage] Calling renderStickerCategories');

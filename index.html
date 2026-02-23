@@ -2892,6 +2892,20 @@
                 </div>
             </div>
             
+            <!-- AI上下文设置 -->
+            <div class="detail-group">
+                <div class="detail-item">
+                    <div>上下文条数</div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <input type="number" id="group-detail-context-count" value="25" style="border:none; background:transparent; width:60px; text-align:right; font-size:16px; color:#8e8e93; outline:none;" onchange="saveGroupDetail()">
+                        <span style="font-size:12px; color:#999;">条</span>
+                    </div>
+                </div>
+                <div style="padding:12px 16px; font-size:12px; color:#999; line-height:1.5;">
+                    发送给AI的历史消息条数，影响AI对对话上下文的理解。
+                </div>
+            </div>
+
             <!-- 自动总结设置 -->
             <div class="detail-group">
                 <div class="detail-item">
@@ -4827,7 +4841,7 @@
 
     <!-- 等待接听页面 -->
     <div class="wechat-page" id="video-waiting-page" style="z-index: 240; display: none; background: #FFFFFF;">
-        <div style="height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px solid #E5E5E5;">
+        <div style="height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px solid #E5E5E5;">
             <!-- AI头像：纯白圆形占位 -->
             <div id="video-waiting-avatar" style="width: 160px; height: 160px; border-radius: 50%; background-color: #FFFFFF; border: 2px solid #E5E5E5; margin-bottom: 24px; background-size: cover; background-position: center;"></div>
 
@@ -4849,7 +4863,7 @@
 
     <!-- 视频通话页面 -->
     <div class="wechat-page" id="video-call-page" style="z-index: 250; display: none; background: #FFFFFF;">
-        <div style="height: 100vh; display: flex; flex-direction: column; overflow: hidden; position: relative;">
+        <div style="height: 100%; display: flex; flex-direction: column; overflow: hidden; position: relative;">
             <!-- 视频容器 - 纯白背景，灰色细描边 -->
             <div style="flex: 1; position: relative; background-color: #FFFFFF; border: 1px solid #E5E5E5;">
                 <!-- 自己的小窗视频 - 纯白背景，灰色描边 -->
