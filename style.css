@@ -19,6 +19,10 @@
             margin: 0;
             padding: 0;
             overflow: hidden;
+            /* 🔧 阻止安卓系统字体缩放影响页面布局（防止按钮/UI元素因系统大字体而溢出屏幕） */
+            -webkit-text-size-adjust: 100%;
+            -moz-text-size-adjust: 100%;
+            text-size-adjust: 100%;
         }
         /* 通用 SVG 图标样式 */
         .svg-icon {
@@ -366,6 +370,7 @@ body {
             flex-shrink: 0;
             margin: 0 auto 20px;
             align-self: center;
+            overflow: hidden; /* 🔧 防止安卓大字体撑出 */
         }
         .dock-icon .icon {
             width: 56px;
@@ -1349,6 +1354,7 @@ body {
         .modal-box {
             background: #fff;
             width: 80%;
+            max-width: calc(100vw - 32px); /* 🔧 安卓大字体兜底：弹窗不超出屏幕 */
             border-radius: 12px;
             padding: 20px;
             display: flex;
@@ -2970,6 +2976,24 @@ body {
             font-weight: 400;
         }
         
+        /* 🔧 安卓大字体兜底：所有按钮/标签文字不受系统字体缩放影响 */
+        .modal-btn,
+        .btn-cancel,
+        .btn-confirm,
+        .back-btn,
+        .save-btn,
+        .context-menu-item,
+        .action-item,
+        .wechat-tab-item,
+        .tab-name,
+        .dock-icon .name,
+        .chat-icon-btn,
+        .sticker-modal-btn {
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
         /* 底部 Home 条退出区域 */
         .home-indicator-area {
             display: none; /* 移除底部退出条 */
