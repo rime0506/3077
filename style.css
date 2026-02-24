@@ -18,8 +18,7 @@
             width: 100%;
             margin: 0;
             padding: 0;
-            /* 移除 overflow: hidden 以允许内容在 .phone 内滚动时有正确的上下文，
-               或者至少不强制禁止。但实际上 .phone 会处理滚动。 */
+            overflow: hidden;
         }
         /* 通用 SVG 图标样式 */
         .svg-icon {

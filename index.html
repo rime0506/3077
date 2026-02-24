@@ -4899,15 +4899,16 @@
 
                 <!-- 底部功能按钮栏 - 纯白+灰色描边 -->
                 <div style="position: absolute; bottom: 80px; left: 0; width: 100%; display: flex; justify-content: center; gap: 60px; z-index: 10;">
-                    <button id="video-camera-btn" onclick="toggleCamera()" style="width: 52px; height: 52px; border-radius: 26px; display: flex; align-items: center; justify-content: center; border: 1px solid #E5E5E5; background-color: #FFFFFF; cursor: pointer; transition: all 0.2s ease;">
-                        <svg viewBox="0 0 24 24" style="width: 20px; height: 20px; fill: #666666;">
-                            <path d="M12 1c-5.5 0-10 4.5-10 10 0 2.3.8 4.4 2.2 6.1l-2 2c-.4.4-.4 1 0 1.4.2.2.4.3.7.3s.5-.1.7-.3l2-2c1.7 1.4 3.8 2.2 6.1 2.2 5.5 0 10-4.5 10-10S17.5 1 12 1zm0 18c-4.4 0-8-3.6-8-8s3.6-8 8-8 8 3.6 8 8-3.6 8-8 8z"/>
-                            <path d="M12 8c-2.2 0-4 1.8-4 4s1.8 4 4 4 4-1.8 4-4-1.8-4-4-4zm-2 4c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2z"/>
-                        </svg>
-                    </button>
                     <button onclick="hangupVideoCall()" style="width: 52px; height: 52px; border-radius: 26px; display: flex; align-items: center; justify-content: center; border: 1px solid #E5E5E5; background-color: #FFFFFF; cursor: pointer; transition: all 0.2s ease;">
                         <svg viewBox="0 0 24 24" style="width: 20px; height: 20px; fill: #666666;">
                             <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+                        </svg>
+                    </button>
+                    <button onclick="regenerateVideoMessage()" title="重新生成回复" style="width: 52px; height: 52px; border-radius: 26px; display: flex; align-items: center; justify-content: center; border: 1px solid #E5E5E5; background-color: #FFFFFF; cursor: pointer; transition: all 0.2s ease;">
+                        <svg viewBox="0 0 24 24" style="width: 20px; height: 20px; stroke: #666666; fill: none; stroke-width: 2;">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <polyline points="1 20 1 14 7 14"></polyline>
+                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
                         </svg>
                     </button>
                 </div>
@@ -4937,7 +4938,9 @@
                 <svg class="svg-icon" viewBox="0 0 24 24" style="width:28px; height:28px;"><polyline points="15 18 9 12 15 6"></polyline></svg>
             </div>
             <div class="wechat-title" id="video-record-detail-title">通话详情</div>
-            <div style="width:40px;"></div>
+            <div id="video-record-detail-delete-btn" onclick="deleteCurrentVideoRecordDetail()" style="width:40px; display:flex; align-items:center; justify-content:center; cursor:pointer; color:#ff3b30;">
+                <svg viewBox="0 0 24 24" style="width:22px; height:22px; fill:none; stroke:#ff3b30; stroke-width:2;"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            </div>
         </div>
         
         <div class="wechat-content" id="video-record-detail-content" style="display:flex; flex-direction:column; padding:16px; overflow-y:auto; gap:8px;">

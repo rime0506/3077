@@ -50,8 +50,13 @@ if (document.readyState === 'loading') {
 // ========== 移动端视口高度适配 ==========
 // 问题：部分手机浏览器 100vh 包含了地址栏/工具栏高度，导致内容溢出可见区域
 // 方案：用 window.innerHeight（真实可见高度）设置 CSS 变量 --app-height
-// 注意：window.innerHeight 在键盘弹起时不会变（和 visualViewport.height 不同），所以不会露桌面
+// 注意：PWA 独立模式下没有地址栏，100vh 就是全屏，不需要 JS 覆盖
+//       否则 innerHeight 可能比 100vh 小一点点，导致所有页面底部出现白块
+const _isPWAStandalone = window.matchMedia('(display-mode: standalone)').matches
+    || window.navigator.standalone === true;
+
 function setAppHeight() {
+    if (_isPWAStandalone) return; // PWA 模式直接用 CSS 的 100vh，不覆盖
     const h = window.innerHeight;
     document.documentElement.style.setProperty('--app-height', h + 'px');
 }
@@ -75,7 +80,7 @@ function handleKeyboardResize() {
     _kbLastPadding = kbHeight;
     
     // 给所有可能在前台的聊天窗口设置 padding-bottom（多加一点余量让输入框更明显）
-    const extraPush = 10;
+    const extraPush = 30;
     const targets = document.querySelectorAll('.chat-window');
     targets.forEach(el => {
         if (el.style.display !== 'none' && el.style.display !== '') {
@@ -492,8 +497,85 @@ async function safeGroupChatPut(group, label) {
     return await safeDbPut(db.group_chats, group, label || `群聊[${group.name || group.id}]`);
 }
 
-// 🔧 安全写入角色数据
+// 🔧 安全局部更新 IndexedDB 记录（只更新指定字段，不覆盖整个对象）
+// 使用 Dexie 的 update() 方法，支持点号嵌套写法如 'avatar_by_user.accountId'
+async function safeDexieUpdate(table, id, payload, label, maxRetries = 3, delayMs = 500) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const updated = await table.update(id, payload);
+            if (updated) {
+                return true; // 更新成功
+            } else {
+                console.warn(`[SafeDexieUpdate] ⚠️ ${label || ''} 更新返回0，记录可能不存在 (id=${id})`);
+                return false;
+            }
+        } catch (err) {
+            console.error(`[SafeDexieUpdate] ❌ ${label || ''} 更新失败 (第${attempt}次):`, err.message);
+            
+            // 检查是否是配额不足
+            if (err.name === 'QuotaExceededError' || (err.inner && err.inner.name === 'QuotaExceededError')) {
+                console.error('[SafeDexieUpdate] ⚠️ 存储空间不足！');
+                try {
+                    if (typeof showToast === 'function') {
+                        showToast('⚠️ 存储空间不足，部分数据可能无法保存！请导出备份后清理数据。');
+                    }
+                } catch(_) {}
+                return false;
+            }
+            
+            if (attempt < maxRetries) {
+                await new Promise(r => setTimeout(r, delayMs * attempt));
+            }
+        }
+    }
+    
+    console.error(`[SafeDexieUpdate] ❌❌ ${label || ''} 更新彻底失败（已重试${maxRetries}次）`);
+    try {
+        if (typeof showToast === 'function') {
+            showToast('⚠️ 数据保存失败，请检查存储空间或刷新页面重试');
+        }
+    } catch(_) {}
+    return false;
+}
+
+// 🔧 安全写入角色数据（写入前合并最新的聊天详情设置，防止被旧数据覆盖）
 async function safeCharacterPut(char, label) {
+    // 🛡️ 保护聊天详情设置：put() 会覆盖整个对象，
+    // 如果调用方持有的 char 是之前读取的旧数据，用户在此期间通过聊天详情修改的设置会丢失。
+    // 解决方案：写入前先读取数据库中最新的设置字段，合并到即将写入的对象中。
+    try {
+        if (char && char.id) {
+            const freshChar = await db.characters.get(char.id);
+            if (freshChar) {
+                // 聊天详情页的所有设置字段（通过 saveChatDetail / update() 保存）
+                const settingsFields = [
+                    'auto_reply_enabled', 'auto_reply_interval',
+                    'context_message_count',
+                    'reply_min_count', 'reply_max_count',
+                    'input_placeholder',
+                    'foreign_lang_mode',
+                    'allow_ai_check_account', 'allow_shura_mode',
+                    'allow_auto_avatar',
+                    'allow_autonomous_activity',
+                    'scheduled_activity_enabled', 'scheduled_activity_interval',
+                    'moments_frequency',
+                    'auto_summary_enabled', 'summary_interval',
+                    'custom_bubble_css', 'bubble_style',
+                    'lorebookIds', 'lorebookId',
+                    'chat_background', 'chatThemeId',
+                    'remark_by_user',
+                    'mounted_sticker_categories', 'linked_user_id'
+                ];
+                for (const field of settingsFields) {
+                    if (freshChar[field] !== undefined) {
+                        char[field] = freshChar[field];
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.warn('[safeCharacterPut] ⚠️ 合并最新设置失败，继续写入:', e);
+    }
     return await safeDbPut(db.characters, char, label || `角色[${char.name || char.id}]`);
 }
 
@@ -556,14 +638,17 @@ async function flushDirtySaves() {
                 : (freshChar.chat_history || []);
             
             if (data.history.length > dbHistory.length) {
+                // 🛡️ 使用 update() 只更新聊天记录字段，防止覆盖设置
+                const updatePayload = {};
                 if (data.accountId) {
-                    if (!freshChar.chat_history_by_user) freshChar.chat_history_by_user = {};
-                    freshChar.chat_history_by_user[data.accountId] = data.history;
+                    const mergedHistory = { ...(freshChar.chat_history_by_user || {}) };
+                    mergedHistory[data.accountId] = data.history;
+                    updatePayload.chat_history_by_user = mergedHistory;
                 } else {
-                    freshChar.chat_history = data.history;
+                    updatePayload.chat_history = data.history;
                 }
-                await safeCharacterPut(freshChar, `自动保存[${freshChar.name || charId}]`);
-                console.log(`[AutoSave] ✅ 已自动保存 ${freshChar.name || charId} 的聊天记录`);
+                await db.characters.update(charId, updatePayload);
+                console.log(`[AutoSave] ✅ 已自动保存 ${freshChar.name || charId} 的聊天记录（仅更新历史字段）`);
             }
         } catch (e) {
             console.error(`[AutoSave] ❌ 自动保存失败 charId=${charId}:`, e);
@@ -1612,6 +1697,10 @@ async function saveFinanceData(key, value) {
                     exportData.data.avatar_library = await db.avatar_library.toArray();
                     exportData.data.avatar_categories = await db.avatar_categories.toArray();
                     exportData.data.chat_themes = await db.chat_themes.toArray();
+                    if (db.intimate_relations) exportData.data.intimate_relations = await db.intimate_relations.toArray();
+                    if (db.intimate_requests) exportData.data.intimate_requests = await db.intimate_requests.toArray();
+                    if (db.offline_chats) exportData.data.offline_chats = await db.offline_chats.toArray();
+                    if (db.finance_data) exportData.data.finance_data = await db.finance_data.toArray();
                     
                     // ===== 2. 导出 iCity 日记数据库 =====
                     try {
@@ -1703,6 +1792,12 @@ async function saveFinanceData(key, value) {
                     stats.push(`朋友圈: ${momentCount}条`);
                     if (diaryCount > 0) stats.push(`日记: ${diaryCount}篇`);
                     if (songCount > 0) stats.push(`音乐: ${songCount}首`);
+                    const intimateCount = exportData.data.intimate_relations?.length || 0;
+                    if (intimateCount > 0) stats.push(`亲密关系: ${intimateCount}条`);
+                    const offlineChatCount = exportData.data.offline_chats?.length || 0;
+                    if (offlineChatCount > 0) stats.push(`离线聊天: ${offlineChatCount}条`);
+                    const financeCount = exportData.data.finance_data?.length || 0;
+                    if (financeCount > 0) stats.push(`财务数据: ${financeCount}条`);
                     stats.push(`本地设置: ${lsCount}项`);
                     
                     // 文件大小
@@ -1759,6 +1854,12 @@ async function saveFinanceData(key, value) {
                     if (diaryCount > 0) previewMsg += `  - 日记: ${diaryCount}篇\n`;
                     if (songCount > 0) previewMsg += `  - 音乐: ${songCount}首\n`;
                     previewMsg += `  - 本地设置: ${lsCount}项\n`;
+                    const intimateCount = importData.data.intimate_relations?.length || 0;
+                    if (intimateCount > 0) previewMsg += `  - 亲密关系: ${intimateCount}条\n`;
+                    const offlineChatCount = importData.data.offline_chats?.length || 0;
+                    if (offlineChatCount > 0) previewMsg += `  - 离线聊天: ${offlineChatCount}条\n`;
+                    const financeCount = importData.data.finance_data?.length || 0;
+                    if (financeCount > 0) previewMsg += `  - 财务数据: ${financeCount}条\n`;
                     previewMsg += `  - 以及世界书、表情包、电话/短信记录等\n\n`;
                 }
                 if (hasOnlineData) {
@@ -1799,6 +1900,10 @@ async function saveFinanceData(key, value) {
                     if (db.avatar_library) await db.avatar_library.clear();
                     if (db.avatar_categories) await db.avatar_categories.clear();
                     if (db.chat_themes) await db.chat_themes.clear();
+                    if (db.intimate_relations) await db.intimate_relations.clear();
+                    if (db.intimate_requests) await db.intimate_requests.clear();
+                    if (db.offline_chats) await db.offline_chats.clear();
+                    if (db.finance_data) await db.finance_data.clear();
                     
                     // 清空子数据库
                     try { await icityDb.diaries.clear(); await icityDb.annotations.clear(); } catch(e) { console.warn('[Import] 清空iCity失败:', e); }
@@ -1816,56 +1921,68 @@ async function saveFinanceData(key, value) {
                     localStorage.clear();
                 }
                 
-                // 导入数据库表数据
+                // 导入数据库表数据（使用 bulkPut 替代 bulkAdd，避免主键冲突报错）
                 if (hasLocalData && importData.data) {
                     if (importData.data.dexiData) {
-                        await db.dexiData.bulkAdd(importData.data.dexiData);
+                        await db.dexiData.bulkPut(importData.data.dexiData);
                     }
                     if (importData.data.lorebooks) {
-                        await db.lorebooks.bulkAdd(importData.data.lorebooks);
+                        await db.lorebooks.bulkPut(importData.data.lorebooks);
                     }
                     if (importData.data.characters) {
-                        await db.characters.bulkAdd(importData.data.characters);
+                        await db.characters.bulkPut(importData.data.characters);
                     }
                     if (importData.data.sticker_categories) {
-                        await db.sticker_categories.bulkAdd(importData.data.sticker_categories);
+                        await db.sticker_categories.bulkPut(importData.data.sticker_categories);
                     }
                     if (importData.data.moments) {
-                        await db.moments.bulkAdd(importData.data.moments);
+                        await db.moments.bulkPut(importData.data.moments);
                     }
                     if (importData.data.friend_requests) {
-                        await db.friend_requests.bulkAdd(importData.data.friend_requests);
+                        await db.friend_requests.bulkPut(importData.data.friend_requests);
                     }
                     if (importData.data.group_chats && db.group_chats) {
-                        await db.group_chats.bulkAdd(importData.data.group_chats);
+                        await db.group_chats.bulkPut(importData.data.group_chats);
                     }
                     if (importData.data.phone_recents && db.phone_recents) {
-                        await db.phone_recents.bulkAdd(importData.data.phone_recents);
+                        await db.phone_recents.bulkPut(importData.data.phone_recents);
                     }
                     if (importData.data.sms_messages && db.sms_messages) {
-                        await db.sms_messages.bulkAdd(importData.data.sms_messages);
+                        await db.sms_messages.bulkPut(importData.data.sms_messages);
                     }
                     if (importData.data.chat_summaries && db.chat_summaries) {
-                        await db.chat_summaries.bulkAdd(importData.data.chat_summaries);
+                        await db.chat_summaries.bulkPut(importData.data.chat_summaries);
                     }
                     if (importData.data.avatar_library && db.avatar_library) {
-                        await db.avatar_library.bulkAdd(importData.data.avatar_library);
+                        await db.avatar_library.bulkPut(importData.data.avatar_library);
                     }
                     if (importData.data.avatar_categories && db.avatar_categories) {
-                        await db.avatar_categories.bulkAdd(importData.data.avatar_categories);
+                        await db.avatar_categories.bulkPut(importData.data.avatar_categories);
                     }
                     if (importData.data.chat_themes && db.chat_themes) {
-                        await db.chat_themes.bulkAdd(importData.data.chat_themes);
+                        await db.chat_themes.bulkPut(importData.data.chat_themes);
+                    }
+                    if (importData.data.intimate_relations && db.intimate_relations) {
+                        await db.intimate_relations.bulkPut(importData.data.intimate_relations);
+                    }
+                    if (importData.data.intimate_requests && db.intimate_requests) {
+                        await db.intimate_requests.bulkPut(importData.data.intimate_requests);
+                    }
+                    if (importData.data.offline_chats && db.offline_chats) {
+                        await db.offline_chats.bulkPut(importData.data.offline_chats);
+                    }
+                    if (importData.data.finance_data && db.finance_data) {
+                        await db.finance_data.bulkPut(importData.data.finance_data);
                     }
                     
                     // 导入 iCity 日记数据库
                     if (importData.icityData) {
                         try {
                             if (importData.icityData.diaries?.length > 0) {
-                                await icityDb.diaries.bulkAdd(importData.icityData.diaries);
+                                await icityDb.diaries.bulkPut(importData.icityData.diaries);
                             }
                             if (importData.icityData.annotations?.length > 0) {
-                                await icityDb.annotations.bulkAdd(importData.icityData.annotations);
+                                await icityDb.annotations.bulkPut(importData.icityData.annotations);
                             }
                         } catch(e) { console.warn('[Import] 导入iCity数据失败:', e); }
                     }
@@ -1874,7 +1991,7 @@ async function saveFinanceData(key, value) {
                     if (importData.installedAppsData) {
                         try {
                             if (importData.installedAppsData.apps?.length > 0) {
-                                await installedAppsDb.apps.bulkAdd(importData.installedAppsData.apps);
+                                await installedAppsDb.apps.bulkPut(importData.installedAppsData.apps);
                             }
                         } catch(e) { console.warn('[Import] 导入Apps数据失败:', e); }
                     }
@@ -1883,19 +2000,19 @@ async function saveFinanceData(key, value) {
                     if (importData.wyyMusicData) {
                         try {
                             if (importData.wyyMusicData.userSettings?.length > 0) {
-                                await wyyDb.userSettings.bulkAdd(importData.wyyMusicData.userSettings);
+                                await wyyDb.userSettings.bulkPut(importData.wyyMusicData.userSettings);
                             }
                             if (importData.wyyMusicData.playlistCards?.length > 0) {
-                                await wyyDb.playlistCards.bulkAdd(importData.wyyMusicData.playlistCards);
+                                await wyyDb.playlistCards.bulkPut(importData.wyyMusicData.playlistCards);
                             }
                             if (importData.wyyMusicData.songs?.length > 0) {
-                                await wyyDb.songs.bulkAdd(importData.wyyMusicData.songs);
+                                await wyyDb.songs.bulkPut(importData.wyyMusicData.songs);
                             }
                             if (importData.wyyMusicData.lyrics?.length > 0) {
-                                await wyyDb.lyrics.bulkAdd(importData.wyyMusicData.lyrics);
+                                await wyyDb.lyrics.bulkPut(importData.wyyMusicData.lyrics);
                             }
                             if (importData.wyyMusicData.playlists?.length > 0 && wyyDb.playlists) {
-                                await wyyDb.playlists.bulkAdd(importData.wyyMusicData.playlists);
+                                await wyyDb.playlists.bulkPut(importData.wyyMusicData.playlists);
                             }
                         } catch(e) { console.warn('[Import] 导入音乐数据失败:', e); }
                     }
@@ -1947,7 +2064,7 @@ async function saveFinanceData(key, value) {
         
         // 清空所有数据
         async function clearAllDataConfirm() {
-            const confirm1 = confirm('⚠️ 警告：此操作将删除所有数据！\n\n包括：\n- 所有角色和聊天记录\n- 所有世界书\n- 所有表情包\n- 所有朋友圈\n- 所有群聊\n- 电话和短信记录\n- 日记数据\n- 音乐数据\n- 已安装应用\n- 联机账号信息\n- API设置\n- 所有本地设置\n\n此操作不可恢复，确定要继续吗？');
+            const confirm1 = confirm('⚠️ 警告：此操作将删除所有数据！\n\n包括：\n- 所有角色和聊天记录\n- 所有世界书\n- 所有表情包\n- 所有朋友圈\n- 所有群聊\n- 电话和短信记录\n- 亲密关系数据\n- 离线聊天记录\n- 财务数据\n- 日记数据\n- 音乐数据\n- 已安装应用\n- 联机账号信息\n- API设置\n- 所有本地设置\n\n此操作不可恢复，确定要继续吗？');
             if (!confirm1) return;
             
             const confirm2 = prompt('请输入"确认删除"以继续：');
@@ -1971,6 +2088,10 @@ async function saveFinanceData(key, value) {
                 if (db.avatar_library) await db.avatar_library.clear();
                 if (db.avatar_categories) await db.avatar_categories.clear();
                 if (db.chat_themes) await db.chat_themes.clear();
+                if (db.intimate_relations) await db.intimate_relations.clear();
+                if (db.intimate_requests) await db.intimate_requests.clear();
+                if (db.offline_chats) await db.offline_chats.clear();
+                if (db.finance_data) await db.finance_data.clear();
                 
                 // 清空子数据库
                 try { await icityDb.diaries.clear(); await icityDb.annotations.clear(); } catch(e) { console.warn('[Clear] 清空iCity失败:', e); }
@@ -2570,7 +2691,7 @@ async function saveFinanceData(key, value) {
         }
         function backHomePage() {
             document.getElementById('custom-main-page').style.display = 'none';
-            document.getElementById('home-page').style.display = 'block';
+            document.getElementById('home-page').style.display = 'flex';
         }
 
         // ===== 桌面多页滑动（触摸滑动 + transform） =====
@@ -3811,7 +3932,10 @@ ${commenterInfos}
                     }
                 }
 
-                await safeCharacterPut(freshChar);
+                // 🛡️ 使用 update() 只更新朋友圈数据，防止覆盖设置
+                await safeDexieUpdate(db.characters, roleCharId, {
+                    [`fp_moments_by_user.${accountId}`]: momentsList
+                }, `朋友圈互动[${freshChar.name}]`);
                 renderFpMomentsList();
                 console.log(`[FP朋友圈NPC] ✅ 批量生成完成: ${likers.length}人点赞, ${aiComments.length}条评论`);
 
@@ -4447,7 +4571,22 @@ ${existingChatsContext.join('\n\n')}
                     console.log('[自主活动] 朋友圈追加:', parsedData.moments.length, '条');
                 }
                 
-                await safeCharacterPut(freshChar);
+                // 🛡️ 使用 update() 只更新聊天记录和朋友圈，防止覆盖设置
+                const actUpdatePayload = {};
+                // 写入各NPC聊天记录
+                for (const npc of npcContacts) {
+                    const fpNpcKey = 'fp_npc_' + npc.id;
+                    if (freshChar.chat_history_by_user[fpNpcKey]) {
+                        actUpdatePayload[`chat_history_by_user.${fpNpcKey}`] = freshChar.chat_history_by_user[fpNpcKey];
+                    }
+                }
+                // 写入朋友圈
+                if (freshChar.fp_moments_by_user && freshChar.fp_moments_by_user[accountId]) {
+                    actUpdatePayload[`fp_moments_by_user.${accountId}`] = freshChar.fp_moments_by_user[accountId];
+                }
+                if (Object.keys(actUpdatePayload).length > 0) {
+                    await safeDexieUpdate(db.characters, charId, actUpdatePayload, `自主活动数据[${freshChar.name}]`);
+                }
                 console.log('[自主活动] ✅ 数据生成完成，新增聊天消息:', totalNewMsgs);
                 
             } catch (e) {
@@ -10615,8 +10754,8 @@ ${(() => {
                 const oldPassword = freshChar.identity.password || '';
                 freshChar.identity.password = newPassword;
                 
-                // 保存到数据库
-                await safeCharacterPut(freshChar);
+                // 🛡️ 使用 update() 只更新密码字段，防止覆盖设置
+                await safeDexieUpdate(db.characters, freshChar.id, { 'identity.password': newPassword }, `修改密码[${freshChar.name}]`);
                 console.log('[acceptMessageReply] ✅ 已修改密码，新密码:', newPassword);
                 
                 // 清除已验证状态，强制下次登录需要重新输入密码
@@ -10717,30 +10856,40 @@ ${(() => {
                 const freshCharForFp = await db.characters.get(targetChar.id);
                 if (freshCharForFp) {
                     let markedCount = 0;
+                    const fpNotifyPayload = {};
                     if (freshCharForFp.chat_history_by_user) {
                         for (const key of Object.keys(freshCharForFp.chat_history_by_user)) {
                             if (!key.startsWith('fp_npc_')) continue;
                             const npcHistory = freshCharForFp.chat_history_by_user[key] || [];
+                            let changed = false;
                             for (const m of npcHistory) {
                                 if ((m.fpSent || (!m.fpSent && m.role === 'user')) && !m.fpNotified) {
                                     m.fpNotified = true;
                                     markedCount++;
+                                    changed = true;
                                 }
                             }
+                            if (changed) fpNotifyPayload[`chat_history_by_user.${key}`] = npcHistory;
                         }
                     }
                     if (freshCharForFp.fp_moments_by_user) {
                         for (const mKey of Object.keys(freshCharForFp.fp_moments_by_user)) {
                             const momentsList = freshCharForFp.fp_moments_by_user[mKey] || [];
+                            let changed = false;
                             for (const m of momentsList) {
                                 if (m.fpSent && !m.fpNotified) {
                                     m.fpNotified = true;
                                     markedCount++;
+                                    changed = true;
                                 }
                             }
+                            if (changed) fpNotifyPayload[`fp_moments_by_user.${mKey}`] = momentsList;
                         }
                     }
-                    await safeCharacterPut(freshCharForFp);
+                    // 🛡️ 使用 update() 只更新标记字段，防止覆盖设置
+                    if (Object.keys(fpNotifyPayload).length > 0) {
+                        await safeDexieUpdate(db.characters, targetChar.id, fpNotifyPayload, `查手机活动标记[${freshCharForFp.name}]`);
+                    }
                     console.log('[acceptMessageReply] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
                 }
                 
@@ -12531,14 +12680,24 @@ ${loreContext}
 
         // 设置角色的好友状态（按账号隔离）
         async function setFriendStatus(char, accountId, status) {
+            // 🛡️ 使用 update() 只更新好友状态字段，防止覆盖设置等其他数据
+            const updatePayload = {};
             if (!accountId) {
                 // 兼容旧代码：如果没有账号ID，使用旧结构
                 char.wechat_status = status;
+                updatePayload.wechat_status = status;
             } else {
                 if (!char.wechat_status_by_user) char.wechat_status_by_user = {};
                 char.wechat_status_by_user[accountId] = status;
+                updatePayload.wechat_status_by_user = { ...char.wechat_status_by_user };
             }
-            await safeCharacterPut(char);
+            try {
+                await db.characters.update(char.id, updatePayload);
+            } catch (err) {
+                console.error('[setFriendStatus] ❌ 好友状态保存失败:', err);
+                // 回退到 put() 确保数据不丢
+                await safeCharacterPut(char, `好友状态[${char.name || char.id}]`);
+            }
         }
 
         // 获取角色的聊天记录（按账号隔离）
@@ -12572,45 +12731,66 @@ ${loreContext}
             // 🛡️ 先标记为脏数据，即使后续写入失败，定时器也能兜底保存
             markChatDirty(char.id, char, accountId, history);
             
-            // 🔧 读取最新的角色数据，只更新聊天记录相关字段，保留其他字段的最新状态
-            let freshChar;
-            try {
-                freshChar = await db.characters.get(char.id);
-            } catch (dbReadErr) {
-                console.error('[setChatHistory] ❌ 数据库读取失败:', dbReadErr);
-                // 读取失败时不丢弃数据，脏数据标记已打上，定时器会兜底
-                return;
-            }
-            
-            if (!freshChar) {
-                console.warn('[setChatHistory] ⚠️ 角色不存在，跳过保存:', char.id);
-                return;
-            }
-            
-            // ✅ 如果有新消息（非空历史），自动清除聊天列表隐藏标记（在最新数据上操作）
-            if (history && history.length > 0 && freshChar.chat_hidden_by_user && accountId && freshChar.chat_hidden_by_user[accountId]) {
-                freshChar.chat_hidden_by_user[accountId] = false;
-            }
+            // 🛡️ 使用 update() 只更新聊天记录字段，防止覆盖其他设置（如聊天详细里的所有设置）
+            const updatePayload = {};
             
             if (!accountId) {
                 // 兼容旧代码：如果没有账号ID，使用旧结构
-                freshChar.chat_history = history;
+                updatePayload.chat_history = history;
                 char.chat_history = history; // 同步更新调用方的引用
             } else {
-                if (!freshChar.chat_history_by_user) freshChar.chat_history_by_user = {};
-                freshChar.chat_history_by_user[accountId] = history;
+                // 🔧 需要读取最新的 chat_history_by_user 并合并，因为 update() 是字段级替换
+                let freshChatHistoryByUser;
+                try {
+                    const freshChar = await db.characters.get(char.id);
+                    if (!freshChar) {
+                        console.warn('[setChatHistory] ⚠️ 角色不存在，跳过保存:', char.id);
+                        return;
+                    }
+                    freshChatHistoryByUser = freshChar.chat_history_by_user || {};
+                } catch (dbReadErr) {
+                    console.error('[setChatHistory] ❌ 数据库读取失败:', dbReadErr);
+                    // 读取失败时不丢弃数据，脏数据标记已打上，定时器会兜底
+                    return;
+                }
+                
+                freshChatHistoryByUser[accountId] = history;
+                updatePayload.chat_history_by_user = freshChatHistoryByUser;
+                
                 // 同步更新调用方的引用
                 if (!char.chat_history_by_user) char.chat_history_by_user = {};
                 char.chat_history_by_user[accountId] = history;
             }
             
-            // 🛡️ 使用安全写入（带重试 + 配额检测 + 用户提醒）
-            const writeSuccess = await safeCharacterPut(freshChar, `聊天记录[${freshChar.name || char.id}]`);
-            if (writeSuccess) {
-                // 写入成功，清除脏标记
-                _pendingDirtySaves.delete(char.id);
+            // ✅ 如果有新消息（非空历史），自动清除聊天列表隐藏标记
+            if (history && history.length > 0 && accountId) {
+                try {
+                    const freshChar = await db.characters.get(char.id);
+                    if (freshChar && freshChar.chat_hidden_by_user && freshChar.chat_hidden_by_user[accountId]) {
+                        const hiddenByUser = { ...freshChar.chat_hidden_by_user };
+                        hiddenByUser[accountId] = false;
+                        updatePayload.chat_hidden_by_user = hiddenByUser;
+                    }
+                } catch (_) {}
             }
-            // 如果写入失败，脏标记保留，定时器会继续尝试保存
+            
+            // 🛡️ 使用 update() 只更新指定字段，不会覆盖设置/好友状态等其他数据
+            try {
+                const updated = await db.characters.update(char.id, updatePayload);
+                if (updated) {
+                    // 写入成功，清除脏标记
+                    _pendingDirtySaves.delete(char.id);
+                } else {
+                    console.warn('[setChatHistory] ⚠️ update返回0，角色可能不存在:', char.id);
+                }
+            } catch (err) {
+                console.error(`[setChatHistory] ❌ 聊天记录写入失败:`, err.message);
+                // 检查是否是配额不足
+                if (err.name === 'QuotaExceededError' || (err.inner && err.inner.name === 'QuotaExceededError')) {
+                    try { showToast('⚠️ 存储空间不足，聊天记录可能无法保存！请导出备份。'); } catch(_) {}
+                }
+                // 写入失败，脏标记保留，定时器会继续尝试保存
+            }
         }
 
         // 数据迁移：将旧结构迁移到新结构（不影响现有数据）
@@ -13132,8 +13312,19 @@ ${loreContext}
             const char = await db.characters.get(id);
             if (char) {
                 const _pinAid = getCurrentAccountId();
-                setCharPinned(char, _pinAid, !getCharPinned(char, _pinAid));
-                await safeCharacterPut(char);
+                const newPinValue = !getCharPinned(char, _pinAid);
+                setCharPinned(char, _pinAid, newPinValue);
+                // 🛡️ 使用 update() 只更新置顶字段，防止覆盖设置
+                const pinUpdate = {};
+                if (!_pinAid) {
+                    pinUpdate.is_pinned = newPinValue;
+                } else {
+                    pinUpdate.is_pinned_by_user = { ...(char.is_pinned_by_user || {}) };
+                }
+                await db.characters.update(id, pinUpdate).catch(err => {
+                    console.error('[togglePin] update失败，回退put:', err);
+                    return safeCharacterPut(char, '置顶');
+                });
                 renderWechatList(document.getElementById('wechat-content'));
             }
         }
@@ -14619,7 +14810,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         async function clearGroupChatHistory() {
             if (!window.currentGroupChatId) return;
             
-            if (!confirm('确定要清空该群聊的所有聊天记录吗？')) return;
+            if (!confirm('确定要清空该群聊的所有聊天记录吗？（同时清除总结）')) return;
             
             const group = await db.group_chats.get(window.currentGroupChatId);
             if (!group) return;
@@ -14632,6 +14823,20 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             group.updated_at = Date.now();
             
             await safeGroupChatPut(group);
+            
+            // ✅ 同时清除群聊总结
+            try {
+                const accountId = getCurrentAccountId();
+                const summaries = await db.chat_summaries.where('accountId').equals(accountId).toArray();
+                const toDelete = summaries.filter(s => s.chatType === 'group' && String(s.chatId) === String(window.currentGroupChatId));
+                for (const s of toDelete) {
+                    await db.chat_summaries.delete(s.id);
+                }
+                if (toDelete.length > 0) console.log(`[clearGroupChatHistory] ✅ 已清除 ${toDelete.length} 条群聊总结`);
+            } catch (e) {
+                console.warn('[clearGroupChatHistory] 清除总结失败:', e);
+            }
+            
             await renderGroupChatBody(group);
             
             alert('聊天记录已清空');
@@ -15068,17 +15273,18 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     msgIndex++;
                 } else {
                     // 群成员发的消息
-                    const senderChar = msg.senderId ? memberMap[msg.senderId] : null;
+                    let senderChar = msg.senderId ? memberMap[msg.senderId] : null;
                     
-                    // 🔧 修复：跳过senderId为空或找不到对应成员的消息，避免显示"未知成员"
-                    if (!senderChar && msg.role === 'char') {
-                        msgIndex++;
-                        continue;
+                    // 🔧 如果memberMap中找不到（可能已被踢出群），尝试从数据库获取
+                    if (!senderChar && msg.senderId) {
+                        try {
+                            senderChar = await db.characters.get(msg.senderId);
+                        } catch(e) {}
                     }
                     
-                    // 优先使用群昵称，其次用备注名，最后用原名
+                    // 优先使用群昵称，其次用备注名，最后用消息中冗余存储的名字
                     const memberNicknames = group.memberNicknames || {};
-                    const senderName = memberNicknames[msg.senderId] || (senderChar ? (senderChar.remark || senderChar.wx_nickname || senderChar.name) : '未知成员');
+                    const senderName = memberNicknames[msg.senderId] || (senderChar ? (senderChar.remark || senderChar.wx_nickname || senderChar.name) : (msg.senderName || '群成员'));
                     const senderAvatar = senderChar?.avatar || '';
                     const avatarStyle = senderAvatar ? `background-image:url(${senderAvatar})` : 'background:#ccc';
                     
@@ -17238,7 +17444,7 @@ ${chatContext || '（没有聊天记录）'}
                     // 角色决定不发送
                     alert(`${char.name} 决定暂时不发送好友申请`);
                     
-                    // 重新获取角色数据（避免使用过期数据）
+                    // 🛡️ 使用 update() 只更新 wait_friend_settings 字段
                     const freshChar = await db.characters.get(charId);
                     if (freshChar) {
                         if (!freshChar.wait_friend_settings) freshChar.wait_friend_settings = {};
@@ -17255,7 +17461,9 @@ ${chatContext || '（没有聊天记录）'}
                             freshChar.wait_friend_settings[accountId].nextCheckTime = 
                                 Date.now() + freshChar.wait_friend_settings[accountId].interval * 60 * 1000;
                         }
-                        await safeCharacterPut(freshChar);
+                        await safeDexieUpdate(db.characters, charId, {
+                            [`wait_friend_settings.${accountId}`]: freshChar.wait_friend_settings[accountId]
+                        }, `好友申请设置[${freshChar.name}]`);
                     }
                 } else {
                     // 角色决定发送好友申请，将多条消息拆分
@@ -17311,7 +17519,7 @@ ${chatContext || '（没有聊天记录）'}
                     
                     alert(`${char.name} 发送了好友申请！\n\n${preview}\n\n请前往"新的好友"页面查看。`);
                     
-                    // 重新获取角色数据
+                    // 🛡️ 使用 update() 只更新 wait_friend_settings 字段
                     const freshChar = await db.characters.get(charId);
                     if (freshChar) {
                         if (!freshChar.wait_friend_settings) freshChar.wait_friend_settings = {};
@@ -17328,7 +17536,9 @@ ${chatContext || '（没有聊天记录）'}
                             freshChar.wait_friend_settings[accountId].nextCheckTime = 
                                 Date.now() + freshChar.wait_friend_settings[accountId].interval * 60 * 1000;
                         }
-                        await safeCharacterPut(freshChar);
+                        await safeDexieUpdate(db.characters, charId, {
+                            [`wait_friend_settings.${accountId}`]: freshChar.wait_friend_settings[accountId]
+                        }, `好友申请设置[${freshChar.name}]`);
                     }
                     
                     // 刷新通讯录红点
@@ -17529,7 +17739,9 @@ ${chatContext || '（没有聊天记录）'}
             const accountId = getCurrentAccountId();
             if (char.chat_hidden_by_user && char.chat_hidden_by_user[accountId]) {
                 char.chat_hidden_by_user[accountId] = false;
-                safeCharacterPut(char, '清除隐藏标记').catch(e => console.error('清除隐藏标记失败:', e));
+                // 🛡️ 使用 update() 只更新隐藏标记，防止覆盖设置
+                const hiddenUpdate = { ...(char.chat_hidden_by_user) };
+                db.characters.update(charId, { chat_hidden_by_user: hiddenUpdate }).catch(e => console.error('清除隐藏标记失败:', e));
             }
             
             // 根据好友状态显示或隐藏输入框
@@ -17975,7 +18187,9 @@ ${chatContext || '（没有聊天记录）'}
 
 async function saveChatDetail() {
     if (!currentChatCharId) return;
-    const char = await db.characters.get(currentChatCharId);
+    const charId = currentChatCharId;
+    const char = await db.characters.get(charId);
+    if (!char) return;
     
     const remark = document.getElementById('detail-char-remark').value.trim();
     
@@ -18023,40 +18237,57 @@ async function saveChatDetail() {
     const summaryInterval = parseInt(document.getElementById('detail-summary-interval').value);
 
     const accountId = getCurrentAccountId();
-    setCharRemark(char, accountId, remark);
-    char.lorebookIds = lorebookIds.length > 0 ? lorebookIds : null;
-    // 保留旧字段以兼容，但优先使用lorebookIds
-    if (lorebookIds.length > 0) {
-        char.lorebookId = lorebookIds[0]; // 保留第一个作为兼容
-    } else {
-        char.lorebookId = null;
-    }
-    char.auto_reply_enabled = autoEnabled;
-    char.auto_reply_interval = autoInterval > 0 ? autoInterval : null;
-    char.context_message_count = contextCount > 0 ? contextCount : 20; // 默认20条
-    char.reply_min_count = (replyMinCount > 0 && replyMinCount <= 50) ? replyMinCount : 1; // 默认1条
-    char.reply_max_count = (replyMaxCount > 0 && replyMaxCount <= 50) ? replyMaxCount : 3; // 默认3条
-    char.input_placeholder = inputPlaceholder || ''; // 保存自定义输入框文案
-    char.foreign_lang_mode = foreignLangMode; // 保存外语翻译模式开关
-    char.allow_ai_check_account = allowCheckEnabled; // 保存查岗开关状态
-    char.allow_shura_mode = allowShuraEnabled; // 保存修罗场模式开关状态
-    char.allow_auto_avatar = allowAutoAvatar; // 保存自主换头像开关状态
-    char.allow_autonomous_activity = allowAutonomousActivity; // 保存角色自主活动开关状态
-    char.scheduled_activity_enabled = scheduledActivityEnabled; // 保存定时自主活动开关状态
-    char.scheduled_activity_interval = scheduledActivityInterval > 0 ? scheduledActivityInterval : null; // 保存定时自主活动间隔（分钟）
-    char.moments_frequency = momentsFrequency; // 保存朋友圈频率 (off/low/medium/high)
-    char.auto_summary_enabled = autoSummaryEnabled; // 自动总结开关
-    char.summary_interval = summaryInterval > 0 ? summaryInterval : 50; // 总结间隔，默认50条
     
     // 保存自定义气泡CSS（严格过滤JS）
     const bubbleCSS = document.getElementById('detail-bubble-css').value;
-    char.custom_bubble_css = sanitizeCSS(bubbleCSS);
     
     // 保存气泡样式选择
     const selectedBubbleOption = document.querySelector('.bubble-style-option.selected');
-    char.bubble_style = selectedBubbleOption ? selectedBubbleOption.dataset.style : 'default';
-    
-    await safeCharacterPut(char);
+
+    // 🛡️ 使用 update() 只更新设置字段，防止并发写入覆盖聊天记录等其他数据
+    // 构建备注字段（按账号隔离）
+    const remarkUpdate = {};
+    if (!accountId) {
+        remarkUpdate.remark = remark;
+    } else {
+        // 需要读取现有的 remark_by_user 并合并
+        const existingRemarkByUser = char.remark_by_user || {};
+        existingRemarkByUser[accountId] = remark;
+        remarkUpdate.remark_by_user = existingRemarkByUser;
+    }
+
+    const updatePayload = {
+        ...remarkUpdate,
+        lorebookIds: lorebookIds.length > 0 ? lorebookIds : null,
+        lorebookId: lorebookIds.length > 0 ? lorebookIds[0] : null,
+        auto_reply_enabled: autoEnabled,
+        auto_reply_interval: autoInterval > 0 ? autoInterval : null,
+        context_message_count: contextCount > 0 ? contextCount : 20,
+        reply_min_count: (replyMinCount > 0 && replyMinCount <= 50) ? replyMinCount : 1,
+        reply_max_count: (replyMaxCount > 0 && replyMaxCount <= 50) ? replyMaxCount : 3,
+        input_placeholder: inputPlaceholder || '',
+        foreign_lang_mode: foreignLangMode,
+        allow_ai_check_account: allowCheckEnabled,
+        allow_shura_mode: allowShuraEnabled,
+        allow_auto_avatar: allowAutoAvatar,
+        allow_autonomous_activity: allowAutonomousActivity,
+        scheduled_activity_enabled: scheduledActivityEnabled,
+        scheduled_activity_interval: scheduledActivityInterval > 0 ? scheduledActivityInterval : null,
+        moments_frequency: momentsFrequency,
+        auto_summary_enabled: autoSummaryEnabled,
+        summary_interval: summaryInterval > 0 ? summaryInterval : 50,
+        custom_bubble_css: sanitizeCSS(bubbleCSS),
+        bubble_style: selectedBubbleOption ? selectedBubbleOption.dataset.style : 'default'
+    };
+
+    try {
+        await db.characters.update(charId, updatePayload);
+        console.log('[saveChatDetail] ✅ 设置已保存（仅更新设置字段）');
+    } catch (err) {
+        console.error('[saveChatDetail] ❌ 设置保存失败:', err);
+        try { showToast('⚠️ 设置保存失败，请重试'); } catch(_) {}
+        return;
+    }
     
     // 实时更新聊天标题（按账号隔离）
     document.getElementById('chat-title').innerText = getCharDisplayName(char, getCurrentAccountId());
@@ -18064,11 +18295,13 @@ async function saveChatDetail() {
     // 实时更新输入框文案
     const chatInputBox = document.getElementById('chat-input-box');
     if (chatInputBox) {
-        chatInputBox.placeholder = char.input_placeholder || '发送消息...';
+        chatInputBox.placeholder = inputPlaceholder || '发送消息...';
     }
     
     // 如果当前正在查看这个聊天，立即应用样式
-    if (currentChatCharId === char.id) {
+    if (currentChatCharId === charId) {
+        // 合并更新后的字段到char对象以便applyCustomStyles使用
+        Object.assign(char, updatePayload);
         applyCustomStyles(char);
     }
     // 刷新列表（如果此时微信列表可见）
@@ -18134,9 +18367,12 @@ async function saveMountedStickers() {
     const checkboxes = document.querySelectorAll('#mount-sticker-list input[type="checkbox"]:checked');
     const mountedIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
     
-    const char = await db.characters.get(currentChatCharId);
-    char.mounted_sticker_categories = mountedIds.length > 0 ? mountedIds : null;
-    await safeCharacterPut(char);
+    // 🛡️ 使用 update() 只更新挂载表情包字段，防止覆盖设置
+    await db.characters.update(currentChatCharId, {
+        mounted_sticker_categories: mountedIds.length > 0 ? mountedIds : null
+    }).catch(err => {
+        console.error('[saveMountedStickers] update失败:', err);
+    });
     
     updateMountedStickerCount();
     hideMountStickerModal();
@@ -18232,9 +18468,10 @@ function hideMountUserModal() {
 async function selectMountUser(userId) {
     if (!currentChatCharId) return;
     
-    const char = await db.characters.get(currentChatCharId);
-    char.linked_user_id = userId;
-    await safeCharacterPut(char);
+    // 🛡️ 使用 update() 只更新关联用户字段，防止覆盖设置
+    await db.characters.update(currentChatCharId, { linked_user_id: userId }).catch(err => {
+        console.error('[selectMountUser] update失败:', err);
+    });
     
     // 更新显示
     updateMountedUserDisplay();
@@ -18246,9 +18483,10 @@ async function selectMountUser(userId) {
 async function unmountUser() {
     if (!currentChatCharId) return;
     
-    const char = await db.characters.get(currentChatCharId);
-    char.linked_user_id = null;
-    await safeCharacterPut(char);
+    // 🛡️ 使用 update() 只更新关联用户字段，防止覆盖设置
+    await db.characters.update(currentChatCharId, { linked_user_id: null }).catch(err => {
+        console.error('[unmountUser] update失败:', err);
+    });
     
     // 更新显示
     updateMountedUserDisplay();
@@ -18323,12 +18561,14 @@ window.unmountUser = unmountUser;
                     bgPreview.style.backgroundImage = `url(${base64})`;
                     bgPreview.textContent = '';
                     
-                    const char = await db.characters.get(currentChatCharId);
-                    char.chat_background = base64;
-                    await safeCharacterPut(char);
+                    // 🛡️ 使用 update() 只更新背景图字段，防止覆盖设置
+                    await db.characters.update(currentChatCharId, { chat_background: base64 }).catch(err => {
+                        console.error('[setChatBackground] update失败:', err);
+                    });
                     
                     // 立即应用背景图到聊天界面
-                    applyChatBackground(char);
+                    const char = await db.characters.get(currentChatCharId);
+                    if (char) applyChatBackground(char);
                 };
                 reader.readAsDataURL(file);
             }
@@ -18339,9 +18579,10 @@ window.unmountUser = unmountUser;
             if (!currentChatCharId) return;
             if (!confirm('确定要清除聊天背景图吗？')) return;
             
-            const char = await db.characters.get(currentChatCharId);
-            char.chat_background = null;
-            await safeCharacterPut(char);
+            // 🛡️ 使用 update() 只更新背景图字段，防止覆盖设置
+            await db.characters.update(currentChatCharId, { chat_background: null }).catch(err => {
+                console.error('[clearChatBackground] update失败:', err);
+            });
             
             const bgPreview = document.getElementById('detail-chat-bg-preview');
             bgPreview.style.backgroundImage = '';
@@ -18805,10 +19046,32 @@ window.unmountUser = unmountUser;
 
         async function clearChatHistory() {
             if (!currentChatCharId) return;
-            if (confirm("确定要清空与该角色的聊天记录吗？")) {
+            if (confirm("确定要清空与该角色的聊天记录吗？（同时清除总结和通话记录）")) {
                 const char = await db.characters.get(currentChatCharId);
                 const accountId = getCurrentAccountId();
                 await setChatHistory(char, accountId, []);
+                
+                // ✅ 同时清除聊天总结
+                try {
+                    const summaries = await db.chat_summaries.where('accountId').equals(accountId).toArray();
+                    const toDelete = summaries.filter(s => s.chatType === 'private' && String(s.chatId) === String(currentChatCharId));
+                    for (const s of toDelete) {
+                        await db.chat_summaries.delete(s.id);
+                    }
+                    if (toDelete.length > 0) console.log(`[clearChatHistory] ✅ 已清除 ${toDelete.length} 条聊天总结`);
+                } catch (e) {
+                    console.warn('[clearChatHistory] 清除总结失败:', e);
+                }
+                
+                // ✅ 同时清除视频通话记录
+                try {
+                    const videoKey = `video_calls_${accountId}_${currentChatCharId}`;
+                    localStorage.removeItem(videoKey);
+                    console.log('[clearChatHistory] ✅ 已清除视频通话记录');
+                } catch (e) {
+                    console.warn('[clearChatHistory] 清除通话记录失败:', e);
+                }
+                
                 await renderChatBody(char, true); // ✅ forceRender=true 确保完整重新渲染（包括背景图）
                 alert("已清空");
             }
@@ -19267,7 +19530,20 @@ ${existingChatsContext.join('\n\n')}
                     console.log('[ScheduledActivity] 朋友圈追加:', parsedData.moments.length, '条');
                 }
 
-                await safeCharacterPut(freshChar);
+                // 🛡️ 使用 update() 只更新聊天记录和朋友圈，防止覆盖设置
+                const schedUpdatePayload = {};
+                for (const npc of npcContacts) {
+                    const fpNpcKey = 'fp_npc_' + npc.id;
+                    if (freshChar.chat_history_by_user[fpNpcKey]) {
+                        schedUpdatePayload[`chat_history_by_user.${fpNpcKey}`] = freshChar.chat_history_by_user[fpNpcKey];
+                    }
+                }
+                if (freshChar.fp_moments_by_user && freshChar.fp_moments_by_user[accountId]) {
+                    schedUpdatePayload[`fp_moments_by_user.${accountId}`] = freshChar.fp_moments_by_user[accountId];
+                }
+                if (Object.keys(schedUpdatePayload).length > 0) {
+                    await safeDexieUpdate(db.characters, char.id, schedUpdatePayload, `定时活动数据[${freshChar.name}]`);
+                }
                 lastScheduledActivityTime.set(char.id, Date.now());
                 console.log(`[ScheduledActivity] ✅ ${char.name} 数据生成完成，新增聊天消息: ${totalNewMsgs}`);
 
@@ -20104,7 +20380,10 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                                 records: [],
                                 createdAt: Date.now()
                             });
-                            await safeCharacterPut(freshChar);
+                            // 🛡️ 使用 update() 只更新亲属卡字段
+                            await safeDexieUpdate(db.characters, freshChar.id, {
+                                'identity.familyCardsGiven': freshChar.identity.familyCardsGiven
+                            }, `亲属卡赠送[${freshChar.name}]`);
                             
                             // 在用户数据中添加"我收到的"
                             if (user) {
@@ -20625,8 +20904,12 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                             const newNickname = nicknameMatchAuto[1].trim();
                             const freshChar = await db.characters.get(char.id);
                             const oldNickname = getCharWxNickname(freshChar, accountId) || freshChar.name;
+                            // 🛡️ 使用 update() 只更新网名字段，防止覆盖设置
+                            const nnUpdatePayload = accountId
+                                ? { [`wx_nickname_by_user.${accountId}`]: newNickname }
+                                : { wx_nickname: newNickname };
+                            await safeDexieUpdate(db.characters, char.id, nnUpdatePayload, `改网名[${char.name}]`);
                             setCharWxNickname(freshChar, accountId, newNickname);
-                            await safeCharacterPut(freshChar);
                             
                             const nicknameText = `${oldNickname} 将网名改为 "${newNickname}"`;
                             let history = getChatHistory(freshChar, accountId);
@@ -20658,8 +20941,9 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                         try {
                             const newSignature = signatureMatchAuto[1].trim();
                             const freshChar = await db.characters.get(char.id);
+                            // 🛡️ 使用 update() 只更新签名字段，防止覆盖设置
+                            await safeDexieUpdate(db.characters, char.id, { wx_signature: newSignature }, `改签名[${char.name}]`);
                             freshChar.wx_signature = newSignature;
-                            await safeCharacterPut(freshChar);
                             
                             const sigText = `${freshChar.wx_nickname || freshChar.name} 更新了个性签名: "${newSignature}"`;
                             let history = getChatHistory(freshChar, accountId);
@@ -20911,30 +21195,40 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                         const freshCharForFp = await db.characters.get(char.id);
                         if (freshCharForFp) {
                             let markedCount = 0;
+                            const fpNotifyPayload2 = {};
                             if (freshCharForFp.chat_history_by_user) {
                                 for (const key of Object.keys(freshCharForFp.chat_history_by_user)) {
                                     if (!key.startsWith('fp_npc_')) continue;
                                     const npcHistory = freshCharForFp.chat_history_by_user[key] || [];
+                                    let changed = false;
                                     for (const m of npcHistory) {
                                         if ((m.fpSent || (!m.fpSent && m.role === 'user')) && !m.fpNotified) {
                                             m.fpNotified = true;
                                             markedCount++;
+                                            changed = true;
                                         }
                                     }
+                                    if (changed) fpNotifyPayload2[`chat_history_by_user.${key}`] = npcHistory;
                                 }
                             }
                             if (freshCharForFp.fp_moments_by_user) {
                                 for (const mKey of Object.keys(freshCharForFp.fp_moments_by_user)) {
                                     const momentsList = freshCharForFp.fp_moments_by_user[mKey] || [];
+                                    let changed = false;
                                     for (const m of momentsList) {
                                         if (m.fpSent && !m.fpNotified) {
                                             m.fpNotified = true;
                                             markedCount++;
+                                            changed = true;
                                         }
                                     }
+                                    if (changed) fpNotifyPayload2[`fp_moments_by_user.${mKey}`] = momentsList;
                                 }
                             }
-                            await safeCharacterPut(freshCharForFp);
+                            // 🛡️ 使用 update() 只更新标记字段，防止覆盖设置
+                            if (Object.keys(fpNotifyPayload2).length > 0) {
+                                await safeDexieUpdate(db.characters, char.id, fpNotifyPayload2, `查手机活动标记[${freshCharForFp.name}]`);
+                            }
                             console.log('[triggerAutoChat] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
                         }
                         
@@ -21688,8 +21982,8 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
                     
                     if (m.role === 'user') return `${myNickname}: ${content}`;
                     const sender = m.senderId ? memberMap[m.senderId] : null;
-                    if (!sender && m.role === 'char') return null; // 🔧 过滤掉找不到成员的历史消息，避免"未知成员"污染上下文
-                    const senderName = sender ? (sender.remark || sender.wx_nickname || sender.name) : '未知成员';
+                    // 即使memberMap中找不到（如已退群角色），也保留消息上下文，用senderName兜底
+                    const senderName = sender ? getCharDisplayName(sender, accountId) : (m.senderName || '群成员');
                     return `${senderName}: ${content}`;
                 }).filter(Boolean).join('\n');
                 
@@ -21916,16 +22210,55 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     
                     let msgIndex = 0;
                     const memberNicknamesMap = updatedGroup.memberNicknames || {};
+                    const _matchAccountId = getCurrentAccountId();
                     for (const reply of replies) {
-                        // 查找操作者的成员ID（匹配：角色名、备注名、微信昵称、群昵称）
+                        // 查找操作者的成员ID（匹配：角色名、备注名、微信昵称、群昵称、按账号隔离的备注/昵称）
                         let senderId = null;
                         if (reply.name) {
                             const replyName = reply.name.trim();
+                            // 第一轮：精确匹配
                             for (const [memberId, char] of Object.entries(memberMap)) {
                                 const groupNick = memberNicknamesMap[memberId];
-                                if (char.name === replyName || char.remark === replyName || char.nick === replyName || char.wx_nickname === replyName || (groupNick && groupNick === replyName)) {
+                                const perUserRemark = getCharRemark(char, _matchAccountId);
+                                const perUserWxNick = getCharWxNickname(char, _matchAccountId);
+                                if (char.name === replyName || char.remark === replyName || char.nick === replyName || char.wx_nickname === replyName || (perUserRemark && perUserRemark === replyName) || (perUserWxNick && perUserWxNick === replyName) || (groupNick && groupNick === replyName)) {
                                     senderId = parseInt(memberId);
                                     break;
+                                }
+                            }
+                            // 第二轮：模糊匹配（AI可能会返回略有不同的名字，如多空格、加标点等）
+                            if (!senderId) {
+                                const normalizedReplyName = replyName.replace(/[\s\u3000·・.,。，、!！?？~～\-—""''\"\'()（）\[\]【】]/g, '').toLowerCase();
+                                let bestMatch = null;
+                                let bestScore = 0;
+                                for (const [memberId, char] of Object.entries(memberMap)) {
+                                    const groupNick = memberNicknamesMap[memberId];
+                                    const perUserRemark = getCharRemark(char, _matchAccountId);
+                                    const perUserWxNick = getCharWxNickname(char, _matchAccountId);
+                                    const candidates = [char.name, char.remark, char.nick, char.wx_nickname, perUserRemark, perUserWxNick, groupNick].filter(Boolean);
+                                    for (const candidate of candidates) {
+                                        const normalizedCandidate = candidate.replace(/[\s\u3000·・.,。，、!！?？~～\-—""''\"\'()（）\[\]【】]/g, '').toLowerCase();
+                                        // 完全一致（去除标点空格后）
+                                        if (normalizedCandidate === normalizedReplyName) {
+                                            senderId = parseInt(memberId);
+                                            break;
+                                        }
+                                        // 包含匹配：AI名包含角色名 或 角色名包含AI名（取较长匹配）
+                                        if (normalizedCandidate.length >= 2 && normalizedReplyName.length >= 2) {
+                                            if (normalizedReplyName.includes(normalizedCandidate) || normalizedCandidate.includes(normalizedReplyName)) {
+                                                const score = Math.min(normalizedCandidate.length, normalizedReplyName.length) / Math.max(normalizedCandidate.length, normalizedReplyName.length);
+                                                if (score > bestScore && score >= 0.5) {
+                                                    bestScore = score;
+                                                    bestMatch = parseInt(memberId);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (senderId) break;
+                                }
+                                if (!senderId && bestMatch) {
+                                    senderId = bestMatch;
+                                    console.log(`[群聊回复] 模糊匹配: "${replyName}" → memberId=${senderId}`);
                                 }
                             }
                             if (!senderId) {
@@ -21988,27 +22321,29 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                                     msgIndex++;
                                 }
                                 
-                                // 让私聊出现在聊天列表
-                                if (_dmAccId && dmCharRecord.chat_hidden_by_user && dmCharRecord.chat_hidden_by_user[_dmAccId]) {
-                                    dmCharRecord.chat_hidden_by_user[_dmAccId] = false;
+                                // 让私聊出现在聊天列表 + 保存聊天记录
+                                // 🛡️ 使用 update() 只更新聊天记录字段，防止覆盖设置
+                                const _dmUpdatePayload = {};
+                                if (_dmAccId) {
+                                    _dmUpdatePayload.chat_history_by_user = { ...(dmCharRecord.chat_history_by_user || {}) };
+                                    if (dmCharRecord.chat_hidden_by_user && dmCharRecord.chat_hidden_by_user[_dmAccId]) {
+                                        const _dmHidden = { ...dmCharRecord.chat_hidden_by_user };
+                                        _dmHidden[_dmAccId] = false;
+                                        _dmUpdatePayload.chat_hidden_by_user = _dmHidden;
+                                    }
+                                } else {
+                                    _dmUpdatePayload.chat_history = dmCharRecord.chat_history;
                                 }
-                                
-                                await safeCharacterPut(dmCharRecord);
+                                await db.characters.update(dmCharRecord.id, _dmUpdatePayload).catch(err => {
+                                    console.error('[群聊小窗] update失败，回退put:', err);
+                                    return safeCharacterPut(dmCharRecord, '群聊私信');
+                                });
                                 console.log(`[群聊小窗] ${dmCharName} 单独给你发了 ${dmSegments.length} 条消息`);
                                 
-                                // 不在该角色私聊页时弹提示
-                                if (currentChatCharId !== senderId) {
-                                    showToast(`${dmCharName} 单独找你说了些话`);
-                                }
-                                
-                                // 群聊中留一条系统提示
-                                updatedGroup.chat_history.push({
-                                    role: 'system',
-                                    content: `${dmCharName}开了个小窗单独找你`,
-                                    time: Date.now() + msgIndex * 50,
-                                    _isDmNotice: true
-                                });
-                                msgIndex++;
+                                // 弹窗通知（网页内 + 系统通知）
+                                const dmPreview = dmSegments[0].length > 30 ? dmSegments[0].substring(0, 30) + '...' : dmSegments[0];
+                                showToast(`💬 ${dmCharName}: ${dmPreview}`, 4000);
+                                sendSystemNotification(`${dmCharName} 发来私信`, dmPreview);
                             } catch (dmErr) {
                                 console.error('[群聊小窗] 处理失败:', dmErr);
                             }
@@ -22387,12 +22722,14 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                         }
                         
                         // 为每个分句创建一条消息
+                        const _senderDisplayName = memberMap[senderId] ? getCharDisplayName(memberMap[senderId], _matchAccountId) : reply.name;
                         for (const segment of segments) {
                             if (!segment || segment.length === 0) continue;
                             
                             updatedGroup.chat_history.push({
                                 role: 'char',
                                 senderId: senderId,
+                                senderName: _senderDisplayName, // 冗余存储发送者名，防止角色被移除后消息丢失
                                 content: segment,
                                 time: Date.now() + msgIndex * 50 // 稍微错开时间
                             });
@@ -22439,6 +22776,11 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
         }
 
         function hideChatWindow() {
+            // ★ 关闭聊天时，移除自定义气泡CSS和聊天主题样式，防止影响桌面等其他页面
+            removeCustomStyles();
+            const chatThemeStyle = document.getElementById('chat-theme-style');
+            if (chatThemeStyle) chatThemeStyle.remove();
+            
             // ★ fp聊天模式：返回查手机微信页面
             if (window._fpChatMode) {
                 window._fpChatMode = false;
@@ -27681,7 +28023,7 @@ ${hasPassword ? `---
                             content = content.replace(/^\[视频通话\]\s*/i, '');
                             return `${speaker}: ${content}`;
                         });
-                        videoCallContextText = `\n\n【视频通话回顾】\n你们刚刚结束了一次视频通话，以下是通话内容片段（仅用于记忆参考，当前已回到文字聊天）：\n${recentVideo.join('\n')}`;
+                        videoCallContextText = `\n\n【视频通话回顾】\n你们刚刚结束了一次视频通话，以下是通话内容片段（仅用于记忆参考，当前已回到文字聊天）：\n${recentVideo.join('\n')}\n\n⚠️ 视频通话已结束，现在回到微信文字聊天模式。请立即切换回微信聊天风格：简短、口语化，不要在句尾加句号，不要使用视频通话中的长段描写格式。`;
                     }
                 } catch (e) {
                     console.warn('[triggerAiReply] 视频通话回顾构建失败:', e);
@@ -28852,8 +29194,8 @@ ${checkResult.checkResult}
                         const oldPassword = freshChar.identity.password || '';
                         freshChar.identity.password = newPassword;
                         
-                        // 保存到数据库
-                        await safeCharacterPut(freshChar);
+                        // 🛡️ 使用 update() 只更新密码字段，防止覆盖设置
+                        await safeDexieUpdate(db.characters, targetCharId, { 'identity.password': newPassword }, `修改密码[${freshChar.name}]`);
                         console.log('[TriggerAI] ✅ 已修改密码，新密码:', newPassword);
                         
                         // 清除已验证状态，强制下次登录需要重新输入密码
@@ -28999,8 +29341,12 @@ ${checkResult.checkResult}
                             const newNickname = nickMatchPre[1].trim();
                             const freshChar = await db.characters.get(targetCharId);
                             const oldNickname = getCharWxNickname(freshChar, accountId) || freshChar.name;
+                            // 🛡️ 使用 update() 只更新网名字段，防止覆盖设置
+                            const nnPayload = accountId
+                                ? { [`wx_nickname_by_user.${accountId}`]: newNickname }
+                                : { wx_nickname: newNickname };
+                            await safeDexieUpdate(db.characters, targetCharId, nnPayload, `改网名[${freshChar.name}]`);
                             setCharWxNickname(freshChar, accountId, newNickname);
-                            await safeCharacterPut(freshChar);
                             const nicknameText = `${oldNickname} 将网名改为 "${newNickname}"`;
                             console.log(`[TriggerAI] 预处理改网名: ${nicknameText}`);
                             await insertSystemMsg(nicknameText, 'set_nickname');
@@ -29025,8 +29371,9 @@ ${checkResult.checkResult}
                         try {
                             const newSignature = sigMatchPre[1].trim();
                             const freshChar = await db.characters.get(targetCharId);
+                            // 🛡️ 使用 update() 只更新签名字段，防止覆盖设置
+                            await safeDexieUpdate(db.characters, targetCharId, { wx_signature: newSignature }, `改签名[${freshChar.name}]`);
                             freshChar.wx_signature = newSignature;
-                            await safeCharacterPut(freshChar);
                             const sigText = `${freshChar.wx_nickname || freshChar.name} 更新了个性签名: "${newSignature}"`;
                             console.log(`[TriggerAI] 预处理改签名: ${sigText}`);
                             await insertSystemMsg(sigText, 'set_signature');
@@ -29260,7 +29607,10 @@ ${checkResult.checkResult}
                             records: [],
                             createdAt: Date.now()
                         });
-                        await safeCharacterPut(freshChar);
+                        // 🛡️ 使用 update() 只更新亲属卡字段
+                        await safeDexieUpdate(db.characters, freshChar.id, {
+                            'identity.familyCardsGiven': freshChar.identity.familyCardsGiven
+                        }, `亲属卡赠送[${freshChar.name}]`);
                         
                         // 在用户数据中添加"我收到的"
                         if (user) {
@@ -29919,18 +30269,6 @@ ${checkResult.checkResult}
                     segments.push(cleanMessage(cleanText.trim()));
                 }
                 
-                // 🔧 安全保护：如果消息条数远超设定的最大值，合并多余的消息
-                const maxCount = char.reply_max_count || 3;
-                const hardLimit = Math.max(maxCount + 2, 5); // 允许一定弹性，但不能太离谱
-                if (segments.length > hardLimit) {
-                    console.warn(`[TriggerAI] ⚠️ AI输出了${segments.length}条消息，超过上限${hardLimit}，合并多余消息`);
-                    // 保留前 maxCount 条，把剩余的合并到最后一条
-                    const kept = segments.slice(0, maxCount - 1);
-                    const merged = segments.slice(maxCount - 1).join(' ');
-                    kept.push(merged);
-                    segments = kept;
-                    console.log(`[TriggerAI] ✅ 合并后剩余${segments.length}条消息`);
-                }
                 
 
                 for (let i = 0; i < segments.length; i++) {
@@ -30075,8 +30413,12 @@ ${checkResult.checkResult}
                             const newNickname = nicknameMatchReply[1].trim();
                             const freshChar = await db.characters.get(targetCharId);
                             const oldNickname = getCharWxNickname(freshChar, accountId) || freshChar.name;
+                            // 🛡️ 使用 update() 只更新网名字段，防止覆盖设置
+                            const nnPayloadR = accountId
+                                ? { [`wx_nickname_by_user.${accountId}`]: newNickname }
+                                : { wx_nickname: newNickname };
+                            await safeDexieUpdate(db.characters, targetCharId, nnPayloadR, `改网名[${freshChar.name}]`);
                             setCharWxNickname(freshChar, accountId, newNickname);
-                            await safeCharacterPut(freshChar);
                             
                             const nicknameText = `${oldNickname} 将网名改为 "${newNickname}"`;
                             let history = getChatHistory(freshChar, accountId);
@@ -30106,8 +30448,9 @@ ${checkResult.checkResult}
                         try {
                             const newSignature = signatureMatchReply[1].trim();
                             const freshChar = await db.characters.get(targetCharId);
+                            // 🛡️ 使用 update() 只更新签名字段，防止覆盖设置
+                            await safeDexieUpdate(db.characters, targetCharId, { wx_signature: newSignature }, `改签名[${freshChar.name}]`);
                             freshChar.wx_signature = newSignature;
-                            await safeCharacterPut(freshChar);
                             
                             const sigText = `${freshChar.wx_nickname || freshChar.name} 更新了个性签名: "${newSignature}"`;
                             let history = getChatHistory(freshChar, accountId);
@@ -41188,7 +41531,7 @@ function showCabinPage() {
 
 function hideCabinPage() {
     document.getElementById('cabin-page').style.display = 'none';
-    document.getElementById('home-page').style.display = 'block';
+    document.getElementById('home-page').style.display = 'flex';
 }
 
 function updateCabinCoinDisplay() {
@@ -42078,7 +42421,7 @@ async function showCoupleSpacePage() {
 
 function hideCoupleSpacePage() {
     document.getElementById('couple-space-page').style.display = 'none';
-    document.getElementById('home-page').style.display = 'block';
+    document.getElementById('home-page').style.display = 'flex';
     
     // 重置状态
     document.getElementById('couple-select-account').style.display = 'flex';
@@ -44532,11 +44875,23 @@ async function sendVideoMessage() {
     // 清空输入框
     input.value = '';
 
+    // 禁用发送按钮，防止重复发送
+    const sendBtn = input.parentElement.querySelector('button[onclick="sendVideoMessage()"]');
+    if (sendBtn) sendBtn.disabled = true;
+
+    // 显示"正在生成中"提示
+    const loadingDiv = document.createElement('div');
+    loadingDiv.id = 'video-loading-indicator';
+    loadingDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #999999; border-bottom-left-radius: 4px;';
+    loadingDiv.innerHTML = '<span style="display:inline-flex;align-items:center;gap:6px;"><svg width="16" height="16" viewBox="0 0 24 24" style="animation:spin 1s linear infinite;"><circle cx="12" cy="12" r="10" stroke="#999" stroke-width="2" fill="none" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>正在生成中...</span>';
+    messageArea.appendChild(loadingDiv);
+    messageArea.scrollTop = messageArea.scrollHeight;
+
     // 调用AI生成回复
     try {
-        // 收集当前视频通话中的消息历史
+        // 收集当前视频通话中的消息历史（排除loading提示）
         const videoMessages = [];
-        const msgDivs = messageArea.querySelectorAll('div');
+        const msgDivs = messageArea.querySelectorAll('div:not(#video-loading-indicator)');
         msgDivs.forEach(div => {
             const isUser = div.style.alignSelf === 'flex-end';
             videoMessages.push({
@@ -44613,6 +44968,10 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 
         const reply = await callAI(messages);
 
+        // 移除"正在生成中"提示
+        const loading = document.getElementById('video-loading-indicator');
+        if (loading) loading.remove();
+
         // 添加AI消息到界面
         const aiMsgDiv = document.createElement('div');
         aiMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #333333; border-bottom-left-radius: 4px;';
@@ -44628,7 +44987,163 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
         });
     } catch (error) {
         console.error('AI回复失败:', error);
+        // 移除"正在生成中"提示
+        const loading = document.getElementById('video-loading-indicator');
+        if (loading) loading.remove();
         alert('消息发送失败: ' + error.message);
+    } finally {
+        // 恢复发送按钮
+        if (sendBtn) sendBtn.disabled = false;
+    }
+}
+
+// 重新生成视频通话中最后一条AI回复
+async function regenerateVideoMessage() {
+    if (!videoCallCharId) return;
+
+    const messageArea = document.getElementById('video-message-area');
+    if (!messageArea) return;
+
+    // 检查最后一条消息是否是AI回复
+    if (currentVideoCallMessages.length === 0) {
+        alert('还没有消息可以重新生成');
+        return;
+    }
+
+    const lastMsg = currentVideoCallMessages[currentVideoCallMessages.length - 1];
+    if (lastMsg.role !== 'assistant') {
+        alert('最后一条消息不是AI回复，无法重新生成');
+        return;
+    }
+
+    // 移除最后一条AI消息记录
+    currentVideoCallMessages.pop();
+
+    // 移除界面上最后一条AI消息气泡（从后往前找到第一个align-self: flex-start的div）
+    const allDivs = messageArea.querySelectorAll('div:not(#video-loading-indicator)');
+    for (let i = allDivs.length - 1; i >= 0; i--) {
+        if (allDivs[i].style.alignSelf === 'flex-start') {
+            allDivs[i].remove();
+            break;
+        }
+    }
+
+    const char = await db.characters.get(videoCallCharId);
+    if (!char) return;
+
+    const accountId = getCurrentAccountId();
+
+    // 显示"正在生成中"提示
+    const loadingDiv = document.createElement('div');
+    loadingDiv.id = 'video-loading-indicator';
+    loadingDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #999999; border-bottom-left-radius: 4px;';
+    loadingDiv.innerHTML = '<span style="display:inline-flex;align-items:center;gap:6px;"><svg width="16" height="16" viewBox="0 0 24 24" style="animation:spin 1s linear infinite;"><circle cx="12" cy="12" r="10" stroke="#999" stroke-width="2" fill="none" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>正在重新生成中...</span>';
+    messageArea.appendChild(loadingDiv);
+    messageArea.scrollTop = messageArea.scrollHeight;
+
+    try {
+        // 收集当前视频通话中的消息历史（排除loading提示）
+        const videoMessages = [];
+        const msgDivs = messageArea.querySelectorAll('div:not(#video-loading-indicator)');
+        msgDivs.forEach(div => {
+            const isUser = div.style.alignSelf === 'flex-end';
+            videoMessages.push({
+                role: isUser ? 'user' : 'assistant',
+                content: div.textContent
+            });
+        });
+
+        // 获取对话对象（用户）人设
+        let userDesc = "";
+        let userName = "用户";
+        if (char.linked_user_id) {
+            const user = await db.characters.get(char.linked_user_id);
+            if (user) {
+                userName = user.name;
+                userDesc = `\n\n【对话对象(User)信息】\n名字：${user.name}\n设定：${user.description || '无'}`;
+            }
+        }
+
+        // 获取世界书上下文
+        let loreContext = "";
+        const lorebookIds = char.lorebookIds || (char.lorebookId ? [char.lorebookId] : []);
+        const chatHistory = getChatHistory(char, accountId);
+        const recentText = chatHistory.slice(-10).map(m => m.content).join(' ') + ' ' + videoMessages.map(m => m.content).join(' ');
+        loreContext = await getLorebookContext(lorebookIds, `${char.name} ${userName} ${recentText}`);
+
+        // 计算虚拟时间
+        const virtualTimeStr = getFormattedVirtualTime(char);
+
+        // 构建系统提示
+        const systemPrompt = `# 视频通话中
+
+【当前时间】
+${virtualTimeStr}
+
+---
+
+## 你是谁
+
+**你的名字**：${char.name}
+${char.nick ? `**昵称**：${char.nick}` : ''}
+${char.wx_nickname ? `**微信网名**：${char.wx_nickname}` : ''}
+
+你不是AI助手，你不是${userName}。你是一个独立的人，有自己的生活、情绪和想法。
+
+**你的人设**：
+${char.description || ''}
+${userDesc}
+${loreContext}
+${char.relationships && char.relationships.length > 0 ? `
+**你的关联角色/NPC**：
+${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}` : ''}
+
+---
+
+## 场景
+
+你正在和${userName}进行**视频通话**。你和对方隔着手机屏幕进行视频对话，你可以看到对方，对方也能看到你。
+
+**回复要求**：
+- 格式：动作描写:"说的话"，例如：歪着头笑:"真的吗？太有趣了！"
+- 动作必须是通过手机屏幕能看到的（挥手、微笑、调整镜头、比心、做鬼脸、靠近屏幕等）
+- 回复要自然、生动，可以结合视频场景（比如评论对方的背景、表情等）
+- 回复字数：100-500字
+- **严格贴合你的人设**，展现独特的说话方式、价值观和小习惯
+- 根据人设调整你的语气、用词和态度
+
+请根据对方的消息自然回复，保持视频通话的互动感。`;
+
+        const messages = [
+            { role: 'system', content: systemPrompt },
+            ...videoMessages
+        ];
+
+        const reply = await callAI(messages);
+
+        // 移除"正在生成中"提示
+        const loading = document.getElementById('video-loading-indicator');
+        if (loading) loading.remove();
+
+        // 添加新的AI消息到界面
+        const aiMsgDiv = document.createElement('div');
+        aiMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #333333; border-bottom-left-radius: 4px;';
+        aiMsgDiv.textContent = reply;
+        messageArea.appendChild(aiMsgDiv);
+        messageArea.scrollTop = messageArea.scrollHeight;
+
+        // 保存到当前视频通话记录
+        currentVideoCallMessages.push({
+            role: 'assistant',
+            content: reply,
+            time: Date.now()
+        });
+    } catch (error) {
+        console.error('重新生成失败:', error);
+        // 移除"正在生成中"提示
+        const loading = document.getElementById('video-loading-indicator');
+        if (loading) loading.remove();
+        alert('重新生成失败: ' + error.message);
     }
 }
 
@@ -44657,12 +45172,17 @@ async function showVideoCallRecords() {
             const durationStr = `${durationMin}:${durationSec.toString().padStart(2,'0')}`;
             
             return `
-                <div onclick="showVideoRecordDetail('${record.id}')" style="background:#f9f9f9; padding:16px; border-radius:12px; margin-bottom:12px; cursor:pointer; transition:background 0.2s;" onmouseover="this.style.background='#f0f0f0'" onmouseout="this.style.background='#f9f9f9'">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                        <div style="font-size:16px; font-weight:500; color:#333;">${dateStr} ${timeStr}</div>
-                        <div style="font-size:14px; color:#666;">时长 ${durationStr}</div>
+                <div style="background:#f9f9f9; padding:16px; border-radius:12px; margin-bottom:12px; transition:background 0.2s; position:relative;" onmouseover="this.style.background='#f0f0f0'" onmouseout="this.style.background='#f9f9f9'">
+                    <div onclick="showVideoRecordDetail('${record.id}')" style="cursor:pointer;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                            <div style="font-size:16px; font-weight:500; color:#333;">${dateStr} ${timeStr}</div>
+                            <div style="font-size:14px; color:#666;">时长 ${durationStr}</div>
+                        </div>
+                        <div style="font-size:14px; color:#999;">${record.messages.length} 条消息</div>
                     </div>
-                    <div style="font-size:14px; color:#999;">${record.messages.length} 条消息</div>
+                    <div onclick="event.stopPropagation(); deleteVideoCallRecord('${record.id}')" style="position:absolute; top:12px; right:12px; width:28px; height:28px; display:flex; align-items:center; justify-content:center; cursor:pointer; border-radius:50%; background:rgba(255,59,48,0.1); color:#ff3b30; font-size:16px;" title="删除此记录">
+                        <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:none; stroke:#ff3b30; stroke-width:2;"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                    </div>
                 </div>
             `;
         }).join('');
@@ -44675,6 +45195,9 @@ async function showVideoCallRecords() {
 function hideVideoRecordsPage() {
     document.getElementById('video-records-page').style.display = 'none';
 }
+
+// 当前查看的视频通话记录ID
+let currentViewingVideoRecordId = null;
 
 // 显示视频通话详情
 async function showVideoRecordDetail(recordId) {
@@ -44691,6 +45214,8 @@ async function showVideoRecordDetail(recordId) {
         alert('找不到该通话记录');
         return;
     }
+    
+    currentViewingVideoRecordId = recordId;
     
     const detailPage = document.getElementById('video-record-detail-page');
     const detailTitle = document.getElementById('video-record-detail-title');
@@ -44714,9 +45239,42 @@ async function showVideoRecordDetail(recordId) {
     detailPage.style.display = 'block';
 }
 
+// 删除当前查看的视频通话记录（详情页中调用）
+async function deleteCurrentVideoRecordDetail() {
+    if (!currentViewingVideoRecordId) return;
+    if (!confirm('确定要删除这条通话记录吗？')) return;
+    
+    await deleteVideoCallRecordById(currentViewingVideoRecordId);
+    hideVideoRecordDetailPage();
+    currentViewingVideoRecordId = null;
+}
+
+// 按ID删除视频通话记录（内部复用）
+async function deleteVideoCallRecordById(recordId) {
+    const accountId = getCurrentAccountId();
+    if (!accountId || !currentChatCharId) return;
+    
+    const key = `video_calls_${accountId}_${currentChatCharId}`;
+    let records = JSON.parse(localStorage.getItem(key) || '[]');
+    records = records.filter(r => r.id !== recordId);
+    localStorage.setItem(key, JSON.stringify(records));
+    
+    await showVideoCallRecords();
+    updateVideoCallRecordCount();
+    console.log('[视频通话] ✅ 已删除通话记录:', recordId);
+}
+
 // 隐藏视频通话详情
 function hideVideoRecordDetailPage() {
     document.getElementById('video-record-detail-page').style.display = 'none';
+}
+
+// 删除单条视频通话记录（列表页中调用）
+async function deleteVideoCallRecord(recordId) {
+    if (!currentChatCharId) return;
+    if (!confirm('确定要删除这条通话记录吗？')) return;
+    
+    await deleteVideoCallRecordById(recordId);
 }
 
 // 更新视频通话记录数量显示
@@ -45941,7 +46499,7 @@ async function triggerManualSummary(chatType) {
         chatId = window.currentGroupChatId;
         const group = await db.group_chats.get(parseInt(chatId));
         name = group ? group.name : '群聊';
-        chatHistory = group ? (group.messages || []) : [];
+        chatHistory = group ? (group.chat_history || []) : [];
     }
 
     if (!chatHistory || chatHistory.length < 5) {
@@ -46297,7 +46855,7 @@ async function checkAutoSummary(chatType, chatId, accountId) {
         if (!group) return;
         autoSummaryEnabled = group.auto_summary_enabled;
         summaryInterval = group.summary_interval || 50;
-        chatHistory = group.messages || [];
+        chatHistory = group.chat_history || [];
     }
     
     if (!autoSummaryEnabled) return;
@@ -51449,7 +52007,11 @@ async function executeChangeAvatar(charId, accountId) {
         const currentAccountId = accountId || getCurrentAccountId();
         const oldAvatar = getCharAvatar(freshChar, currentAccountId);
         setCharAvatar(freshChar, currentAccountId, selectedAvatar.url);
-        await safeCharacterPut(freshChar);
+        // 🛡️ 使用 update() 只更新头像字段，防止覆盖设置
+        const avatarPayload = currentAccountId
+            ? { [`avatar_by_user.${currentAccountId}`]: selectedAvatar.url }
+            : { avatar: selectedAvatar.url };
+        await safeDexieUpdate(db.characters, charId, avatarPayload, `换头像[${freshChar.name}]`);
         
         console.log(`[换头像] ${freshChar.name} 换了新头像 (旧: ${oldAvatar?.substring(0, 50)}... → 新: ${selectedAvatar.url.substring(0, 50)}...)`);
         
@@ -51581,24 +52143,28 @@ async function acceptCoupleAvatar(btn, av1Id, av2Id, charId) {
         const charAvatar = useFirst ? av1.url : av2.url;
         const userAvatar = useFirst ? av2.url : av1.url;
         
-        // 更新角色头像（按账号隔离）
+        // 更新角色头像（按账号隔离）— 使用 update() 只更新头像字段
         const char = await db.characters.get(charId);
         const _coupleAid = getCurrentAccountId();
         if (char) {
+            const couplePayload = _coupleAid
+                ? { [`avatar_by_user.${_coupleAid}`]: charAvatar }
+                : { avatar: charAvatar };
+            await safeDexieUpdate(db.characters, charId, couplePayload, `情头[${char.name}]`);
             setCharAvatar(char, _coupleAid, charAvatar);
-            await safeCharacterPut(char);
         }
         
         // 更新用户头像
         if (currentMyCharId) {
-            const myChar = await db.characters.get(parseInt(currentMyCharId));
+            const myCharId = parseInt(currentMyCharId);
+            const myChar = await db.characters.get(myCharId);
             if (myChar) {
                 const oldAvatar = myChar.avatar || '';
-                myChar.avatar = userAvatar;
                 if (userAvatar !== oldAvatar) {
                     markUserAvatarChanged(myChar);
                 }
-                await safeCharacterPut(myChar);
+                await safeDexieUpdate(db.characters, myCharId, { avatar: userAvatar }, `情头用户`);
+                myChar.avatar = userAvatar;
             }
         }
         
@@ -51653,13 +52219,17 @@ async function executeRevertCoupleAvatar(charId, accountId) {
         const randomIndex = Math.floor(Math.random() * singleAvatars.length);
         const selectedAvatar = singleAvatars[randomIndex];
         
-        // 更新角色头像（按账号隔离）
+        // 更新角色头像（按账号隔离）— 使用 update() 只更新头像字段，防止覆盖其他数据
         const char = await db.characters.get(charId);
         if (!char) return;
         
         const _revertAid = getCurrentAccountId();
+        const revertPayload = _revertAid
+            ? { [`avatar_by_user.${_revertAid}`]: selectedAvatar.url }
+            : { avatar: selectedAvatar.url };
+        await safeDexieUpdate(db.characters, charId, revertPayload, `换回单人头像[${char.name}]`);
+        // 同步更新内存中的char对象
         setCharAvatar(char, _revertAid, selectedAvatar.url);
-        await safeCharacterPut(char);
         
         console.log(`[换回单人头像] ${char.name} 换回了单人头像`);
         
@@ -51722,10 +52292,14 @@ async function executeUseImageAsAvatar(charId, accountId, imageIndex) {
         
         console.log(`[使用图片头像] 用户共发送 ${userImages.length} 张图片，选择第 ${targetIdx + 1} 张${selectedImage.desc ? `（描述: ${selectedImage.desc}）` : ''}`);
         
-        // 更新角色头像（按账号隔离）
+        // 更新角色头像（按账号隔离）— 使用 update() 只更新头像字段，防止覆盖其他数据
         const _imgAid = getCurrentAccountId();
+        const avatarPayload = _imgAid
+            ? { [`avatar_by_user.${_imgAid}`]: selectedImage.url }
+            : { avatar: selectedImage.url };
+        await safeDexieUpdate(db.characters, charId, avatarPayload, `使用图片头像[${char.name}]`);
+        // 同步更新内存中的char对象（供后续setChatHistory使用）
         setCharAvatar(char, _imgAid, selectedImage.url);
-        await safeCharacterPut(char);
         
         console.log(`[使用图片头像] ${char.name} 使用了用户发送的图片作为头像`);
         
@@ -56950,9 +57524,9 @@ async function applyChatTheme() {
             return;
         }
 
-        // 更新角色的主题ID
+        // 🛡️ 使用 update() 只更新主题ID字段，防止覆盖设置
         char.chatThemeId = selectedThemeIdForApply;
-        await safeCharacterPut(char);
+        await db.characters.update(char.id, { chatThemeId: selectedThemeIdForApply });
 
         // 应用主题样式
         await applyThemeToChat(selectedThemeIdForApply);
