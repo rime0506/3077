@@ -2201,7 +2201,7 @@
                 </div>
                 
                 <!-- 右侧：发送 (Send) - 默认隐藏 -->
-                <div class="chat-send-btn" id="btn-send" onclick="sendMessage()">
+                <div class="chat-send-btn" id="btn-send" onclick="sendMessage()" onmousedown="event.preventDefault()">
                     <svg class="svg-icon" viewBox="0 0 24 24" style="width:18px; height:18px; stroke-width:3; transform: rotate(90deg) translateX(-2px);"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
                 </div>
             </div>
@@ -2747,6 +2747,24 @@
                     <div style="margin-bottom:16px;">
                         <div style="font-size:14px; font-weight:500; margin-bottom:8px; color:#333;">自定义气泡CSS</div>
                         <div style="font-size:12px; color:#999; margin-bottom:8px;">输入CSS代码直接覆盖气泡样式，填写后预设样式自动失效</div>
+                        <!-- 实时预览区 -->
+                        <div style="margin-bottom:12px;">
+                            <div style="font-size:13px; font-weight:500; margin-bottom:8px; color:#333;">💬 实时预览</div>
+                            <div id="chat-bubble-preview" style="background:#f5f5f5; border-radius:10px; padding:12px; min-height:80px; overflow:hidden;">
+                                <div class="message-row other" style="display:flex; gap:6px; align-items:flex-start; margin-bottom:10px;">
+                                    <div class="message-avatar" style="width:28px !important; height:28px !important; border-radius:50%; background:#ccc; flex-shrink:0;"></div>
+                                    <div class="message-content ai-bubble" style="padding:6px 10px; border-radius:12px 12px 12px 4px; font-size:14px; line-height:1.5; display:inline-block;">你好呀 👋</div>
+                                </div>
+                                <div class="message-row self" style="display:flex; gap:6px; align-items:flex-start; flex-direction:row-reverse; margin-bottom:10px;">
+                                    <div class="message-avatar" style="width:28px !important; height:28px !important; border-radius:50%; background:#ddd; flex-shrink:0;"></div>
+                                    <div class="message-content user-bubble" style="padding:6px 10px; border-radius:12px 12px 4px 12px; font-size:14px; line-height:1.5; display:inline-block;">嗨~ 今天过得怎么样？🌞</div>
+                                </div>
+                                <div class="message-row other" style="display:flex; gap:6px; align-items:flex-start;">
+                                    <div class="message-avatar" style="width:28px !important; height:28px !important; border-radius:50%; background:#ccc; flex-shrink:0;"></div>
+                                    <div class="message-content ai-bubble" style="padding:6px 10px; border-radius:12px 12px 12px 4px; font-size:14px; line-height:1.5; display:inline-block;">挺好的，一起出去玩吧 🎈</div>
+                                </div>
+                            </div>
+                        </div>
                         <!-- 类名速查 -->
                         <div style="background:#fff; border:1px solid #e8e8e8; border-radius:8px; padding:8px 10px; margin-bottom:10px; font-size:11px; color:#666; line-height:1.8;">
                             <div style="font-weight:600; color:#333; margin-bottom:2px;">类名速查：</div>
@@ -2757,11 +2775,10 @@
                             <code style="background:#f0f0f0; padding:1px 4px; border-radius:3px;">.user-bubble</code> 我的气泡<br>
                             <code style="background:#f0f0f0; padding:1px 4px; border-radius:3px;">.message-avatar</code> 头像
                         </div>
-                        <textarea id="detail-bubble-css" placeholder="【简单写法】直接写CSS属性，自动应用到所有气泡：&#10;background: linear-gradient(135deg, #667eea, #764ba2);&#10;color: white;&#10;border-radius: 12px;&#10;&#10;【高级写法】带选择器的完整CSS规则：&#10;.message-row.other .message-content {&#10;    background: rgba(240,230,198,0.5) !important;&#10;}&#10;.message-row.self .message-content {&#10;    background: rgba(200,220,255,0.5) !important;&#10;}&#10;.message-avatar { opacity: 0 !important; }" style="width:100%; min-height:120px; padding:10px; border:1px solid #ddd; border-radius:8px; font-family:monospace; font-size:11px; resize:vertical; outline:none; box-sizing:border-box;" oninput="saveChatDetail()"></textarea>
+                        <textarea id="detail-bubble-css" placeholder="【简单写法】直接写CSS属性，自动应用到所有气泡：&#10;background: linear-gradient(135deg, #667eea, #764ba2);&#10;color: white;&#10;border-radius: 12px;&#10;&#10;【高级写法】带选择器的完整CSS规则：&#10;.message-row.other .message-content {&#10;    background: rgba(240,230,198,0.5) !important;&#10;}&#10;.message-row.self .message-content {&#10;    background: rgba(200,220,255,0.5) !important;&#10;}&#10;.message-avatar { opacity: 0 !important; }" style="width:100%; min-height:120px; padding:10px; border:1px solid #ddd; border-radius:8px; font-family:monospace; font-size:11px; resize:vertical; outline:none; box-sizing:border-box;" oninput="previewChatBubbleCSS(); saveChatDetail()"></textarea>
                     </div>
                     
                     <div style="display:flex; gap:10px;">
-                        <button onclick="previewCustomStyle()" style="flex:1; padding:10px; background:var(--ins-pink); color:white; border:none; border-radius:8px; font-size:13px; cursor:pointer;">预览效果</button>
                         <button onclick="clearCustomStyle()" style="flex:1; padding:10px; background:#f0f0f0; color:#666; border:none; border-radius:8px; font-size:13px; cursor:pointer;">清除样式</button>
                     </div>
                     
@@ -2948,6 +2965,59 @@
                     <div style="display:flex; align-items:center; gap:6px;">
                         <div id="group-detail-current-theme" style="font-size:14px; color:#999;">默认主题</div>
                         <div class="detail-arrow">›</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 自定义气泡CSS (群聊) -->
+            <div class="detail-group">
+                <div class="detail-item" onclick="toggleGroupBubbleCSS()" style="cursor:pointer;">
+                    <div style="display:flex; flex-direction:column; gap:4px;">
+                        <div>聊天样式</div>
+                        <div style="font-size:12px; color:#999; line-height:1.4;">自定义群聊气泡样式</div>
+                    </div>
+                    <div style="display:flex; align-items:center;">
+                        <span id="group-detail-bubble-toggle" class="detail-arrow">›</span>
+                    </div>
+                </div>
+                <div id="group-bubble-css-panel" style="display:none; padding:12px 16px;">
+                    <!-- 实时预览区 -->
+                    <div style="margin-bottom:12px;">
+                        <div style="font-size:13px; font-weight:500; margin-bottom:8px; color:#333;">💬 实时预览</div>
+                        <div id="group-bubble-preview" style="background:#f5f5f5; border-radius:10px; padding:12px; min-height:80px; overflow:hidden;">
+                            <div style="display:flex; gap:6px; align-items:flex-start; margin-bottom:10px;">
+                                <div style="width:28px; height:28px; border-radius:50%; background:#ccc; flex-shrink:0;"></div>
+                                <div>
+                                    <div style="font-size:11px; color:#999; margin-bottom:2px;">群成员</div>
+                                    <div class="group-preview-bubble other-bubble" style="background:#f2f2f7; color:#000; padding:6px 10px; border-radius:18px 18px 18px 4px; font-size:14px; line-height:1.5; display:inline-block;">大家好呀 👋</div>
+                                </div>
+                            </div>
+                            <div style="display:flex; gap:6px; align-items:flex-start; flex-direction:row-reverse; margin-bottom:10px;">
+                                <div style="width:28px; height:28px; border-radius:50%; background:#ddd; flex-shrink:0;"></div>
+                                <div style="display:flex; flex-direction:column; align-items:flex-end;">
+                                    <div style="font-size:11px; color:#999; margin-bottom:2px;">我</div>
+                                    <div class="group-preview-bubble self-bubble" style="background:#ffe4e8; color:#000; padding:6px 10px; border-radius:18px 18px 4px 18px; font-size:14px; line-height:1.5; display:inline-block;">你好！今天天气不错 🌞</div>
+                                </div>
+                            </div>
+                            <div style="display:flex; gap:6px; align-items:flex-start;">
+                                <div style="width:28px; height:28px; border-radius:50%; background:#b8d4e3; flex-shrink:0;"></div>
+                                <div>
+                                    <div style="font-size:11px; color:#999; margin-bottom:2px;">另一个成员</div>
+                                    <div class="group-preview-bubble other-bubble" style="background:#f2f2f7; color:#000; padding:6px 10px; border-radius:18px 18px 18px 4px; font-size:14px; line-height:1.5; display:inline-block;">是呀，出去走走吧 🚶</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- 类名速查 -->
+                    <div style="background:#fff; border:1px solid #e8e8e8; border-radius:8px; padding:8px 10px; margin-bottom:10px; font-size:11px; color:#666; line-height:1.8;">
+                        <div style="font-weight:600; color:#333; margin-bottom:2px;">类名速查：</div>
+                        <code style="background:#f0f0f0; padding:1px 4px; border-radius:3px;">.group-msg-content</code> 气泡<br>
+                        <code style="background:#f0f0f0; padding:1px 4px; border-radius:3px;">.group-message-row</code> 消息行　
+                        <code style="background:#f0f0f0; padding:1px 4px; border-radius:3px;">.group-message-row.self</code> 我的消息行
+                    </div>
+                    <textarea id="group-detail-bubble-css" placeholder="【简单写法】直接写CSS属性，自动应用到所有气泡：&#10;background: linear-gradient(135deg, #667eea, #764ba2);&#10;color: white;&#10;border-radius: 12px;&#10;&#10;【高级写法】带选择器的完整CSS规则：&#10;.group-msg-content {&#10;    background: rgba(240,230,198,0.5) !important;&#10;}" style="width:100%; min-height:100px; padding:10px; border:1px solid #ddd; border-radius:8px; font-family:monospace; font-size:11px; resize:vertical; outline:none; box-sizing:border-box;" oninput="previewGroupBubbleCSS(); saveGroupDetail()"></textarea>
+                    <div style="display:flex; gap:10px; margin-top:10px;">
+                        <button onclick="clearGroupCustomStyle()" style="flex:1; padding:10px; background:#f0f0f0; color:#666; border:none; border-radius:8px; font-size:13px; cursor:pointer;">清除样式</button>
                     </div>
                 </div>
             </div>
@@ -4977,7 +5047,7 @@
                         <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
                     </svg>
                 </button>
-                <button id="offline-btn-send" onclick="sendOfflineMessage()" style="width:32px; height:32px; border-radius:50%; background:#ffb3d1; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; opacity:0.4; transition:all 0.2s;">
+                <button id="offline-btn-send" onclick="sendOfflineMessage()" onmousedown="event.preventDefault()" style="width:32px; height:32px; border-radius:50%; background:#ffb3d1; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; opacity:0.4; transition:all 0.2s;">
                     <svg viewBox="0 0 24 24" style="width:16px; height:16px; stroke:#fff; fill:none; stroke-width:2;">
                         <line x1="22" y1="2" x2="11" y2="13"></line>
                         <polygon points="22 2 15 22 11 13 2 9 22 2" style="fill:#fff; stroke:none;"></polygon>

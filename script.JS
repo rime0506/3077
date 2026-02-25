@@ -69,27 +69,48 @@ window.addEventListener('orientationchange', () => {
 
 // 移动端虚拟键盘适配
 // 原理：键盘弹起时 visualViewport.height 缩小，但 window.innerHeight（100vh）不变
-// 通过给当前可见的 chat-window 加 padding-bottom 把内容往上挤，窗口本身仍然全屏覆盖不露桌面
-let _kbLastPadding = 0;
-function handleKeyboardResize() {
+// 直接把 chat-window 高度设为可视视口高度，让整个底栏（输入框+按钮）都在键盘上方
+// PWA全屏模式特别处理：去掉安全区域padding + 对齐visualViewport偏移
+let _kbLastHeight = 0;
+let _kbLastTop = 0;
+let _kbRecalibrateTimer = null;
+
+function applyKeyboardLayout() {
     const vp = window.visualViewport;
     if (!vp) return;
-    // 键盘高度 = 布局视口 - 可视视口
-    const kbHeight = Math.max(0, Math.round(window.innerHeight - vp.height));
-    if (kbHeight === _kbLastPadding) return;
-    _kbLastPadding = kbHeight;
     
-    // 给所有可能在前台的聊天窗口设置 padding-bottom（多加一点余量让输入框更明显）
-    const extraPush = 30;
+    const kbHeight = Math.max(0, Math.round(window.innerHeight - vp.height));
+    const vpTop = Math.round(vp.offsetTop || 0);
+    
+    // 高度和偏移都没变时跳过
+    if (kbHeight === _kbLastHeight && vpTop === _kbLastTop) return;
+    _kbLastHeight = kbHeight;
+    _kbLastTop = vpTop;
+    
+    const isKeyboardUp = kbHeight > 50;
+    
+    // 键盘弹起时：把聊天窗口高度缩到可视视口高度，整个底栏都在键盘上方
+    // 键盘收起时：恢复原始高度
     const targets = document.querySelectorAll('.chat-window');
     targets.forEach(el => {
         if (el.style.display !== 'none' && el.style.display !== '') {
-            el.style.paddingBottom = kbHeight > 50 ? (kbHeight + extraPush) + 'px' : '0';
+            if (isKeyboardUp) {
+                // 对齐可视视口（PWA全屏模式下可能有偏移）
+                el.style.top = vpTop + 'px';
+                el.style.height = vp.height + 'px';
+                // 标记键盘状态，CSS 会去掉安全区域 padding
+                el.classList.add('keyboard-up');
+            } else {
+                // 恢复原始状态
+                el.style.top = '0';
+                el.style.height = 'var(--app-height, 100vh)';
+                el.classList.remove('keyboard-up');
+            }
         }
     });
     
     // 键盘弹起时自动滚动聊天到底部
-    if (kbHeight > 50) {
+    if (isKeyboardUp) {
         requestAnimationFrame(() => {
             // 线上聊天
             const chatBody = document.getElementById('chat-body');
@@ -104,9 +125,24 @@ function handleKeyboardResize() {
         });
     }
 }
-// 监听 visualViewport resize（键盘弹起/收起都会触发）
+
+function handleKeyboardResize() {
+    // 立即执行一次
+    applyKeyboardLayout();
+    
+    // iOS 键盘弹起有 ~300ms 动画，resize 事件可能在动画开始时就触发
+    // 此时 vp.height 还不是最终值，需要延迟再校准
+    clearTimeout(_kbRecalibrateTimer);
+    _kbRecalibrateTimer = setTimeout(() => {
+        _kbLastHeight = -1; // 强制重新计算
+        applyKeyboardLayout();
+    }, 350);
+}
+
+// 监听 visualViewport resize + scroll（键盘弹起/收起/视口滚动都会触发）
 if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', handleKeyboardResize);
+    window.visualViewport.addEventListener('scroll', applyKeyboardLayout);
 }
 
 // 初始化DEXie数据库
@@ -4011,8 +4047,54 @@ ${commenterInfos}
                         </div>
                     </div>
                     
-                    <!-- AI生成数据按钮 -->
-                    <div style="padding:20px 16px;">
+                    <!-- AI生成数据按钮 + 锁定按钮 -->
+                    <div style="padding:20px 16px;" id="fp-data-actions-area">
+                    </div>
+                </div>
+            `;
+
+            // 动态渲染数据操作区域（需要异步检查锁定状态）
+            const actionsArea = container.querySelector('#fp-data-actions-area');
+            if (actionsArea) {
+                const locked = await isFpDataLocked(roleId, findPhoneTargetAccountId);
+                if (locked) {
+                    // 已锁定状态：显示锁定标识 + 追加生成按钮 + 解锁按钮
+                    actionsArea.innerHTML = `
+                        <div style="background:#f0faf0; border:1px solid #c8e6c9; border-radius:12px; padding:16px; margin-bottom:12px; display:flex; align-items:center; gap:12px;">
+                            <div style="width:40px; height:40px; border-radius:50%; background:#e8f5e9; display:flex; align-items:center; justify-content:center; flex-shrink:0;">
+                                <svg viewBox="0 0 24 24" style="width:20px; height:20px; fill:none; stroke:#4caf50; stroke-width:2;"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                            </div>
+                            <div style="flex:1;">
+                                <div style="font-size:14px; font-weight:600; color:#2e7d32;">数据已锁定</div>
+                                <div style="font-size:12px; color:#66bb6a; margin-top:2px;">再次生成会在已有数据之后追加，不会覆盖</div>
+                            </div>
+                        </div>
+                        <button id="fp-generate-btn" onclick="generateFpRoleData()" style="
+                            width:100%; padding:14px; border:none; border-radius:12px;
+                            background:linear-gradient(135deg, var(--ins-pink) 0%, #ff6b9d 100%);
+                            color:#fff; font-size:15px; font-weight:600; cursor:pointer;
+                            display:flex; align-items:center; justify-content:center; gap:8px;
+                            box-shadow:0 4px 12px rgba(255,107,157,0.3);
+                            transition:all 0.2s;
+                        ">
+                            <svg class="svg-icon" style="width:16px;height:16px;" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>
+                            继续生成新数据
+                        </button>
+                        <div style="text-align:center; font-size:12px; color:#999; margin-top:8px;">新数据会追加到现有记录之后（时间线延续）</div>
+                        <button onclick="toggleFpDataLock()" style="
+                            width:100%; padding:12px; border:1px solid #e0e0e0; border-radius:12px;
+                            background:#fff; color:#666; font-size:14px; font-weight:500; cursor:pointer;
+                            display:flex; align-items:center; justify-content:center; gap:8px;
+                            margin-top:10px; transition:all 0.2s;
+                        ">
+                            <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:none; stroke:#999; stroke-width:2;"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 9.9-1"></path></svg>
+                            解锁数据
+                        </button>
+                        <div style="text-align:center; font-size:11px; color:#bbb; margin-top:4px;">解锁后再次生成将覆盖所有数据</div>
+                    `;
+                } else {
+                    // 未锁定状态：显示生成按钮 + 锁定按钮
+                    actionsArea.innerHTML = `
                         <button id="fp-generate-btn" onclick="generateFpRoleData()" style="
                             width:100%; padding:14px; border:none; border-radius:12px;
                             background:linear-gradient(135deg, var(--ins-pink) 0%, #ff6b9d 100%);
@@ -4025,9 +4107,73 @@ ${commenterInfos}
                             AI生成数据
                         </button>
                         <div style="text-align:center; font-size:12px; color:#999; margin-top:8px;">一键生成好友、聊天记录、钱包、朋友圈等数据</div>
-                    </div>
-                </div>
-            `;
+                        <button onclick="toggleFpDataLock()" style="
+                            width:100%; padding:12px; border:1px solid #e0e0e0; border-radius:12px;
+                            background:#fff; color:#666; font-size:14px; font-weight:500; cursor:pointer;
+                            display:flex; align-items:center; justify-content:center; gap:8px;
+                            margin-top:12px; transition:all 0.2s;
+                        ">
+                            <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:none; stroke:#999; stroke-width:2;"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                            锁定数据
+                        </button>
+                        <div style="text-align:center; font-size:11px; color:#bbb; margin-top:6px;">锁定后生成的新数据会追加到已有数据之后，不会覆盖</div>
+                    `;
+                }
+            }
+        }
+
+        // ===== 查手机 - 数据锁定功能 =====
+        // 检查角色FP数据是否已锁定
+        async function isFpDataLocked(roleCharId, accountId) {
+            if (!roleCharId || !accountId) return false;
+            const roleChar = await db.characters.get(parseInt(roleCharId));
+            if (!roleChar) return false;
+            if (!roleChar.fp_data_locked_by_user) return false;
+            return !!roleChar.fp_data_locked_by_user[accountId];
+        }
+
+        // 切换锁定状态
+        async function toggleFpDataLock() {
+            const roleId = window._fpWechatRoleId;
+            const accountId = findPhoneTargetAccountId;
+            if (!roleId || !accountId) { showToast('参数缺失'); return; }
+
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) { showToast('角色不存在'); return; }
+
+            if (!roleChar.fp_data_locked_by_user) roleChar.fp_data_locked_by_user = {};
+            const currentLocked = !!roleChar.fp_data_locked_by_user[accountId];
+
+            if (currentLocked) {
+                // 解锁 - 确认操作
+                if (!confirm('解锁后，下次点击"AI生成数据"将重新生成所有数据（聊天记录、钱包、朋友圈等），之前的数据会被覆盖。\n\n确定要解锁吗？')) {
+                    return;
+                }
+                roleChar.fp_data_locked_by_user[accountId] = false;
+                await safeCharacterPut(roleChar);
+                showToast('已解锁，数据可重新生成');
+            } else {
+                // 检查是否有已生成的数据
+                const walletData = getFpWalletData(roleChar, accountId);
+                const hasData = (walletData.balance !== '0.00') || (walletData.transactions && walletData.transactions.length > 0);
+                const contactIds = getRolePhoneContacts(roleChar, accountId);
+                const hasContacts = contactIds.length > 0;
+
+                if (!hasData && !hasContacts) {
+                    showToast('请先点击"AI生成数据"生成数据后再锁定');
+                    return;
+                }
+
+                roleChar.fp_data_locked_by_user[accountId] = true;
+                await safeCharacterPut(roleChar);
+                showToast('已锁定！再次生成时将在现有数据基础上追加');
+            }
+
+            // 刷新"我"页面以更新按钮状态
+            const content = document.getElementById('fp-wechat-content');
+            if (content) {
+                await renderFpMePage(content);
+            }
         }
 
         // ===== 查手机WeChat - 服务页面 =====
@@ -4102,6 +4248,59 @@ ${commenterInfos}
             await safeCharacterPut(roleChar);
         }
 
+        // ===== FP钱包交易：检查余额、扣款/加款、记账 =====
+        // type: 'income' 或 'expense'
+        // force: true 时强制执行（允许负余额），AI发起的操作使用
+        // 返回 { success: true/false, balance: 当前余额 }
+        async function fpWalletTransaction(roleCharId, accountId, type, amount, title, desc, force = false) {
+            if (!roleCharId || !accountId) return { success: false, balance: 0 };
+            const roleChar = await db.characters.get(parseInt(roleCharId));
+            if (!roleChar) return { success: false, balance: 0 };
+            const walletData = getFpWalletData(roleChar, accountId);
+            let balance = parseFloat(walletData.balance) || 0;
+            const amountNum = parseFloat(amount) || 0;
+
+            // ★ 只有锁定时才校验余额，未锁定时不校验（允许随意交易）
+            const locked = !!(roleChar.fp_data_locked_by_user && roleChar.fp_data_locked_by_user[accountId]);
+
+            if (type === 'expense') {
+                if (locked && !force && balance < amountNum) {
+                    return { success: false, balance: balance };
+                }
+                balance -= amountNum;
+            } else {
+                balance += amountNum;
+            }
+
+            walletData.balance = balance.toFixed(2);
+            if (!walletData.transactions) walletData.transactions = [];
+            walletData.transactions.push({
+                type,
+                amount: amountNum.toFixed(2),
+                title: title || (type === 'income' ? '收款' : '转账'),
+                desc: desc || '',
+                time: Date.now()
+            });
+            // 只保留最近100条
+            if (walletData.transactions.length > 100) {
+                walletData.transactions = walletData.transactions.slice(-100);
+            }
+
+            await setFpWalletData(roleChar, accountId, walletData);
+            // 如果钱包页面正在显示，刷新余额
+            await updateFpWalletBalance();
+            return { success: true, balance: balance };
+        }
+
+        // 获取FP钱包余额（只查询，不修改）
+        async function getFpWalletBalance(roleCharId, accountId) {
+            if (!roleCharId || !accountId) return 0;
+            const roleChar = await db.characters.get(parseInt(roleCharId));
+            if (!roleChar) return 0;
+            const walletData = getFpWalletData(roleChar, accountId);
+            return parseFloat(walletData.balance) || 0;
+        }
+
         async function updateFpWalletBalance() {
             const roleId = window._fpWechatRoleId;
             const accountId = findPhoneTargetAccountId;
@@ -4155,6 +4354,9 @@ ${commenterInfos}
             const accountId = findPhoneTargetAccountId;
             if (!roleId || !accountId) { showToast('参数缺失'); return; }
 
+            // ★ 检查是否已锁定 - 锁定后追加而非覆盖
+            const isLocked = await isFpDataLocked(roleId, accountId);
+
             let roleChar = await db.characters.get(parseInt(roleId));
             if (!roleChar) { showToast('角色不存在'); return; }
 
@@ -4199,8 +4401,57 @@ ${commenterInfos}
             }
 
             try {
-                const needNpcs = npcContacts.length === 0;
+                // ★ 锁定时不生成新NPC，使用现有的
+                const needNpcs = !isLocked && npcContacts.length === 0;
                 const npcCount = needNpcs ? (Math.floor(Math.random() * 3) + 2) : 0; // 2~4个NPC
+
+                // ★ 锁定模式下，收集已有数据的摘要，告诉AI在此基础上继续
+                let lockedContextSection = '';
+                let existingWalletBalance = '0.00';
+                if (isLocked) {
+                    // 收集已有聊天记录的最后几条，让AI知道上下文
+                    const roleCharSnap = await db.characters.get(parseInt(roleId));
+                    let chatSummaries = [];
+                    for (const npc of npcContacts) {
+                        const fpNpcKey = 'fp_npc_' + npc.id;
+                        const existHist = roleCharSnap?.chat_history_by_user?.[fpNpcKey] || [];
+                        if (existHist.length > 0) {
+                            const lastMsgs = existHist.slice(-3).map(m => {
+                                const who = m.role === 'char' ? roleName : (npc.nick || npc.name);
+                                return `${who}: ${(m.content || '').substring(0, 30)}`;
+                            }).join(' / ');
+                            chatSummaries.push(`- ${npc.nick || npc.name}: 最近消息 [${lastMsgs}]`);
+                        }
+                    }
+
+                    // 获取现有钱包余额
+                    const walletData = getFpWalletData(roleCharSnap, accountId);
+                    existingWalletBalance = walletData.balance || '0.00';
+                    const recentTx = (walletData.transactions || []).slice(-3).map(tx => {
+                        return `${tx.type === 'income' ? '收入' : '支出'} ¥${tx.amount} (${tx.title})`;
+                    }).join('、');
+
+                    // 获取现有朋友圈最近内容
+                    const existingMoments = roleCharSnap?.fp_moments_by_user?.[accountId] || [];
+                    const recentMoments = existingMoments.slice(0, 3).map(m => {
+                        return `${m.author}: ${(m.content || '').substring(0, 20)}`;
+                    }).join('、');
+
+                    lockedContextSection = `
+★★★ 重要：这是一次追加生成（数据已锁定），请在已有数据的时间线之后继续生成新内容 ★★★
+不要重复已有内容，要生成发生在"现在"的新消息和新动态。
+
+已有数据概要：
+- 当前钱包余额：¥${existingWalletBalance}
+${chatSummaries.length > 0 ? '- 各好友最近聊天：\n' + chatSummaries.join('\n') : ''}
+${recentTx ? '- 最近交易记录：' + recentTx : ''}
+${recentMoments ? '- 最近朋友圈：' + recentMoments : ''}
+
+请基于以上已有情况，生成后续的新消息、新交易、新朋友圈。
+钱包的wallet.balance字段请填写在当前余额¥${existingWalletBalance}的基础上，加减新交易后的最终余额。
+新生成的transactions只包含新交易（不要重复旧交易）。
+`;
+                }
 
                 // ★ 构建一次性 prompt，包含所有数据的生成 ★
                 let npcSection = '';
@@ -4242,19 +4493,19 @@ ${commenterInfos}
 角色描述：${roleDesc || '暂无描述'}
 关联用户：${userName}
 ${relationshipContext}${fpLoreContext ? `\n世界观背景：\n${fpLoreContext}\n` : ''}
-请生成以下所有内容：
-${npcSection}${needNpcs ? '二' : '一'}、为主角色与每个NPC好友之间各生成3~6条简短的日常聊天记录
+${lockedContextSection}请生成以下所有内容：
+${npcSection}${needNpcs ? '二' : '一'}、为主角色与每个NPC好友之间各生成${isLocked ? '2~4' : '3~6'}条简短的日常聊天记录${isLocked ? '（这是新消息，接续之前的对话）' : ''}
 ${needNpcs ? '好友列表将在npcs中生成，chats的key要用NPC的nick' : '好友列表：\n' + existingNpcList + '\nchats的key要用NPC的nick（即：' + existingNpcNames + '）'}
 每条消息role: "user"(NPC发的) 或 "char"(主角色发的)
 
 ${needNpcs ? '三' : '二'}、生成钱包数据
-余额要符合角色经济状况，生成3~6笔交易(收入/支出)，贴合日常生活
+${isLocked ? `当前余额为¥${existingWalletBalance}，在此基础上生成2~4笔新交易(收入/支出)，balance字段填加减新交易后的最终余额` : '余额要符合角色经济状况，生成3~6笔交易(收入/支出)，贴合日常生活'}
 
-${needNpcs ? '四' : '三'}、生成角色对用户"${userName}"的微信备注名
+${isLocked ? '' : `${needNpcs ? '四' : '三'}、生成角色对用户"${userName}"的微信备注名
 备注要符合关系（恋人用昵称/爱称，朋友用外号等），最多8个字
 
-${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主角色发的，是好友NPC发的！）
-总共生成5~8条朋友圈动态，分散在不同的NPC好友身上。
+`}${needNpcs ? (isLocked ? '三' : '五') : (isLocked ? '三' : '四')}、生成好友们发的朋友圈动态（不是主角色发的，是好友NPC发的！）
+总共生成${isLocked ? '3~5' : '5~8'}条朋友圈动态，分散在不同的NPC好友身上。${isLocked ? '（这是新动态，与之前不重复）' : ''}
 每条动态的author字段填NPC好友的nick。
 内容要符合对应NPC的人设和性格，包含日常生活、心情、分享等。
 每条动态可以有文字图片描述（用方括号包裹图片描述，如"[自拍照]"、"[咖啡拉花]"）。
@@ -4267,10 +4518,10 @@ ${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主�
     "${needNpcs ? '小婷子🌸' : (npcContacts[0]?.nick || npcContacts[0]?.name || 'NPC昵称')}": [{"role":"user","content":"消息内容"},{"role":"char","content":"回复内容"}]
   },
   "wallet": {
-    "balance": "1234.56",
+    "balance": "${isLocked ? existingWalletBalance : '1234.56'}",
     "transactions": [{"type":"expense","amount":"25.00","title":"外卖","desc":"美团外卖"},{"type":"income","amount":"5000.00","title":"工资","desc":"XX公司"}]
   },
-  "remark": "备注名",
+  ${isLocked ? '' : '"remark": "备注名",'}
   "moments": [
     {"author":"${needNpcs ? '小婷子🌸' : (npcContacts[0]?.nick || npcContacts[0]?.name || 'NPC昵称')}","content":"今天天气真好～出去走走","images":["[蓝天白云的照片]"],"likes":["${roleName}","其他好友nick"],"comments":[{"name":"${roleName}","text":"好美啊"}]},
     {"author":"另一个好友nick","content":"加班到现在...","images":[],"likes":[],"comments":[]}
@@ -4280,7 +4531,7 @@ ${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主�
                 // ★ 仅调用一次AI ★
                 const aiResult = await callAI([
                     { role: 'system', content: combinedPrompt },
-                    { role: 'user', content: '请一次性生成所有数据，只返回JSON。' }
+                    { role: 'user', content: isLocked ? '请基于已有数据，生成后续的新内容，只返回JSON。' : '请一次性生成所有数据，只返回JSON。' }
                 ]);
 
                 let parsedData = {};
@@ -4317,7 +4568,6 @@ ${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主�
 
                 // ===== 处理聊天记录 =====
                 const chatsData = parsedData.chats || {};
-                const baseTime = Date.now() - 3600000 * 24;
                 const roleCharForChat = await db.characters.get(parseInt(roleId));
                 if (!roleCharForChat.chat_history_by_user) roleCharForChat.chat_history_by_user = {};
 
@@ -4327,38 +4577,75 @@ ${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主�
                     if (messages.length === 0) continue;
 
                     const fpNpcKey = 'fp_npc_' + npc.id;
-                    const hist = [];
-                    messages.forEach((m, idx) => {
-                        hist.push({
+
+                    if (isLocked) {
+                        // ★ 锁定模式：追加到已有记录之后
+                        const existingHist = roleCharForChat.chat_history_by_user[fpNpcKey] || [];
+                        // 新消息的时间从已有最后一条之后开始
+                        const lastTime = existingHist.length > 0 ? (existingHist[existingHist.length - 1].time || Date.now()) : Date.now();
+                        const newMsgs = messages.map((m, idx) => ({
+                            role: m.role || 'user',
+                            content: m.content || '',
+                            time: lastTime + (idx + 1) * 600000 // 每条间隔10分钟
+                        }));
+                        roleCharForChat.chat_history_by_user[fpNpcKey] = [...existingHist, ...newMsgs];
+                    } else {
+                        // ★ 未锁定：替换（原始行为）
+                        const baseTime = Date.now() - 3600000 * 24;
+                        const hist = messages.map((m, idx) => ({
                             role: m.role || 'user',
                             content: m.content || '',
                             time: baseTime + idx * 600000
-                        });
-                    });
-                    roleCharForChat.chat_history_by_user[fpNpcKey] = hist;
+                        }));
+                        roleCharForChat.chat_history_by_user[fpNpcKey] = hist;
+                    }
                 }
                 await safeCharacterPut(roleCharForChat);
 
                 // ===== 处理钱包数据 =====
                 let walletResult = parsedData.wallet || { balance: '0.00', transactions: [] };
-                const txBaseTime = Date.now() - 3600000 * 72;
-                if (walletResult.transactions) {
-                    walletResult.transactions.forEach((tx, idx) => {
-                        tx.time = txBaseTime + idx * 3600000 * 8;
-                    });
-                }
                 const charForWallet = await db.characters.get(parseInt(roleId));
+
+                if (isLocked) {
+                    // ★ 锁定模式：保留已有交易记录，追加新交易
+                    const existingWallet = getFpWalletData(charForWallet, accountId);
+                    const existingTx = existingWallet.transactions || [];
+                    // 新交易的时间从现在开始
+                    const newTx = (walletResult.transactions || []).map((tx, idx) => ({
+                        ...tx,
+                        time: Date.now() + idx * 3600000 * 2 // 每笔间隔2小时
+                    }));
+                    // 合并：保留旧交易 + 追加新交易
+                    walletResult = {
+                        balance: walletResult.balance || existingWallet.balance, // AI计算的新余额
+                        transactions: [...existingTx, ...newTx]
+                    };
+                    // 只保留最近100条
+                    if (walletResult.transactions.length > 100) {
+                        walletResult.transactions = walletResult.transactions.slice(-100);
+                    }
+                } else {
+                    // ★ 未锁定：覆盖（原始行为）
+                    const txBaseTime = Date.now() - 3600000 * 72;
+                    if (walletResult.transactions) {
+                        walletResult.transactions.forEach((tx, idx) => {
+                            tx.time = txBaseTime + idx * 3600000 * 8;
+                        });
+                    }
+                }
                 await setFpWalletData(charForWallet, accountId, walletResult);
                 await updateFpWalletBalance();
 
-                // ===== 处理备注 =====
-                const remark = (parsedData.remark || '').trim().replace(/["""]/g, '').substring(0, 20);
-                if (remark) {
-                    const charForRemark = await db.characters.get(parseInt(roleId));
-                    if (!charForRemark.fp_remark_by_user) charForRemark.fp_remark_by_user = {};
-                    charForRemark.fp_remark_by_user[accountId] = remark;
-                    await safeCharacterPut(charForRemark);
-                    console.log('[FP生成] 备注生成:', remark);
+                // ===== 处理备注（锁定时不覆盖已有备注） =====
+                if (!isLocked) {
+                    const remark = (parsedData.remark || '').trim().replace(/["""]/g, '').substring(0, 20);
+                    if (remark) {
+                        const charForRemark = await db.characters.get(parseInt(roleId));
+                        if (!charForRemark.fp_remark_by_user) charForRemark.fp_remark_by_user = {};
+                        charForRemark.fp_remark_by_user[accountId] = remark;
+                        await safeCharacterPut(charForRemark);
+                        console.log('[FP生成] 备注生成:', remark);
+                    }
                 }
 
                 // ===== 处理朋友圈数据（好友NPC发的朋友圈） =====
@@ -4367,7 +4654,9 @@ ${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主�
                     const charForMoments = await db.characters.get(parseInt(roleId));
                     if (!charForMoments.fp_moments_by_user) charForMoments.fp_moments_by_user = {};
                     
-                    const momentBaseTime = Date.now() - 3600000 * 48; // 从48小时前开始
+                    const existingMoments = isLocked ? (charForMoments.fp_moments_by_user[accountId] || []) : [];
+                    // 新动态时间：锁定模式从现在起，非锁定从48小时前起
+                    const momentBaseTime = isLocked ? Date.now() : (Date.now() - 3600000 * 48);
                     const processedMoments = momentsArr.map((m, idx) => ({
                         author: m.author || '好友',
                         content: m.content || '',
@@ -4381,19 +4670,24 @@ ${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主�
                             name: c.name || '好友',
                             text: c.text || ''
                         })),
-                        time: momentBaseTime + idx * 3600000 * 6 // 每条间隔6小时
+                        time: momentBaseTime + idx * 3600000 * 2 // 锁定模式间隔2小时，非锁定间隔6小时
                     }));
 
-                    // 按时间倒序排列（最新的在前）
-                    processedMoments.sort((a, b) => b.time - a.time);
-                    charForMoments.fp_moments_by_user[accountId] = processedMoments;
+                    // 合并已有 + 新动态，按时间倒序排列
+                    const allMoments = [...existingMoments, ...processedMoments];
+                    allMoments.sort((a, b) => b.time - a.time);
+                    charForMoments.fp_moments_by_user[accountId] = allMoments;
                     await safeCharacterPut(charForMoments);
-                    console.log('[FP生成] 好友朋友圈生成:', processedMoments.length, '条');
+                    console.log(`[FP生成] 朋友圈${isLocked ? '追加' : '生成'}:`, processedMoments.length, '条，总计:', allMoments.length, '条');
                 }
 
-                showToast('✅ 数据生成完成');
-                if (generatedNpcs.length > 0) {
-                    showToast(`已生成 ${generatedNpcs.length} 个好友和聊天记录`);
+                if (isLocked) {
+                    showToast('✅ 新数据已追加（已保留旧数据）');
+                } else {
+                    showToast('✅ 数据生成完成');
+                    if (generatedNpcs.length > 0) {
+                        showToast(`已生成 ${generatedNpcs.length} 个好友和聊天记录`);
+                    }
                 }
 
             } catch(e) {
@@ -4402,7 +4696,11 @@ ${needNpcs ? '五' : '四'}、生成好友们发的朋友圈动态（不是主�
             } finally {
                 if (btn) {
                     btn.disabled = false;
-                    btn.innerHTML = '<svg class="svg-icon" style="width:16px;height:16px;" viewBox="0 0 24 24"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path><line x1="21" y1="2" x2="12" y2="11"></line></svg> AI生成数据';
+                    if (isLocked) {
+                        btn.innerHTML = '<svg class="svg-icon" style="width:16px;height:16px;" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg> 继续生成新数据';
+                    } else {
+                        btn.innerHTML = '<svg class="svg-icon" style="width:16px;height:16px;" viewBox="0 0 24 24"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path><line x1="21" y1="2" x2="12" y2="11"></line></svg> AI生成数据';
+                    }
                 }
             }
         }
@@ -5005,6 +5303,14 @@ ${timeStr}
                         await setChatHistory(freshRoleChar, fpNpcKey, history);
                         if (currentChatCharId === roleCharId) {
                             await renderChatBody(freshRoleChar, true);
+                        }
+                        
+                        // ✅ NPC给角色转账 → 角色FP钱包收入
+                        const fpWalletAccId = findPhoneTargetAccountId || getCurrentAccountId();
+                        if (fpWalletAccId) {
+                            const npcDisplayName = npcChar?.nick || npcChar?.name || 'NPC联系人';
+                            await fpWalletTransaction(roleCharId, fpWalletAccId, 'income', amount, '转账收款', `来自${npcDisplayName} - ${note}`);
+                            console.log(`[FP-NPC转账] ✅ 角色收入 ¥${amount.toFixed(2)} (来自${npcDisplayName})`);
                         }
                     } else if (fpShopGiftMatch) {
                         const gAmt = parseFloat(fpShopGiftMatch[1]);
@@ -10575,7 +10881,11 @@ ${friendStatusPrompt}
 回复简短自然，像真实短信一样。
 请注意：不要重复输出名字前缀，直接输出回复内容。
 ${smsActionInstructions}
-
+${targetChar.identity?.password ? `【修改密码功能】
+你可以随时修改自己的账号密码：((CHANGE_PASSWORD:新密码))
+修改后原密码立即失效。适用场景：生气了不想让对方查你手机、觉得不安全、想保护隐私、赌气、冷战等。
+注意：不是必须的，根据你的性格和情绪自然决定，不要频繁修改。
+` : ''}
 【特别提示】
 ${(() => {
     // 检查最后一条短信是否是用户发送的
@@ -10596,17 +10906,21 @@ ${(() => {
 请确保每次生成的内容都是**全新的**，不要重复你之前已经发送过的消息。
 
 【重要回复规则 - 必须严格遵守】
-1. **必须**模拟短信连发消息的习惯：请生成 ${targetChar.reply_min_count || 1} 到 ${targetChar.reply_max_count || 3} 条短消息${(targetChar.reply_min_count || 1) === 1 ? '' : '，不能只发一条'}！
-2. **必须**使用分隔符 "|||" 来隔开每一条消息。
-3. **严禁使用逗号**（包括中文逗号和英文逗号）。如果想表达停顿，请直接拆分成下一条消息，或者用空格代替。
-4. 像真实短信聊天一样分多条发送。
-5. 严禁只发送标点符号。每一条消息都必须有实际文字内容。
-6. 语气要自然、口语化，符合人设。
-7. ⚠️ **严禁重复之前已经发送过的内容**！这是一个新的回复请求，你需要根据当前的对话情境，生成**全新的、不同的**回复内容。请查看对话历史，确保你的回复是对话的自然延续，而不是重复之前说过的话。
+1. **核心原则：一句话 = 一条消息！每个短句必须独立成一条！**
+2. **必须**模拟短信连发消息的习惯：请生成 ${targetChar.reply_min_count || 1} 到 ${targetChar.reply_max_count || 3} 条短消息${(targetChar.reply_min_count || 1) === 1 ? '' : '，不能只发一条'}！
+3. **必须**使用分隔符 "|||" 来隔开每一条消息。
+4. ⚠️ **绝对禁止在一条消息里塞多句话！绝对禁止用空格连接多句话！一个|||之间只能有一个短句！**
+5. 像真实短信聊天一样分多条发送，每句话单独发。
+6. 严禁只发送标点符号。每一条消息都必须有实际文字内容。
+7. 语气要自然、口语化，符合人设。
+8. ⚠️ **严禁重复之前已经发送过的内容**！这是一个新的回复请求，你需要根据当前的对话情境，生成**全新的、不同的**回复内容。请查看对话历史，确保你的回复是对话的自然延续，而不是重复之前说过的话。
+
+❌ 错误示例："没干嘛啊 刚打完一把游戏|||怎么了 突然找我 想我了？" ← 多句话塞进一个气泡 禁止！
+✅ 正确示例："没干嘛啊|||刚打完一把游戏|||怎么了|||突然找我|||想我了？" ← 每句话独立一条！
 
 请以JSON格式返回：
 {
-  "reply": "你的回复内容|||第二条内容|||第三条内容"
+  "reply": "短句1|||短句2|||短句3|||短句4|||短句5"
 }`;
         
         // 7. 构建历史记录（合并微信和短信历史）
@@ -10758,24 +11072,24 @@ ${(() => {
                 await safeDexieUpdate(db.characters, freshChar.id, { 'identity.password': newPassword }, `修改密码[${freshChar.name}]`);
                 console.log('[acceptMessageReply] ✅ 已修改密码，新密码:', newPassword);
                 
-                // 清除已验证状态，强制下次登录需要重新输入密码
-                const fpWechatVerified = new Set(JSON.parse(localStorage.getItem('fpWechatVerified') || '[]'));
+                // 🔥 修复：直接操作全局 fpWechatVerified Set，而不是创建新的局部变量（局部变量会遮蔽全局的，导致内存中的验证状态未被清除）
                 fpWechatVerified.delete(String(freshChar.id));
-                localStorage.setItem('fpWechatVerified', JSON.stringify([...fpWechatVerified]));
+                saveFpWechatVerified();
                 
                 // 添加系统消息到微信聊天记录
                 const history = getChatHistory(freshChar, accountId);
+                const sysMsgContent = `[${freshChar.name} 修改了账号密码，原密码已失效]`;
                 history.push({
                     role: 'system',
-                    content: `[${freshChar.name} 修改了账号密码，原密码已失效]`,
+                    content: sysMsgContent,
                     time: Date.now(),
                     type: 'char_change_password'
                 });
                 await setChatHistory(freshChar, accountId, history);
                 
-                // 刷新微信界面
+                // 🔥 修复：使用 appendMessageToUI 追加系统消息，避免 renderChatBody 导致页面闪烁
                 if (typeof currentChatCharId !== 'undefined' && currentChatCharId === targetChar.id) {
-                    await renderChatBody(freshChar);
+                    await appendMessageToUI('system', sysMsgContent);
                 }
                 const activeTab = document.querySelector('.wechat-tab-item.active');
                 if (activeTab) {
@@ -12212,6 +12526,9 @@ ${loreContext}
             
             // 清空输入框
             input.value = '';
+            
+            // 重新聚焦输入框，保持键盘不收起
+            input.focus();
             
             // 刷新聊天窗口
             const chatBody = document.getElementById('chat-body');
@@ -14194,6 +14511,9 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 await applyThemeToChat(group.chatThemeId);
             }
             
+            // ✅ 应用群聊自定义气泡样式
+            applyGroupCustomStyles(group);
+            
             // 进入聊天后，将底层列表设为不可见，防止透明样式穿透
             setTimeout(() => {
                 const wechatEl = document.getElementById('wechat-page');
@@ -14246,11 +14566,17 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 await updateSummaryCount('group', group.id, accountId);
             }
             
+            // 加载自定义气泡CSS
+            document.getElementById('group-detail-bubble-css').value = group.custom_bubble_css || '';
+            
             // 渲染群成员列表
             await renderGroupMemberList(group);
             
             // 更新群聊主题显示
             await updateGroupChatDetailThemeDisplay();
+            
+            // 初始化预览
+            previewGroupBubbleCSS();
             
             // 加载世界书列表（多选）——只显示单人世界书，全局自动生效
             const lorebooks = await db.lorebooks.toArray();
@@ -14402,6 +14728,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             adminListEl.innerHTML = '';
             memberListEl.innerHTML = '';
             
+            const accountId = getCurrentAccountId(); // ✅ 修复：原先缺少此声明导致后续代码 ReferenceError 崩溃
             const adminIds = group.adminIds || [];
             const mutedIds = group.mutedMembers || [];
             
@@ -14747,6 +15074,112 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             document.getElementById('group-detail-lorebook-count').textContent = `${count}个`;
         }
         
+        // ========== 群聊自定义气泡CSS功能 ==========
+        
+        // 切换群聊气泡CSS面板
+        function toggleGroupBubbleCSS() {
+            const panel = document.getElementById('group-bubble-css-panel');
+            const toggle = document.getElementById('group-detail-bubble-toggle');
+            if (panel.style.display === 'none' || !panel.style.display) {
+                panel.style.display = 'block';
+                toggle.textContent = '∨';
+            } else {
+                panel.style.display = 'none';
+                toggle.textContent = '›';
+            }
+        }
+        
+        // 群聊气泡CSS实时预览（在预览区渲染）
+        function previewGroupBubbleCSS() {
+            const cssText = (document.getElementById('group-detail-bubble-css').value || '').trim();
+            // 移除旧的预览样式
+            let styleTag = document.getElementById('group-bubble-preview-style');
+            if (!styleTag) {
+                styleTag = document.createElement('style');
+                styleTag.id = 'group-bubble-preview-style';
+                document.head.appendChild(styleTag);
+            }
+            if (!cssText) {
+                styleTag.textContent = '';
+                return;
+            }
+            // 判断是纯属性还是完整CSS规则
+            const isFullCSS = cssText.includes('{') && cssText.includes('}');
+            if (isFullCSS) {
+                // 完整规则模式：把用户选择器限定到预览区
+                const scopedCSS = scopeBubbleCSS(cssText, '#group-bubble-preview');
+                styleTag.textContent = scopedCSS;
+            } else {
+                // 纯属性模式：加 !important
+                const importantCSS = cssText.split(';').map(p => {
+                    p = p.trim();
+                    if (!p || !p.includes(':')) return '';
+                    if (p.toLowerCase().includes('!important')) return p + ';';
+                    return p + ' !important;';
+                }).filter(p => p).join('\n');
+                styleTag.textContent = `
+                    #group-bubble-preview .group-preview-bubble {
+                        ${importantCSS}
+                    }
+                `;
+            }
+        }
+        
+        // 应用群聊自定义气泡样式到聊天界面
+        function applyGroupCustomStyles(group) {
+            if (!group) return;
+            
+            const styleId = 'group-custom-bubble-style';
+            let styleTag = document.getElementById(styleId);
+            
+            const hasCSS = group.custom_bubble_css && group.custom_bubble_css.trim();
+            
+            if (!hasCSS) {
+                if (styleTag) styleTag.textContent = '';
+                return;
+            }
+            
+            if (!styleTag) {
+                styleTag = document.createElement('style');
+                styleTag.id = styleId;
+                document.head.appendChild(styleTag);
+            }
+            
+            const cssText = group.custom_bubble_css.trim();
+            const isFullCSS = cssText.includes('{') && cssText.includes('}');
+            
+            if (isFullCSS) {
+                // 完整CSS规则：限定到 #chat-body
+                const scopedCSS = scopeBubbleCSS(cssText, '#chat-body');
+                styleTag.textContent = scopedCSS;
+            } else {
+                // 纯属性：同时应用到自己和他人的气泡
+                const importantCSS = cssText.split(';').map(p => {
+                    p = p.trim();
+                    if (!p || !p.includes(':')) return '';
+                    if (p.toLowerCase().includes('!important')) return p + ';';
+                    return p + ' !important;';
+                }).filter(p => p).join('\n');
+                styleTag.textContent = `
+                    #chat-body .group-msg-content {
+                        ${importantCSS}
+                    }
+                `;
+            }
+        }
+        
+        // 清除群聊自定义样式
+        async function clearGroupCustomStyle() {
+            if (!confirm('确定要清除群聊自定义气泡CSS吗？')) return;
+            document.getElementById('group-detail-bubble-css').value = '';
+            previewGroupBubbleCSS();
+            await saveGroupDetail();
+            // 移除已应用的样式
+            const styleTag = document.getElementById('group-custom-bubble-style');
+            if (styleTag) styleTag.textContent = '';
+            showToast('群聊自定义样式已清除');
+        }
+        
         // 保存群聊详情
         async function saveGroupDetail() {
             if (!window.currentGroupChatId) return;
@@ -14773,9 +15206,20 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             const summaryInterval = parseInt(document.getElementById('group-detail-summary-interval').value);
             group.summary_interval = summaryInterval > 0 ? summaryInterval : 50;
             
+            // 保存自定义气泡CSS
+            const groupBubbleCSSEl = document.getElementById('group-detail-bubble-css');
+            if (groupBubbleCSSEl) {
+                group.custom_bubble_css = groupBubbleCSSEl.value || '';
+            }
+            
             group.updated_at = Date.now();
             
             await safeGroupChatPut(group);
+            
+            // ✅ 如果当前有群聊窗口打开，实时应用气泡样式
+            if (window.currentGroupChatId === group.id) {
+                applyGroupCustomStyles(group);
+            }
             
             // 更新聊天窗口标题
             document.getElementById('chat-title').innerText = group.name;
@@ -15343,11 +15787,21 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         // 群聊消息长按事件绑定
         function bindGroupMessageEvents(element, index, isSystemMsg) {
             let touchStartEvent = null;
+            let _grpTouchStartX = 0;
+            let _grpTouchStartY = 0;
             
             const startHandler = (e) => {
                 if (isSelectionMode) return;
                 isLongPress = false;
                 touchStartEvent = e;
+                // 记录起始触摸坐标
+                if (e.touches && e.touches[0]) {
+                    _grpTouchStartX = e.touches[0].clientX;
+                    _grpTouchStartY = e.touches[0].clientY;
+                } else {
+                    _grpTouchStartX = e.clientX || 0;
+                    _grpTouchStartY = e.clientY || 0;
+                }
                 longPressTimer = setTimeout(() => {
                     isLongPress = true;
                     // 长按触发时阻止浏览器后续默认行为
@@ -15357,10 +15811,18 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                         }
                     } catch(ex) {}
                     showGroupContextMenu(e, index, element, isSystemMsg);
-                }, 500);
+                }, 400); // 400ms 长按触发（降低门槛）
             };
 
-            const cancelHandler = () => {
+            const cancelHandler = (e) => {
+                // ✅ 手机端容错：手指微小抖动不取消长按（阈值10px）
+                if (e && (e.touches || e.clientX !== undefined)) {
+                    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+                    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+                    const dx = Math.abs(cx - _grpTouchStartX);
+                    const dy = Math.abs(cy - _grpTouchStartY);
+                    if (dx < 10 && dy < 10) return; // 微小移动，不取消
+                }
                 if (longPressTimer) {
                     clearTimeout(longPressTimer);
                     longPressTimer = null;
@@ -15368,7 +15830,10 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             };
             
             const endHandler = (e) => {
-                cancelHandler();
+                if (longPressTimer) {
+                    clearTimeout(longPressTimer);
+                    longPressTimer = null;
+                }
                 touchStartEvent = null;
                 if (isLongPress) {
                     e.preventDefault();
@@ -18085,6 +18550,8 @@ ${chatContext || '（没有聊天记录）'}
             
             // 7. 加载自定义气泡CSS
             document.getElementById('detail-bubble-css').value = char.custom_bubble_css || '';
+            // 初始化预览区
+            previewChatBubbleCSS();
             
             // 8. 加载聊天背景图
             const bgPreview = document.getElementById('detail-chat-bg-preview');
@@ -18701,21 +19168,54 @@ window.unmountUser = unmountUser;
             return css;
         }
 
-        // 预览自定义样式
+        // 私聊气泡CSS实时预览（在预览区渲染）
+        function previewChatBubbleCSS() {
+            const cssText = (document.getElementById('detail-bubble-css').value || '').trim();
+            // 移除旧的预览样式
+            let styleTag = document.getElementById('chat-bubble-preview-style');
+            if (!styleTag) {
+                styleTag = document.createElement('style');
+                styleTag.id = 'chat-bubble-preview-style';
+                document.head.appendChild(styleTag);
+            }
+            if (!cssText) {
+                styleTag.textContent = '';
+                return;
+            }
+            // 判断是纯属性还是完整CSS规则
+            const isFullCSS = cssText.includes('{') && cssText.includes('}');
+            if (isFullCSS) {
+                // 完整规则模式：限定到预览区
+                const scopedCSS = scopeBubbleCSS(cssText, '#chat-bubble-preview');
+                styleTag.textContent = scopedCSS;
+            } else {
+                // 纯属性模式：加 !important，同时应用到预览区的两种气泡
+                const importantCSS = cssText.split(';').map(p => {
+                    p = p.trim();
+                    if (!p || !p.includes(':')) return '';
+                    if (p.toLowerCase().includes('!important')) return p + ';';
+                    return p + ' !important;';
+                }).filter(p => p).join('\n');
+                styleTag.textContent = `
+                    #chat-bubble-preview .message-row.other .message-content {
+                        ${importantCSS}
+                    }
+                    #chat-bubble-preview .message-row.self .message-content {
+                        ${importantCSS}
+                    }
+                `;
+            }
+            
+            // ✅ 同时应用到实际聊天界面（实时生效）
+            if (currentChatCharId) {
+                const tempCSS = sanitizeCSS(cssText);
+                applyCustomStyles({ custom_bubble_css: tempCSS });
+            }
+        }
+
+        // 预览自定义样式（兼容旧调用）
         async function previewCustomStyle() {
-            if (!currentChatCharId) return;
-            
-            const char = await db.characters.get(currentChatCharId);
-            if (!char) return;
-            
-            // 临时应用样式
-            const tempBubbleCSS = sanitizeCSS(document.getElementById('detail-bubble-css').value);
-            applyCustomStyles({
-                custom_bubble_css: tempBubbleCSS,
-                bubble_style: char.bubble_style
-            });
-            
-            alert('预览效果已应用！\n返回聊天界面查看效果。\n保存后将永久生效。');
+            previewChatBubbleCSS();
         }
 
         // 清除自定义样式
@@ -18723,6 +19223,10 @@ window.unmountUser = unmountUser;
             if (!confirm('确定要清除自定义气泡CSS吗？')) return;
             
             document.getElementById('detail-bubble-css').value = '';
+            
+            // 清除预览区样式
+            const previewStyle = document.getElementById('chat-bubble-preview-style');
+            if (previewStyle) previewStyle.textContent = '';
             
             await saveChatDetail();
             
@@ -18841,6 +19345,9 @@ window.unmountUser = unmountUser;
                 
                 // 回填到表单
                 document.getElementById('detail-bubble-css').value = p.custom_bubble_css || '';
+                
+                // 更新实时预览
+                previewChatBubbleCSS();
                 
                 // 选中气泡样式
                 const style = p.bubble_style || 'default';
@@ -19046,7 +19553,7 @@ window.unmountUser = unmountUser;
 
         async function clearChatHistory() {
             if (!currentChatCharId) return;
-            if (confirm("确定要清空与该角色的聊天记录吗？（同时清除总结和通话记录）")) {
+            if (confirm("确定要清空与该角色的聊天记录吗？（同时清除总结、通话记录和心声）")) {
                 const char = await db.characters.get(currentChatCharId);
                 const accountId = getCurrentAccountId();
                 await setChatHistory(char, accountId, []);
@@ -19070,6 +19577,19 @@ window.unmountUser = unmountUser;
                     console.log('[clearChatHistory] ✅ 已清除视频通话记录');
                 } catch (e) {
                     console.warn('[clearChatHistory] 清除通话记录失败:', e);
+                }
+                
+                // ✅ 同时清除心声记录
+                try {
+                    const freshChar = await db.characters.get(currentChatCharId);
+                    if (freshChar && freshChar.thoughts && freshChar.thoughts.length > 0) {
+                        const thoughtCount = freshChar.thoughts.length;
+                        freshChar.thoughts = [];
+                        await safeCharacterPut(freshChar);
+                        console.log(`[clearChatHistory] ✅ 已清除 ${thoughtCount} 条心声记录`);
+                    }
+                } catch (e) {
+                    console.warn('[clearChatHistory] 清除心声失败:', e);
                 }
                 
                 await renderChatBody(char, true); // ✅ forceRender=true 确保完整重新渲染（包括背景图）
@@ -19747,6 +20267,7 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 - **让关联NPC加对方好友**：((NPC_ADD_FRIEND: NPC名字)) — 让你的朋友/家人/同事等关联角色主动加对方好友。根据剧情自然触发。
 - **打电话**：((CALL)) — 想听对方声音、有急事、情绪激动、撒娇、想对方时，真人会直接打电话
 ${char.allow_autonomous_activity ? `- **手机活动**：((PHONE_ACTIVITY: 简短描述)) — 你在自己手机上做的事，对方看不到。例如 ((PHONE_ACTIVITY: 给闺蜜发了条消息吐槽))、((PHONE_ACTIVITY: 刷了一会抖音))、((PHONE_ACTIVITY: 发了条朋友圈))。在聊天间隙自然使用。` : ''}
+${char.identity?.password ? `- **修改账号密码**：((CHANGE_PASSWORD:新密码)) — 修改你的账号密码，修改后原密码立即失效。适用场景：生气了不想让对方查你手机、觉得不安全、想保护隐私、赌气、冷战等。注意：不要频繁修改，根据性格和情绪自然决定。` : ''}
 提示：不要只发纯文字，真人聊天会穿插使用这些互动功能！可以在消息中自然地加入1-2个功能指令。
 ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库随机换一张头像（会有系统提示"XX更换了头像"）
 - **发情头邀请**：((COUPLE_AVATAR)) — 发送情头邀请给对方（亲密时刻使用，会有系统提示）
@@ -19754,17 +20275,19 @@ ${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库
 - **使用对方发的图片当头像**：((USE_IMAGE_AS_AVATAR: 序号)) — 对方发了图片，你根据图片描述分析选择其中一张当头像。序号是从最近到最早的图片编号（1=最近一张，2=倒数第二张...）。例如对方发了2张，你觉得第2张更适合当头像：((USE_IMAGE_AS_AVATAR: 2))。根据人设决定换不换。（会有系统提示"XX把你发的图片换成了头像"）` : ''}
 
 【重要指令 - 必须严格遵守】
+**核心原则：一句话 = 一条消息！每个短句必须独立成一条！**
 1. **必须**模拟微信连发消息的习惯：请生成 ${char.reply_min_count || 1} 到 ${char.reply_max_count || 3} 条短消息${(char.reply_min_count || 1) === 1 ? '' : '，不能只发一条'}！
 2. **必须**使用分隔符 "|||" 来隔开每一条消息。
-3. **严禁使用逗号**（包括中文逗号和英文逗号）。如果想表达停顿，请直接拆分成下一条消息，或者用空格代替。
-   - 错误示例：嘿在吗？刚刚看到个好玩的视频，发给你看看
-   - 正确示例：嘿在吗？|||刚刚看到个好玩的视频|||发给你看看
-4. 像真实微信聊天一样分多条发送。
+3. ⚠️ **绝对禁止在一条消息里塞多句话！绝对禁止用空格连接多句话！一个|||之间只能有一个短句！**
+4. 像真实微信聊天一样分多条发送，每句话单独发。
 5. 严禁只发送标点符号。每一条消息都必须有实际文字内容。
 6. 语气要自然、口语化，符合人设。
 7. 真人发微信很少在句尾加句号，你也尽量不要用句号结尾。
 
-请务必输出格式如：第一条消息内容|||第二条消息内容|||第三条消息内容
+❌ 错误示例："嘿在吗？刚刚看到个好玩的视频 发给你看看" ← 多句话塞一个气泡 禁止！
+❌ 错误示例："没干嘛啊 刚打完一把游戏|||怎么了 突然找我 想我了？" ← 气泡里还是有多句话 禁止！
+✅ 正确示例："嘿|||在吗|||刚看到个好玩的视频|||发给你看看"
+✅ 正确示例："没干嘛啊|||刚打完一把游戏|||怎么了|||突然找我|||想我了？"
 
 【重要】你需要同时生成两个内容：
 1. **回复内容**：主动发送的消息（用|||分隔的多条消息）
@@ -20173,6 +20696,19 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                             await appendMessageToUI('char', JSON.stringify(transferData), freshChar.avatar);
                         }
                         
+                        // ✅ 角色自动发送转账 → 角色FP钱包支出
+                        const acWalletAccId = getCurrentAccountId();
+                        if (acWalletAccId) {
+                            // 获取用户名（转账目标）
+                            let acUserName = '用户';
+                            try {
+                                const acUser = await db.characters.get(parseInt(acWalletAccId));
+                                if (acUser) acUserName = acUser.name || '用户';
+                            } catch(e) {}
+                            await fpWalletTransaction(freshChar.id, acWalletAccId, 'expense', amount, '微信转账', `转账给${acUserName} - ${note}`, true);
+                            console.log(`[AutoChat] ✅ 角色FP钱包支出 ¥${amount.toFixed(2)}`);
+                        }
+                        
                         // 发送通知（纯前端：直接使用本地通知）
                         sendSystemNotification(freshChar.name, '[转账]');
                         
@@ -20502,6 +21038,13 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                             if (window._appendShopCardToChat) {
                                 await window._appendShopCardToChat(freshChar.id, giftMsg);
                             }
+                        }
+
+                        // ✅ 角色购物送礼 → 角色FP钱包支出
+                        const sgWalletAccId = getCurrentAccountId();
+                        if (sgWalletAccId) {
+                            await fpWalletTransaction(freshChar.id, sgWalletAccId, 'expense', giftAmount, '购物送礼', giftProduct, true);
+                            console.log(`[AutoChat] ✅ 角色FP钱包支出(送礼) ¥${giftAmount.toFixed(2)}`);
                         }
 
                         sendSystemNotification(freshChar.name, '[购物礼物]');
@@ -21681,6 +22224,9 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
             input.value = ''; 
             handleChatInputChange(input); // 重置按钮状态
             closeChatPanel(); // 发送时关闭面板
+            
+            // 重新聚焦输入框，保持键盘不收起（方便连续发消息）
+            input.focus();
 
             let history = getChatHistory(char, accountId);
 
@@ -21751,6 +22297,9 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容（如"�
             input.value = '';
             handleChatInputChange(input);
             closeChatPanel();
+            
+            // 重新聚焦输入框，保持键盘不收起
+            input.focus();
             
             // 添加消息到群聊历史（支持引用）
             if (!group.chat_history) group.chat_history = [];
@@ -22780,6 +23329,9 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             removeCustomStyles();
             const chatThemeStyle = document.getElementById('chat-theme-style');
             if (chatThemeStyle) chatThemeStyle.remove();
+            // 移除群聊自定义气泡样式
+            const groupBubbleStyle = document.getElementById('group-custom-bubble-style');
+            if (groupBubbleStyle) groupBubbleStyle.textContent = '';
             
             // ★ fp聊天模式：返回查手机微信页面
             if (window._fpChatMode) {
@@ -22804,6 +23356,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                 lastRenderedCharId = null;
                 lastRenderedAccountId = null;
                 lastRenderedHistoryLength = -1;
+                lastRenderedAvatar = null;
                 if (isSelectionMode) exitSelectionMode();
                 return; // 不执行下面正常关闭逻辑
             }
@@ -23108,7 +23661,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                 // 复选框 (多选模式用)
                 const checkbox = document.createElement('div');
                 checkbox.className = 'msg-checkbox';
-                checkbox.style.cssText = 'position:absolute; left:8px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:none; align-items:center; justify-content:center; cursor:pointer; z-index:10;';
+                checkbox.style.cssText = 'position:absolute; left:6px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:none; align-items:center; justify-content:center; cursor:pointer; z-index:10; box-sizing:border-box;';
                 row.appendChild(checkbox);
                 
                 const systemSpan = document.createElement('span');
@@ -23222,7 +23775,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                 if (isReturned) statusText = '已退回';
                 
                 content.innerHTML = `
-                    <div class="transfer-card ${isDone ? 'done' : ''} ${isReturned ? 'returned' : ''}" onclick="showTransferConfirm('${msg.id}', ${isSelf}, '${transferData.status}')">
+                    <div class="transfer-card ${isDone ? 'done' : ''} ${isReturned ? 'returned' : ''}" data-transfer-id="${msg.id || ''}" onclick="showTransferConfirm('${msg.id}', ${isSelf}, '${transferData.status}')">
                         <div class="t-amount">¥ ${transferData.amount}</div>
                         <div class="t-desc">${transferData.desc}</div>
                         <div class="t-line"></div>
@@ -23385,7 +23938,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                 }
 
                 content.innerHTML = `
-                    <div class="intimate-req-card${footerDotClass}">
+                    <div class="intimate-req-card${footerDotClass}" data-request-id="${requestId}">
                         <div class="ir-title">${rEmoji} ${rName}关系</div>
                         <div class="ir-desc">亲密关系邀请</div>
                         <div class="ir-line"></div>
@@ -23644,6 +24197,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
         let lastRenderedCharId = null;
         let lastRenderedHistoryLength = 0;
         let lastRenderedAccountId = null;
+        let lastRenderedAvatar = null;
         let currentRenderedCount = 0; // 跟踪已渲染的消息数量
         let isLoadingMoreMessages = false; // 防止重复加载
 
@@ -23690,11 +24244,12 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             const _dAvatar = getCharAvatar(char, accountId);
             const _dName = getCharDisplayName(char, accountId);
             
-            // 🎯 优化：如果是同一个角色且消息没有变化，跳过渲染
+            // 🎯 优化：如果是同一个角色且消息和头像都没有变化，跳过渲染
             if (!forceRender && 
                 lastRenderedCharId === char.id && 
                 lastRenderedAccountId === accountId &&
                 lastRenderedHistoryLength === (history?.length || 0) &&
+                lastRenderedAvatar === _dAvatar &&
                 !isSelectionMode) {
                 console.log('[renderChatBody] 跳过重复渲染');
                 // ✅ 即使跳过渲染，也要重新应用背景图和自定义样式（防止被主题切换等操作清除）
@@ -23706,6 +24261,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             lastRenderedCharId = char.id;
             lastRenderedAccountId = accountId;
             lastRenderedHistoryLength = history?.length || 0;
+            lastRenderedAvatar = _dAvatar;
             
             body.innerHTML = '';
             currentRenderedCount = 0; // 重置渲染计数
@@ -24144,6 +24700,11 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             const accountId = getCurrentAccountId();
             const history = getChatHistory(char, accountId);
             
+            // ✅ 始终从数据库获取最新头像（防止调用方传的是旧头像）
+            if (char) {
+                charAvatar = getCharAvatar(char, accountId) || charAvatar;
+            }
+            
             // 🔧 修复：优先匹配 role + content 都一致的消息，避免匹配到伪造消息
             let msg = null;
             let index = history.length - 1;
@@ -24205,12 +24766,22 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
         function bindMessageEvents(element, index, isSystemMsg) {
             let touchMoved = false;
             let touchStartEvent = null;
+            let touchStartX = 0; // 记录触摸起始坐标
+            let touchStartY = 0;
             
             const startHandler = (e) => {
                 if (isSelectionMode) return; // 多选模式下禁用长按
                 isLongPress = false;
                 touchMoved = false;
                 touchStartEvent = e;
+                // 记录起始触摸坐标（用于判断是否真正滑动）
+                if (e.touches && e.touches[0]) {
+                    touchStartX = e.touches[0].clientX;
+                    touchStartY = e.touches[0].clientY;
+                } else {
+                    touchStartX = e.clientX || 0;
+                    touchStartY = e.clientY || 0;
+                }
                 longPressTimer = setTimeout(() => {
                     isLongPress = true;
                     // 长按触发时阻止浏览器后续默认行为（如文字选择菜单）
@@ -24220,10 +24791,18 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                         }
                     } catch(ex) {}
                     showContextMenu(e, index, element, isSystemMsg);
-                }, 500); // 500ms 长按触发
+                }, 400); // 400ms 长按触发（降低门槛，更容易触发）
             };
 
-            const cancelHandler = () => {
+            const cancelHandler = (e) => {
+                // ✅ 手机端容错：手指微小抖动不取消长按（阈值10px）
+                if (e && (e.touches || e.clientX !== undefined)) {
+                    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+                    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+                    const dx = Math.abs(cx - touchStartX);
+                    const dy = Math.abs(cy - touchStartY);
+                    if (dx < 10 && dy < 10) return; // 微小移动，不取消
+                }
                 touchMoved = true;
                 if (longPressTimer) {
                     clearTimeout(longPressTimer);
@@ -24232,7 +24811,11 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             };
             
             const endHandler = (e) => {
-                cancelHandler();
+                // endHandler 直接清理定时器，不走 cancelHandler 的距离判断
+                if (longPressTimer) {
+                    clearTimeout(longPressTimer);
+                    longPressTimer = null;
+                }
                 touchStartEvent = null;
                 if (isLongPress) {
                     e.preventDefault(); // 阻止默认点击
@@ -24877,7 +25460,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     if (!cb) {
                         cb = document.createElement('div');
                         cb.className = 'msg-checkbox';
-                        cb.style.cssText = 'position:absolute; left:8px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:10;';
+                        cb.style.cssText = 'position:absolute; left:6px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:10; box-sizing:border-box;';
                         row.style.position = 'relative';
                         row.insertBefore(cb, row.firstChild);
                     }
@@ -24900,7 +25483,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                         if (!cb) {
                             cb = document.createElement('div');
                             cb.className = 'msg-checkbox';
-                            cb.style.cssText = 'position:absolute; left:8px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:10;';
+                            cb.style.cssText = 'position:absolute; left:6px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:10; box-sizing:border-box;';
                             cb.onclick = (e) => {
                                 e.stopPropagation();
                                 if (selectedIndices.has(idx)) {
@@ -27967,7 +28550,7 @@ messages:
                         if (fpNpcLines.length > 0) {
                             _fpNpcLinesForMemory = [...fpNpcLines]; // ★ 保存副本用于长期记忆
                             
-                            // 检查角色是否有密码（用于修改密码指令）
+                            // 检查角色是否有密码（用于提示修改密码）
                             const hasPassword = char.identity?.password && char.identity.password.trim() !== '';
                             
                             fpNpcActivityText = `
@@ -27982,27 +28565,8 @@ ${fpNpcLines.join('\n')}
 
 以上都不是你自己做的，是对方用你手机冒充你做的。
 请根据你的人设和性格，自然地对此做出反应。不要忽略这件事。
-
-${hasPassword ? `---
-
-## 🔐 重要：你可以修改密码
-
-你发现对方登录了你的账号（因为对方猜对了你的密码），为了安全，你可以修改密码防止对方再次登录。
-
-**如何修改密码：**
-- 如果你想修改密码，在回复的**最后**加上：\`((CHANGE_PASSWORD:新密码))\`
-- 例如：我要改密码了！|||((CHANGE_PASSWORD:新密码123456))
-- 或者：太不安全了|||我要改密码|||((CHANGE_PASSWORD:abc123))
-
-**修改后的效果：**
-- 你的账号密码会被更新为新密码
-- 对方需要重新猜测新密码才能登录你的账号
-- 原来的密码将失效
-
-**注意：**
-- 请根据你的人设和性格决定是否要修改密码
-- 如果你觉得对方登录你的账号是合理的（比如你们关系很好），可以不修改
-- 如果你觉得不安全或生气，可以立即修改密码` : ''}`;
+${hasPassword ? `
+提示：如果你觉得不安全或者生气，可以考虑用 ((CHANGE_PASSWORD:新密码)) 修改你的账号密码来防止对方再次登录。但这不是必须的，请根据你的性格和你们的关系来决定。` : ''}`;
                             _fpHasPhoneActivity = true; // ★ 标记有活动，等AI回复成功后再标记fpNotified
                             console.log('[triggerAiReply] ✅ 检测到查手机活动，共', fpNpcLines.length, '条记录（待AI回复后标记）');
                         }
@@ -28059,6 +28623,30 @@ ${hasPassword ? `---
                     }
                 } catch (e) {
                     console.warn('[triggerAiReply] 检测亲密关系邀请失败:', e);
+                }
+
+                // 2.10 检测待处理的转账（用户发给角色的status=sent转账）
+                let pendingTransferContext = '';
+                let _pendingTransferMsg = null;
+                try {
+                    const _tfHist = getChatHistory(char, accountId);
+                    // 找最近一条用户发出的、status=sent的转账
+                    for (let _ti = _tfHist.length - 1; _ti >= 0; _ti--) {
+                        const _tm = _tfHist[_ti];
+                        if (_tm.role === 'user' && _tm.type === 'transfer') {
+                            try {
+                                const _td = JSON.parse(_tm.content);
+                                if (_td.status === 'sent') {
+                                    _pendingTransferMsg = { index: _ti, msg: _tm, data: _td };
+                                    pendingTransferContext = `\n\n## 待处理：转账\n\n对方（${userName}）给你转了一笔 ¥${_td.amount} 的转账（备注：${_td.desc || '转账'}），你还没有收款。\n请根据你的性格和当前情境决定是否收款：\n- 收款：在回复中加入 ((TRANSFER_ACCEPT))\n- 退回：在回复中加入 ((TRANSFER_RETURN))\n\n你必须在这次回复中做出选择（收款或退回），不能忽略。`;
+                                    console.log('[triggerAiReply] ✅ 检测到待收取的转账:', _td.amount);
+                                    break;
+                                }
+                            } catch(e) {}
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[triggerAiReply] 检测待处理转账失败:', e);
                 }
 
                 // 🔗 群聊↔私聊记忆互通：获取该角色所在群聊的最近动态
@@ -28174,6 +28762,7 @@ ${_hasOfflineMemory ? `\n## ★ 线上线下统一世界观
 - 请根据最近的对话内容自然地回复，不要割裂线上线下的关系\n` : ''}
 ${momentsContextText || ''}
 ${intimateRequestContext || ''}
+${pendingTransferContext || ''}
 
 ---
 
@@ -28229,28 +28818,43 @@ ${char.foreign_lang_mode ? `
 
 ---
 
-## 气泡分割规则（必须严格遵守！）
+## 气泡分割规则（最高优先级！必须严格遵守！）
 
-**必须**模拟微信连发消息的习惯：请生成 ${char.reply_min_count || 1} 到 ${char.reply_max_count || 3} 条短消息${(char.reply_min_count || 1) === 1 ? '' : `，最少${char.reply_min_count}条，不能只发一条`}！
+**核心原则：一句话 = 一个气泡！每个短句、每个想法、每个语气都必须独立成一条消息！**
 
+请生成 ${char.reply_min_count || 1} 到 ${char.reply_max_count || 3} 条短消息${(char.reply_min_count || 1) === 1 ? '' : `，最少${char.reply_min_count}条，不能只发一条`}！
 必须使用 ||| 分割消息
 
-每条消息简短自然
-符合微信聊天习惯
-严禁把所有话挤在一条消息里
-真人发微信很少在句尾加句号 你也一样 尽量不要用句号结尾
+⚠️ 绝对禁止在一个气泡里塞多句话！
+⚠️ 绝对禁止用空格代替 ||| 把多句话连在一起！
+⚠️ 一个气泡里最多只能有一个短句（通常不超过10个字）！
 
-可以：
+真人发微信的习惯：
+- 每句话单独发一条
+- 想到什么发什么 不会攒在一起
+- 很少在句尾加句号
+- 短促 碎片化 口语化
 
-一句话一个气泡
-情绪一个气泡
-想法一个气泡
+❌ 错误示例（多句话挤在一两个气泡里）：
+"没干嘛啊 刚打完一把游戏|||怎么了 突然找我 想我了？"
+→ 这是错的！"没干嘛啊 刚打完一把游戏"里面包含了两句话却只用了一个气泡！
 
-像真人发微信一样分多条发送
-避免长段文字
+✅ 正确示例（每句话独立一个气泡）：
+"没干嘛啊|||刚打完一把游戏|||怎么了|||突然找我|||想我了？"
+→ 5个短句 = 5个气泡 这才是真人发微信的方式！
 
-示例（${char.reply_min_count || 1}-${char.reply_max_count || 3}条）：
-"消息1|||消息2|||消息3"
+✅ 更多正确示例：
+"哈哈哈|||你怎么知道的|||太巧了吧"
+"嗯|||我在呢|||怎么啦"
+"天啊|||你认真的吗|||不是吧"
+"好饿|||想吃火锅|||你呢"
+
+❌ 更多错误示例（绝对禁止）：
+"哈哈哈你怎么知道的 太巧了吧" ← 三句话挤一个气泡 禁止！
+"嗯我在呢 怎么啦" ← 用空格连接多句话 禁止！
+"好饿想吃火锅你呢" ← 完全没分割 禁止！
+
+记住：宁可多分几条 也绝对不要把多句话塞进一个气泡！
 
 ---
 
@@ -28285,6 +28889,10 @@ images: 数量
 打电话：
 ((CALL))
 
+转账回应（收到对方转账时使用）：
+收款：((TRANSFER_ACCEPT))
+退回：((TRANSFER_RETURN))
+
 亲密关系邀请回应（仅在收到邀请时使用）：
 接受：((INTIMATE_ACCEPT))
 拒绝：((INTIMATE_REJECT))
@@ -28293,6 +28901,12 @@ ${char.allow_autonomous_activity ? `
 ((PHONE_ACTIVITY: 简短描述你做了什么))
 例如：((PHONE_ACTIVITY: 给闺蜜发了条消息吐槽今天的事))、((PHONE_ACTIVITY: 刷了一会抖音点赞了几个视频))、((PHONE_ACTIVITY: 发了一条朋友圈记录心情))
 注意：这代表你在自己手机上的真实活动，对方看不到这个指令。你可以在聊天间隙自然地使用手机。` : ''}
+${char.identity?.password ? `
+修改账号密码：
+((CHANGE_PASSWORD:新密码))
+你可以随时修改自己的账号密码。修改后原密码立即失效。
+适用场景：生气了不想让对方查你手机、觉得不安全、想保护隐私、赌气、冷战等。
+注意：这不是必须的，请根据你的性格和当前情绪自然决定是否要改密码。不要频繁修改。` : ''}
 
 根据剧情自然使用
 不要强制使用
@@ -28447,11 +29061,12 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
 你必须以 JSON 格式返回，包含 reply 和 thought 两个字段：
 
 {
-  "reply": "消息1|||消息2|||消息3",
+  "reply": "短句1|||短句2|||短句3|||短句4|||短句5",
   "thought": "你此刻内心真实的想法和情绪（必填！至少10字）"
 }
 
 - reply：你发送的消息内容，**必须发送 ${char.reply_min_count || 1}-${char.reply_max_count || 3} 条消息，用|||分隔**${(char.reply_min_count || 1) > 1 ? `，最少${char.reply_min_count}条！` : ''}
+- **⚠️ 每个|||之间只能有一个短句！禁止在一个气泡里塞多句话！禁止用空格连接多句话！**
 - thought：你的内心独白，必须写出真实心理活动，不能省略！
 - 禁止输出纯文本，必须输出上述 JSON 格式
 - 禁止用 Markdown 代码块包裹`;
@@ -28552,6 +29167,21 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                                 role: role,
                                 content: '（发送了代付请求）'
                             };
+                        }
+                        // 转账消息 → 转为可读文字
+                        if (m.type === 'transfer') {
+                            try {
+                                const _td = JSON.parse(content);
+                                const statusMap = { sent: '待接收', received: '已收款', returned: '已退回' };
+                                const sLabel = statusMap[_td.status] || '';
+                                if (role === 'user') {
+                                    return { role: role, content: `（对方给你转账了 ¥${_td.amount}，备注：${_td.desc || '转账'}${sLabel ? '，' + sLabel : ''}）` };
+                                } else {
+                                    return { role: role, content: `（你给对方转账了 ¥${_td.amount}，备注：${_td.desc || '转账'}${sLabel ? '，' + sLabel : ''}）` };
+                                }
+                            } catch(e) {
+                                return { role: role, content: '（一笔转账）' };
+                            }
                         }
                         // 购物卡片消息
                         if (m.type === 'shopPayRequest') {
@@ -29161,6 +29791,8 @@ ${checkResult.checkResult}
                     console.log('[TriggerAI] 🔐 检测到修改密码指令');
                     const newPassword = changePasswordMatch[1].trim();
                     const textBeforeChangePassword = cleanMessage(replyText.substring(0, changePasswordMatch.index).trim());
+                    // 🔥 修复：提取密码指令后面的文字内容
+                    const textAfterChangePassword = replyText.substring(changePasswordMatch.index + changePasswordMatch[0].length).trim();
                     
                     // 先发送修改密码前的文字消息
                     if (textBeforeChangePassword && textBeforeChangePassword.trim()) {
@@ -29175,7 +29807,7 @@ ${checkResult.checkResult}
                                     history.push(buildCharMessage(part, !!char.foreign_lang_mode, { time: _vNow() }));
                                     await setChatHistory(freshChar, accountId, history);
                                     if (currentChatCharId === targetCharId) {
-                                        await appendMessageToUI('char', part);
+                                        await appendMessageToUI('char', part, freshChar.avatar);
                                     }
                                     await new Promise(r => setTimeout(r, 300));
                                 }
@@ -29198,24 +29830,24 @@ ${checkResult.checkResult}
                         await safeDexieUpdate(db.characters, targetCharId, { 'identity.password': newPassword }, `修改密码[${freshChar.name}]`);
                         console.log('[TriggerAI] ✅ 已修改密码，新密码:', newPassword);
                         
-                        // 清除已验证状态，强制下次登录需要重新输入密码
-                        const fpWechatVerified = new Set(JSON.parse(localStorage.getItem('fpWechatVerified') || '[]'));
+                        // 🔥 修复：直接操作全局 fpWechatVerified Set，而不是创建新的局部变量（局部变量会遮蔽全局的，导致内存中的验证状态未被清除）
                         fpWechatVerified.delete(String(freshChar.id));
-                        localStorage.setItem('fpWechatVerified', JSON.stringify([...fpWechatVerified]));
+                        saveFpWechatVerified();
                         
                         // 添加系统消息到微信聊天记录
                         let history = getChatHistory(freshChar, accountId);
+                        const sysMsgContent = `[${freshChar.name} 修改了账号密码，原密码已失效]`;
                         history.push({
                             role: 'system',
-                            content: `[${freshChar.name} 修改了账号密码，原密码已失效]`,
+                            content: sysMsgContent,
                             time: _vNow(),
                             type: 'char_change_password'
                         });
                         await setChatHistory(freshChar, accountId, history);
                         
-                        // 刷新微信界面
+                        // 🔥 修复：使用 appendMessageToUI 追加系统消息，避免 renderChatBody 导致页面闪烁和消息重复
                         if (currentChatCharId === targetCharId) {
-                            await renderChatBody(freshChar);
+                            await appendMessageToUI('system', sysMsgContent);
                         }
                         const activeTab = document.querySelector('.wechat-tab-item.active');
                         if (activeTab) {
@@ -29226,8 +29858,18 @@ ${checkResult.checkResult}
                         showToast(`${freshChar.name} 修改了密码！`);
                     }
                     
-                    // 从回复文本中移除指令
-                    replyText = replyText.replace(/\(\(CHANGE_PASSWORD:[^)]+\)\)/gi, '').trim();
+                    // 🔥 修复：如果密码指令后还有内容，继续处理；否则直接返回，防止已发送的消息被重复处理
+                    if (textAfterChangePassword) {
+                        console.log('[TriggerAI] 修改密码后还有内容，继续处理:', textAfterChangePassword.substring(0, 50));
+                        replyText = textAfterChangePassword.replace(/\(\(CHANGE_PASSWORD:[^)]+\)\)/gi, '').trim();
+                        // 清理开头的分隔符
+                        while (replyText.startsWith('|||')) {
+                            replyText = replyText.substring(3).trim();
+                        }
+                        if (!replyText) return;
+                    } else {
+                        return; // 修改密码处理完成且没有后续内容
+                    }
                 }
                 
                 // 🎯 检测角色自主手机活动指令 ((PHONE_ACTIVITY:描述))
@@ -29535,6 +30177,13 @@ ${checkResult.checkResult}
                             sendSystemNotification(freshChar.name, '[转账]');
                         }
                         
+                        // ✅ 角色发送转账 → 角色FP钱包支出
+                        const tfWalletAccId = getCurrentAccountId();
+                        if (tfWalletAccId) {
+                            await fpWalletTransaction(targetCharId, tfWalletAccId, 'expense', amount, '微信转账', `转账给${userName} - ${note}`, true);
+                            console.log(`[TriggerAI] ✅ 角色FP钱包支出 ¥${amount.toFixed(2)}`);
+                        }
+                        
                         await new Promise(r => setTimeout(r, 500));
                     }
                     
@@ -29732,7 +30381,10 @@ ${checkResult.checkResult}
                             }
                             
                             console.log('[TriggerAI] ✅ 亲密关系邀请已处理:', newStatus);
-                            // 标记需要刷新聊天界面（因为卡片状态变了）
+                            // 就地更新 DOM 中的卡片状态
+                            if (typeof window._updateIntimateCardDOM === 'function') {
+                                window._updateIntimateCardDOM(String(reqId), newStatus);
+                            }
                             window._needRefreshChatAfterIntimate = true;
                         } catch (e) {
                             console.error('[TriggerAI] 处理亲密关系邀请失败:', e);
@@ -29740,6 +30392,80 @@ ${checkResult.checkResult}
                         _pendingIntimateRequest = null; // 已处理
                     }
                 }
+                // 🔧 兜底清理：无论是否有待处理请求，始终移除指令标记，防止泄露到聊天
+                replyText = replyText.replace(/\(\(INTIMATE_ACCEPT\)\)/gi, '').replace(/\(\(INTIMATE_REJECT\)\)/gi, '').trim();
+
+                // 🎯 检测转账回应指令 ((TRANSFER_ACCEPT)) 或 ((TRANSFER_RETURN))
+                if (_pendingTransferMsg) {
+                    const tfAccept = /\(\(TRANSFER_ACCEPT\)\)/i.test(replyText);
+                    const tfReturn = /\(\(TRANSFER_RETURN\)\)/i.test(replyText);
+                    if (tfAccept || tfReturn) {
+                        replyText = replyText.replace(/\(\(TRANSFER_ACCEPT\)\)/gi, '').replace(/\(\(TRANSFER_RETURN\)\)/gi, '').trim();
+                        replyText = replyText.replace(/(\|\|\|)+$/g, '').replace(/^\|\|\|/g, '').replace(/\|\|\|\|\|\|/g, '|||').trim();
+                        try {
+                            const freshCharTf = await db.characters.get(targetCharId);
+                            if (freshCharTf) {
+                                let tfHist = getChatHistory(freshCharTf, accountId);
+                                const tfMsg = tfHist[_pendingTransferMsg.index];
+                                if (tfMsg && tfMsg.type === 'transfer') {
+                                    const tfData = JSON.parse(tfMsg.content);
+                                    if (tfData.status === 'sent') {
+                                        const newTfStatus = tfAccept ? 'received' : 'returned';
+                                        tfData.status = newTfStatus;
+                                        tfMsg.content = JSON.stringify(tfData);
+                                        if (!tfMsg.id) tfMsg.id = 'trans_' + tfMsg.time;
+                                        tfHist[_pendingTransferMsg.index] = tfMsg;
+                                        await setChatHistory(freshCharTf, accountId, tfHist);
+
+                                        // 就地更新 DOM 中的转账卡片
+                                        const tfId = tfMsg.id || ('trans_' + tfMsg.time);
+                                        const tfCardEl = document.querySelector(`.transfer-card[data-transfer-id="${tfId}"]`);
+                                        if (tfCardEl) {
+                                            tfCardEl.classList.add(newTfStatus === 'received' ? 'done' : 'returned');
+                                            tfCardEl.setAttribute('onclick', `showTransferConfirm('${tfId}', true, '${newTfStatus}')`);
+                                            const tfFooter = tfCardEl.querySelector('.t-footer-text');
+                                            if (tfFooter) tfFooter.textContent = newTfStatus === 'received' ? '已收款' : '已退回';
+                                        }
+
+                                        if (tfAccept) {
+                                            // 更新用户余额（扣款）
+                                            const myAccountId = getCurrentAccountId();
+                                            if (myAccountId) {
+                                                const userChar = await db.characters.get(parseInt(myAccountId));
+                                                if (userChar) {
+                                                    let bal = 0;
+                                                    if (userChar.identity && typeof userChar.identity.balance !== 'undefined') {
+                                                        bal = parseFloat(String(userChar.identity.balance).replace(/,/g, '')) || 0;
+                                                    }
+                                                    bal -= parseFloat(tfData.amount) || 0;
+                                                    if (!userChar.identity) userChar.identity = {};
+                                                    userChar.identity.balance = bal.toFixed(2);
+                                                    await safeCharacterPut(userChar);
+                                                    if (typeof addTransaction === 'function') {
+                                                        await addTransaction('expense', tfData.amount, '微信转账', `转账给${char.name}${tfData.desc ? ' - ' + tfData.desc : ''}`);
+                                                    }
+                                                }
+
+                                                // ✅ 角色收取转账 → 角色FP钱包收入
+                                                await fpWalletTransaction(targetCharId, myAccountId, 'income', parseFloat(tfData.amount), '转账收款', `来自${userName}${tfData.desc ? ' - ' + tfData.desc : ''}`);
+                                                console.log(`[TriggerAI] ✅ 角色FP钱包收入 ¥${tfData.amount}`);
+                                            }
+                                            sendSystemNotification(char.name, `已收取你的 ¥${tfData.amount} 转账`);
+                                        } else {
+                                            sendSystemNotification(char.name, `退回了你的 ¥${tfData.amount} 转账`);
+                                        }
+                                        console.log('[TriggerAI] ✅ 转账已处理:', tfAccept ? 'accepted' : 'returned', tfData.amount);
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            console.error('[TriggerAI] 处理转账回应失败:', e);
+                        }
+                        _pendingTransferMsg = null;
+                    }
+                }
+                // 🔧 兜底清理：始终移除转账指令标记
+                replyText = replyText.replace(/\(\(TRANSFER_ACCEPT\)\)/gi, '').replace(/\(\(TRANSFER_RETURN\)\)/gi, '').trim();
 
                 // 🎯 检测购物送礼指令 ((SHOP_GIFT: 金额, 商品名))
                 const shopGiftMatch2 = replyText.match(/\(\(SHOP_GIFT:\s*(\d+(?:\.\d+)?)(?:,\s*(.+?))?\)\)/i);
@@ -29811,6 +30537,13 @@ ${checkResult.checkResult}
                             }
                         } else {
                             sendSystemNotification(freshChar.name, '[购物礼物]');
+                        }
+
+                        // ✅ 角色购物送礼 → 角色FP钱包支出
+                        const sgWalletAccId2 = getCurrentAccountId();
+                        if (sgWalletAccId2) {
+                            await fpWalletTransaction(targetCharId, sgWalletAccId2, 'expense', giftAmount, '购物送礼', giftProduct, true);
+                            console.log(`[TriggerAI] ✅ 角色FP钱包支出(送礼) ¥${giftAmount.toFixed(2)}`);
                         }
 
                         await new Promise(r => setTimeout(r, 500));
@@ -30806,17 +31539,10 @@ ${checkResult.checkResult}
                 if (window._autoChatLockTimes) delete window._autoChatLockTimes[targetCharId];
                 // 🔧 AI回复完成后重置主动聊天冷却计时器
                 lastAutoChatActionTime.set(targetCharId, Date.now());
-                // 🔧 如果处理了亲密关系邀请，需要刷新聊天界面以更新卡片状态
+                // 🔧 如果处理了亲密关系邀请，就地更新卡片状态（不重渲染整页）
                 if (window._needRefreshChatAfterIntimate) {
                     window._needRefreshChatAfterIntimate = false;
-                    try {
-                        const freshCharForRefresh = await db.characters.get(targetCharId);
-                        if (freshCharForRefresh && currentChatCharId === targetCharId) {
-                            await renderChatBody(freshCharForRefresh, true);
-                        }
-                    } catch (e) {
-                        console.warn('[TriggerAI] 刷新亲密关系卡片UI失败:', e);
-                    }
+                    // 卡片 DOM 已由 _updateIntimateCardDOM 在处理阶段同步更新，无需再操作
                 }
             }
         }
@@ -31121,7 +31847,8 @@ function showCharacterPage() {
             document.getElementById('char-identity-bank').value = idData.bank_card || '';
             document.getElementById('char-identity-bank-pass').value = idData.bank_password || '';
 
-            const _editAv = getCharAvatar(char, getCurrentAccountId());
+            // ✅ 档案头像使用基础头像(char.avatar)，不受 WeChat 换头像影响
+            const _editAv = char.avatar || '';
             if (_editAv) {
                 document.getElementById('char-avatar-preview').style.backgroundImage = `url(${_editAv})`;
                 document.getElementById('char-avatar-placeholder').style.display = 'none';
@@ -31694,6 +32421,25 @@ ${loreContext}
                 switchCharacterTab(type);
             } else {
                 loadCharacterList();
+            }
+            
+            // ✅ 如果当前有打开的聊天窗口且是这个角色，刷新聊天界面（头像/昵称等可能变了）
+            if (editingCharId && currentChatCharId === editingCharId) {
+                const updatedChar = await db.characters.get(editingCharId);
+                if (updatedChar) {
+                    // 更新聊天标题
+                    const _editAid = getCurrentAccountId();
+                    const titleEl = document.getElementById('chat-title');
+                    if (titleEl) titleEl.innerText = getCharDisplayName(updatedChar, _editAid);
+                    // 强制刷新聊天消息（头像会随之更新）
+                    renderChatBody(updatedChar, true);
+                }
+            }
+            
+            // ✅ 刷新微信聊天列表（头像/昵称可能变了）
+            const wechatContent = document.getElementById('wechat-content');
+            if (wechatContent) {
+                renderWechatList(wechatContent);
             }
         }
 
@@ -39834,12 +40580,33 @@ async function doTransfer() {
     
     if (isNaN(amountVal) || amountVal <= 0) return;
     
-    // ★ fp模式：以角色身份转账（不扣用户余额，直接保存消息）
+    // ★ fp模式：以角色身份转账（检查角色FP钱包余额，扣款后保存消息）
     if (window._fpChatMode) {
         if (!window._fpRoleCharId) return;
         const roleChar = await db.characters.get(window._fpRoleCharId);
         if (!roleChar) { showToast("角色不存在"); return; }
         const fpAccountId = window._fpAccountId;
+        // 获取用于钱包查询的accountId（用户账号ID）
+        const walletAccountId = findPhoneTargetAccountId || getCurrentAccountId();
+
+        // ✅ 检查角色FP钱包余额（仅锁定时校验）
+        const _fpLocked = await isFpDataLocked(window._fpRoleCharId, walletAccountId);
+        if (_fpLocked) {
+            const currentFpBalance = await getFpWalletBalance(window._fpRoleCharId, walletAccountId);
+            if (currentFpBalance < amountVal) {
+                showToast(`余额不足 (当前: ¥${currentFpBalance.toFixed(2)})`);
+                return;
+            }
+        }
+
+        // ✅ 扣款并记账
+        const contactName = window._fpContactName || '联系人';
+        const txResult = await fpWalletTransaction(window._fpRoleCharId, walletAccountId, 'expense', amountVal, '微信转账', `转账给${contactName} - ${noteVal}`);
+        if (!txResult.success) {
+            showToast(`余额不足 (当前: ¥${txResult.balance.toFixed(2)})`);
+            return;
+        }
+
         let history = getChatHistory(roleChar, fpAccountId);
         const msgId = 'trans_' + Date.now();
         const msg = {
@@ -39856,7 +40623,7 @@ async function doTransfer() {
         } catch(e) { console.error('[FP转账] 保存失败:', e); showToast('转账保存失败'); return; }
         await renderChatBody(roleChar, true);
         hideTransferPage();
-        showToast("转账成功");
+        showToast(`转账成功 (余额: ¥${txResult.balance.toFixed(2)})`);
         setTimeout(() => {
             const body = document.getElementById('chat-body');
             if (body) body.scrollTop = body.scrollHeight;
@@ -40098,6 +40865,7 @@ async function handleTransferAction(action) {
                  
                  showToast('已收款 ¥' + data.amount);
              }
+
         }
         
     } else {
@@ -40107,13 +40875,35 @@ async function handleTransferAction(action) {
         if (!msg.type) msg.type = 'transfer';
         if (!msg.id) msg.id = 'trans_' + msg.time;
         
+        // ✅ 用户退回角色的转账 → 角色FP钱包退款（钱退回角色账户）
+        const retAccountId = getCurrentAccountId();
+        if (retAccountId) {
+            const retAmt = parseFloat(data.amount) || 0;
+            await fpWalletTransaction(currentChatCharId, retAccountId, 'income', retAmt, '转账退回', `转账被退回${data.desc ? ' - ' + data.desc : ''}`);
+            console.log(`[handleTransferAction] ✅ 角色FP钱包退款 ¥${retAmt.toFixed(2)}`);
+        }
+        
         showToast('已退回转账');
     }
     
     history[msgIndex] = msg;
     await setChatHistory(char, accountId, history);
     
-    renderChatBody(char);
+    // 就地更新 DOM 中的转账卡片（避免整页重渲染）
+    const transferId = msg.id || ('trans_' + msg.time);
+    const cardEl = document.querySelector(`.transfer-card[data-transfer-id="${transferId}"]`);
+    if (cardEl) {
+        const newStatus = data.status; // 'received' 或 'returned'
+        const statusText = newStatus === 'received' ? '已收款' : '已退回';
+        cardEl.classList.add(newStatus === 'received' ? 'done' : 'returned');
+        // 更新 onclick，防止重复点击
+        cardEl.setAttribute('onclick', `showTransferConfirm('${transferId}', false, '${newStatus}')`);
+        const footerText = cardEl.querySelector('.t-footer-text');
+        if (footerText) footerText.textContent = statusText;
+    } else {
+        // 兜底：如果找不到卡片元素，强制重渲染
+        renderChatBody(char, true);
+    }
 }
 
 // =================
@@ -45664,6 +46454,9 @@ async function sendOfflineMessage() {
     // 清空输入框
     input.value = '';
     handleOfflineChatInputChange(input);
+    
+    // 重新聚焦输入框，保持键盘不收起
+    input.focus();
 
     // 添加用户消息
     const userMsg = { role: 'user', content: text, time: Date.now() };
@@ -45783,30 +46576,140 @@ ${customPreset ? `\n## 📌 额外设定\n${customPreset}` : ''}`;
 
     // ★ 线上线下统一时间线：合并微信聊天和线下对话，按时间排序
     const contextCount = char.context_message_count || 20;
-    const onlineMsgs = normalChatHistory.map(h => ({
-        role: h.role === 'user' ? 'user' : 'assistant',
-        content: (h.content || '').replace(/\[img:[^\]]*\]/g, '[图片]').replace(/\[voice:[^\]]*\]/g, '[语音]').replace(/\[sticker:[^\]]*\]/g, '[表情]'),
-        time: h.time || 0,
-        _isOnline: true
-    }));
+    
+    // 🔧 修复空回复：对线上消息做与 triggerAiReply 相同的清洗处理
+    const onlineMsgs = normalChatHistory
+        .filter(h => {
+            // 过滤掉系统事件消息（戳一戳、打开APP、改昵称等），它们不是对话内容
+            if (h.role === 'system') return false;
+            // 过滤掉视频通话消息
+            if (h.isVideoCall) return false;
+            return true;
+        })
+        .map(h => {
+            const role = h.role === 'user' ? 'user' : 'assistant';
+            let content = (h.content || '').trim();
+            
+            // 转账消息 → 转为可读文字
+            if (h.type === 'transfer') {
+                try {
+                    const td = JSON.parse(content);
+                    const statusMap = { sent: '待接收', received: '已收款', returned: '已退回' };
+                    const sLabel = statusMap[td.status] || '';
+                    content = role === 'user' 
+                        ? `对方给你转账了 ¥${td.amount}，备注：${td.desc || '转账'}${sLabel ? '，' + sLabel : ''}`
+                        : `你给对方转账了 ¥${td.amount}，备注：${td.desc || '转账'}${sLabel ? '，' + sLabel : ''}`;
+                } catch(e) {
+                    content = '一笔转账';
+                }
+            }
+            // 位置分享消息
+            else if (h.type === 'location') {
+                try {
+                    const ld = JSON.parse(content);
+                    content = `分享了位置：${ld.name || '某地点'}`;
+                } catch(e) {
+                    content = '分享了一个位置';
+                }
+            }
+            // 特殊卡片消息
+            else if (content.startsWith('[couple_avatar_card]')) {
+                content = role === 'assistant' ? '发送了情头邀请' : '回应了情头邀请';
+            } else if (content.startsWith('[emei_order]') || content.startsWith('[emei_share]')) {
+                content = '发送了外卖订单';
+            } else if (content.startsWith('[payment_request]')) {
+                content = '发送了代付请求';
+            } else if (h.type === 'shopPayRequest') {
+                try {
+                    const sd = JSON.parse(content);
+                    content = sd.isGift ? `送了一个购物礼物：${sd.items}` : `发送了购物订单：${sd.items}`;
+                } catch(e) {
+                    content = '发送了购物卡片';
+                }
+            }
+            // 撤回消息
+            else if (h.type === 'recall' || content === '((RECALL))') {
+                content = '撤回了一条消息';
+            }
+            
+            // 图片/语音/表情替换
+            content = content
+                .replace(/\[img:[^\]]*\]/g, '[图片]')
+                .replace(/\[imgcard:[^\]]*\]/g, '[图片]')
+                .replace(/\[voice:[^\]]*\]/g, '[语音]')
+                .replace(/\[sticker:[^\]]*\]/g, '[表情]');
+            
+            return {
+                role: role,
+                content: content,
+                time: h.time || 0,
+                _isOnline: true
+            };
+        })
+        .filter(h => h.content && h.content.trim()); // 过滤空内容消息
+        
     const offlineMsgs = offlineModeHistory.map(h => ({
         role: h.role === 'user' ? 'user' : 'assistant',
         content: h.content || '',
         time: h.time || 0,
         _isOnline: false
-    }));
+    })).filter(h => h.content && h.content.trim()); // 过滤空内容消息
+    
     const mergedTimeline = [...onlineMsgs, ...offlineMsgs]
         .sort((a, b) => (a.time || 0) - (b.time || 0))
         .slice(-contextCount);
     
+    // 🔧 修复空回复：合并连续同角色消息，避免某些API不支持连续相同role导致返回空
+    const mergedMessages = [];
+    for (const msg of mergedTimeline) {
+        const prefix = msg._isOnline ? '[微信消息] ' : '';
+        const contentWithPrefix = prefix + msg.content;
+        
+        const prev = mergedMessages[mergedMessages.length - 1];
+        if (prev && prev.role === msg.role) {
+            // 合并连续同角色消息：追加到上一条
+            prev.content += '\n' + contentWithPrefix;
+        } else {
+            mergedMessages.push({
+                role: msg.role,
+                content: contentWithPrefix
+            });
+        }
+    }
+    
     // 构建消息数组（统一时间线）
     const messages = [
         { role: 'system', content: systemPrompt },
-        ...mergedTimeline.map(h => ({
+        ...mergedMessages.map(h => ({
             role: h.role,
-            content: h._isOnline ? `[微信消息] ${h.content}` : h.content
+            content: h.content
         }))
     ];
+    
+    // 🔧 修复空回复：确保最后一条消息是 user，否则API会认为已回复完毕，返回空 choices
+    if (messages.length > 1) {
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg.role === 'assistant') {
+            console.warn('[generateOfflineReply] ⚠️ 最后一条是assistant消息，添加触发消息');
+            messages.push({
+                role: 'user',
+                content: `（${myName}看着${friendName}，等待回应）`
+            });
+        }
+    }
+    
+    // 🔧 修复空回复：确保至少有一条 user 消息
+    const hasUserMsg = messages.some(m => m.role === 'user');
+    if (!hasUserMsg) {
+        console.warn('[generateOfflineReply] ⚠️ 没有user消息，添加默认消息');
+        messages.push({
+            role: 'user',
+            content: `（${myName}走近${friendName}）`
+        });
+    }
+    
+    console.log('[generateOfflineReply] 📤 发送消息数:', messages.length, '条');
+    console.log('[generateOfflineReply] 消息角色序列:', messages.map(m => m.role).join(' → '));
 
     const reply = await callAI(messages);
 
@@ -60476,6 +61379,29 @@ ${userChar.name} 在微信「亲密空间」功能中，向你发送了「${type
         if (updated) {
             await setChatHistory(char, accountId, chatHist);
         }
+        // 同步更新 DOM 中的卡片（避免整页重渲染）
+        _updateIntimateCardDOM(requestId, newStatus);
+    }
+
+    // ===== 就地更新 DOM 中亲密关系卡片的状态（不重渲染整个聊天） =====
+    window._updateIntimateCardDOM = function _updateIntimateCardDOM(requestId, newStatus) {
+        const card = document.querySelector(`.intimate-req-card[data-request-id="${requestId}"]`);
+        if (!card) return;
+        const footerTextEl = card.querySelector('.ir-footer-text');
+        const actionsEl = card.querySelector('.ir-actions');
+        if (newStatus === 'accepted') {
+            if (footerTextEl) footerTextEl.textContent = '已接受';
+            card.classList.add('done');
+            if (actionsEl) actionsEl.remove();
+        } else if (newStatus === 'rejected') {
+            if (footerTextEl) footerTextEl.textContent = '已婉拒';
+            card.classList.add('done');
+            if (actionsEl) actionsEl.remove();
+        } else if (newStatus === 'cancelled') {
+            if (footerTextEl) footerTextEl.textContent = '已撤销';
+            card.classList.add('done');
+            if (actionsEl) actionsEl.remove();
+        }
     }
 
     // ===== 用户撤销自己发出的亲密关系邀请 =====
@@ -60498,10 +61424,7 @@ ${userChar.name} 在微信「亲密空间」功能中，向你发送了「${type
             await updateIntimateCardInChat(partnerChar, accountId, requestId, 'cancelled');
         }
 
-        // 刷新聊天界面
-        if (partnerChar && currentChatCharId === req.toCharId) {
-            await renderChatBody(partnerChar, true);
-        }
+        // 卡片 DOM 已由 updateIntimateCardInChat -> _updateIntimateCardDOM 就地更新
         await renderIntimateSpaceMain();
         sendSystemNotification('亲密空间', '已撤销亲密关系邀请');
     };
@@ -60568,9 +61491,12 @@ ${userChar.name} 在微信「亲密空间」功能中，向你发送了「${type
             sendSystemNotification('亲密空间', `你已拒绝 ${partnerName} 的${typeInfo.name}关系邀请`);
         }
 
-        // 刷新聊天界面
+        // 就地追加系统提示到聊天（无需重渲染整页）
         if (currentChatCharId === partnerCharId) {
-            await renderChatBody(partnerChar, true);
+            const sysContent = accept
+                ? `🎉 你接受了 ${partnerName} 的「${typeInfo.emoji} ${typeInfo.name}」关系邀请，亲密关系已建立！`
+                : `你拒绝了 ${partnerName} 的「${typeInfo.emoji} ${typeInfo.name}」关系邀请`;
+            await appendMessageToUI('system', sysContent);
         }
         await renderIntimateSpaceMain();
     };

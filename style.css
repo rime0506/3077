@@ -2453,6 +2453,13 @@ body {
     display: flex;
     flex-direction: column;
     padding-bottom: env(safe-area-inset-bottom);
+    flex-shrink: 0; /* 键盘弹起时底栏不被压缩 */
+    transition: padding-bottom 0.15s ease;
+}
+
+/* 键盘弹起时去掉安全区域 padding（Home指示条已被键盘遮住，不需要留空） */
+.keyboard-up .chat-footer {
+    padding-bottom: 0 !important;
 }
         
         /* 线下模式输入框区域 - 与线上私聊页面保持一致 */
@@ -2556,6 +2563,7 @@ body {
     gap: 10px;
     width: 100%;
     overflow: hidden;
+    flex-shrink: 0; /* 键盘弹起时输入栏不被压缩 */
 }
         
         .chat-input {
@@ -3714,11 +3722,12 @@ body {
             border: 2px solid #ccc;
             background: #fff;
             position: absolute;
-            left: 10px;
+            left: 6px;
             top: 50%;
             transform: translateY(-50%);
             display: none; /* 默认隐藏 */
             z-index: 10;
+            box-sizing: border-box; /* 边框包含在22px内，防止手机端溢出遮挡头像 */
         }
         .msg-checkbox.checked {
             background: var(--ins-pink);
@@ -7019,7 +7028,7 @@ body {
 }
 .moment-popup-menu.show {
     opacity: 1;
-    width: 140px; /* 展开宽度 */
+    width: 210px; /* 展开宽度（3个菜单项：赞、评论、删除） */
     pointer-events: auto;
 }
 .moment-menu-item {
