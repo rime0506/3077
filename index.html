@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>芽芽机</title>
     
-    <!-- PWA 配置 (Manifest 生成逻辑在 script.JS 中) -->
+    <!-- PWA 配置 (Manifest 生成逻辑在 script.js 中) -->
     <link rel="manifest" id="manifest-link">
     
     <!-- iOS 全屏支持 -->
@@ -25,13 +25,45 @@
     <!-- 预加载关键资源 -->
     <link rel="preload" href="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js" as="script">
     
+    <!-- 🔧 安卓系统字体缩放补偿：在页面渲染前检测并修正，防止大字体撑坏布局 -->
+    <script>
+    (function() {
+        // 默认浏览器根字体 16px，安卓系统大字体会把它放大
+        var html = document.documentElement;
+        var s = html.style.fontSize;
+        html.style.fontSize = '16px';
+        var actual = parseFloat(getComputedStyle(html).fontSize);
+        if (!s) html.style.removeProperty('font-size');
+        else html.style.fontSize = s;
+        if (actual && Math.abs(actual - 16) > 0.5) {
+            // 系统缩放了字体，反向补偿
+            html.style.fontSize = (16 / actual * 100) + '%';
+            console.log('[FontScale] 检测到安卓系统字体缩放 ' + actual + 'px，已补偿为 ' + (16 / actual * 100).toFixed(1) + '%');
+        }
+    })();
+    </script>
     <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js" defer></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" defer></script>
     <!-- SortableJS 用于拖拽排序 -->
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js" defer></script>
 </head>
 <body id="desktop-body">
-    <div class="phone" id="home-page">
+    <!-- 启动加载屏 -->
+    <div id="app-loading-screen" style="position:fixed;top:0;left:0;width:100%;height:100%;background:#ffffff;z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;transition:opacity 0.5s ease;">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:18px;">
+            <div style="width:72px;height:72px;background:#FFF7FA;border-radius:1.2rem;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(255,182,193,0.15);">
+                <svg viewBox="0 0 24 24" style="width:36px;height:36px;stroke:#ffb6c1;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;">
+                    <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+                </svg>
+            </div>
+            <div style="font-size:16px;color:#999;font-weight:400;letter-spacing:1px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">加载中...</div>
+            <div style="width:120px;height:2px;background:#f5f5f5;border-radius:1px;overflow:hidden;">
+                <div id="app-loading-bar" style="width:0%;height:100%;background:linear-gradient(90deg,#ffb6c1,#ffc8d6);border-radius:1px;transition:width 0.4s ease;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="phone" id="home-page" style="opacity:0;transition:opacity 0.4s ease;">
         <!-- 顶部磨砂小组件 -->
         <div class="top-widget" onclick="showNotificationCenter()">
             <div class="icon" id="widget-icon"></div>
@@ -438,6 +470,39 @@
                     <div class="custom-item-text" style="color:#e57373; text-align:center;">↺ 清空CSS</div>
                 </div>
             </div>
+            
+            <div class="custom-item" onclick="toggleExpand('expand-css-classes')" style="margin-top:8px; background:#f0f8ff;">
+                <div class="custom-item-text" style="color:#0277bd;">📋 WeChat 页面常用类名速查</div>
+                <div class="custom-item-arrow" id="arrow-css-classes" style="color:#0277bd;">→</div>
+            </div>
+            
+            <div class="custom-expand" id="expand-css-classes" style="display:none; flex-direction:column; gap:6px; margin-top:8px; padding:12px; background:#f8f9fa; border-radius:8px; border:1px solid #e0e0e0; font-size:12px; color:#555; line-height:1.6;">
+                <div style="font-weight:bold; color:#333; margin-bottom:2px; border-bottom:1px solid #ddd; padding-bottom:4px;">页面容器与顶栏</div>
+                <div><b>微信页面容器：</b> <code>.wechat-page</code></div>
+                <div><b>聊天窗口：</b> <code>.chat-window</code></div>
+                <div><b>顶栏：</b> <code>.chat-header</code></div>
+                <div><b>返回按钮：</b> <code>.chat-back</code></div>
+                <div><b>标题(角色名字)：</b> <code>.chat-title</code></div>
+                <div><b>线下模式/聊天详情按钮：</b> <code>.chat-more</code></div>
+                
+                <div style="font-weight:bold; color:#333; margin-top:6px; margin-bottom:2px; border-bottom:1px solid #ddd; padding-bottom:4px;">聊天区域</div>
+                <div><b>聊天内容区：</b> <code>.chat-body</code></div>
+                <div><b>对方消息行：</b> <code>.message-row.other</code></div>
+                <div><b>自己消息行：</b> <code>.message-row.self</code></div>
+                <div><b>消息气泡：</b> <code>.message-content</code></div>
+                <div><b>头像：</b> <code>.message-avatar</code></div>
+                
+                <div style="font-weight:bold; color:#333; margin-top:6px; margin-bottom:2px; border-bottom:1px solid #ddd; padding-bottom:4px;">底栏与输入框</div>
+                <div><b>底栏容器：</b> <code>.chat-footer</code></div>
+                <div><b>输入栏包装：</b> <code>.chat-input-bar</code></div>
+                <div><b>输入框：</b> <code>.chat-input</code></div>
+                <div><b>接受回复(AI魔法棒)/表情包/菜单图标：</b> <code>.chat-icon-btn</code></div>
+                <div><b>发送消息按钮：</b> <code>.chat-send-btn</code></div>
+                <div><b>菜单面板容器：</b> <code>.chat-panel-container</code></div>
+                <div><b>表情面板：</b> <code>.emoji-panel</code></div>
+                <div><b>操作(附加功能)面板：</b> <code>.action-panel</code></div>
+            </div>
+
             <div class="custom-edit-tip" style="margin-top:8px; font-size:11px; color:#bbb; line-height:1.5;">
                 提示：CSS代码会在保存设置后持久生效。可用浏览器F12查看元素类名。<br>
                 点击"预览聊天效果"可以实时查看CSS在聊天页面的效果。
@@ -475,28 +540,28 @@
                         <!-- 对方消息 -->
                         <div class="message-row other" style="display:flex; gap:8px; align-items:flex-start;">
                             <div class="message-avatar" style="width:32px; height:32px; border-radius:50%; background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); flex-shrink:0; background-size:cover; background-position:center;"></div>
-                            <div class="message-content" style="max-width:75%; padding:6px 10px; border-radius:18px; border-bottom-left-radius:4px; background:#f2f2f7; color:#000; font-size:15px; line-height:1.5;">你好！这是一条示例消息，用来预览CSS效果。</div>
+                            <div class="message-content">你好！这是一条示例消息，用来预览CSS效果。</div>
                         </div>
                         <!-- 我的消息 -->
                         <div class="message-row self" style="display:flex; gap:8px; align-items:flex-start; flex-direction:row-reverse;">
                             <div class="message-avatar" style="width:32px; height:32px; border-radius:50%; background:linear-gradient(135deg, #f093fb 0%, #f5576c 100%); flex-shrink:0; background-size:cover; background-position:center;"></div>
-                            <div class="message-content" style="max-width:75%; padding:6px 10px; border-radius:18px; border-bottom-right-radius:4px; background:#ffe4e8; color:#000; font-size:15px; line-height:1.5;">好的，我看到了！这个预览功能很实用。</div>
+                            <div class="message-content">好的，我看到了！这个预览功能很实用。</div>
                         </div>
                         <!-- 对方消息2 -->
                         <div class="message-row other" style="display:flex; gap:8px; align-items:flex-start;">
                             <div class="message-avatar" style="width:32px; height:32px; border-radius:50%; background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); flex-shrink:0; background-size:cover; background-position:center;"></div>
-                            <div class="message-content" style="max-width:75%; padding:6px 10px; border-radius:18px; border-bottom-left-radius:4px; background:#f2f2f7; color:#000; font-size:15px; line-height:1.5;">你可以修改CSS代码，预览会实时更新效果。</div>
+                            <div class="message-content">你可以修改CSS代码，预览会实时更新效果。</div>
                         </div>
                         <!-- 我的消息2 -->
                         <div class="message-row self" style="display:flex; gap:8px; align-items:flex-start; flex-direction:row-reverse;">
                             <div class="message-avatar" style="width:32px; height:32px; border-radius:50%; background:linear-gradient(135deg, #f093fb 0%, #f5576c 100%); flex-shrink:0; background-size:cover; background-position:center;"></div>
-                            <div class="message-content" style="max-width:75%; padding:6px 10px; border-radius:18px; border-bottom-right-radius:4px; background:#ffe4e8; color:#000; font-size:15px; line-height:1.5;">明白了，谢谢！</div>
+                            <div class="message-content">明白了，谢谢！</div>
                         </div>
                     </div>
                     
                     <!-- 聊天页面底栏 - 完全按照实际结构 -->
                     <div class="chat-footer" style="background:#ffffff; border-top:1px solid rgba(0,0,0,0.05); display:flex; flex-direction:column; flex-shrink:0;">
-                        <div class="chat-input-bar" style="min-height:60px; padding:10px 12px; padding-bottom:10px; display:flex; align-items:center; gap:10px;">
+                        <div class="chat-input-bar" style="min-height:60px; padding:10px 12px; display:flex; align-items:center; gap:10px;">
                             <!-- 左侧：AI 魔法棒 -->
                             <div class="chat-icon-btn" style="width:32px; height:32px; color:#999; cursor:pointer; display:flex; align-items:center; justify-content:center; border-radius:50%; flex-shrink:0;">
                                 <svg class="svg-icon" viewBox="0 0 24 24" style="width:20px; height:20px;"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/><path d="M5 3v4"/><path d="M9 5H1"/></svg>
@@ -697,7 +762,10 @@
                 <svg class="svg-icon" viewBox="0 0 24 24" style="width:28px; height:28px;"><polyline points="15 18 9 12 15 6"></polyline></svg>
             </div>
             <div class="setting-title">设置</div>
-            <div style="width:50px;"></div>
+            <div class="save-btn" onclick="saveSettingPage()" style="font-size:13px; color:#999; display:flex; align-items:center; gap:3px; padding:5px 10px; min-width:50px; justify-content:flex-end;">
+                <svg viewBox="0 0 24 24" style="width:15px; height:15px; stroke:#999; fill:none; stroke-width:2;"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                保存
+            </div>
         </div>
         
         <div class="setting-content">
@@ -795,6 +863,48 @@
                     <button class="test-btn" onclick="testConnection()">
                         <span id="test-btn-text">测试连接</span>
                     </button>
+                </div>
+            </div>
+
+            <!-- 副API 设置 折叠卡片 -->
+            <div class="api-setting-card">
+                <div class="api-header" onclick="toggleSecondaryApiSetting()">
+                    <div class="api-title">🔌 副API 设置</div>
+                    <div class="api-arrow" id="secondary-api-setting-arrow">▼</div>
+                </div>
+                <div class="api-body" id="secondary-api-setting-body" style="display:none;">
+                    <div style="font-size:12px; color:#999; margin-bottom:12px; line-height:1.5;">
+                        副API用于总结记忆、生成朋友圈评论等辅助功能。<br>如果不设置，这些功能将使用主API。
+                    </div>
+
+                    <div class="api-label">API 地址</div>
+                    <div class="api-input-group">
+                        <input type="text" class="api-input" id="secondary-ai-url-input" placeholder="留空则使用主API地址" onchange="autoSaveSecondaryApi()">
+                    </div>
+
+                    <div class="api-label">API 密钥</div>
+                    <div class="api-input-group">
+                        <input type="password" class="api-input" id="secondary-ai-key-input" placeholder="留空则使用主API密钥" onchange="autoSaveSecondaryApi()">
+                        <div class="eye-icon" onclick="toggleSecondaryKeyVis()">显示</div>
+                    </div>
+
+                    <div class="api-label">模型选择</div>
+                    <div class="model-row">
+                        <div class="model-select-wrapper">
+                            <select class="model-select" id="secondary-ai-model-select" onchange="autoSaveSecondaryApi()">
+                                <option value="" disabled selected>留空则使用主API模型</option>
+                            </select>
+                        </div>
+                        <button class="fetch-btn" onclick="fetchSecondaryModels()">
+                            <div class="loading-spinner" id="secondary-fetch-spinner"></div>
+                            <span id="secondary-fetch-text">拉取模型</span>
+                        </button>
+                    </div>
+
+                    <button class="test-btn" onclick="testSecondaryConnection()" style="margin-top:12px;">
+                        <span id="secondary-test-btn-text">测试副API连接</span>
+                    </button>
+                    <button onclick="clearSecondaryApi()" style="margin-top:8px; width:100%; padding:10px; background:#f5f5f5; color:#999; border:none; border-radius:8px; font-size:13px; cursor:pointer;">清空副API（恢复使用主API）</button>
                 </div>
             </div>
 
@@ -2369,7 +2479,9 @@
                 <svg class="svg-icon" viewBox="0 0 24 24" style="width:28px; height:28px;"><polyline points="15 18 9 12 15 6"></polyline></svg>
             </div>
             <div class="wechat-title">聊天详情</div>
-            <div style="width:40px;"></div>
+            <div id="detail-save-btn" onclick="saveChatDetailWithToast()" style="width:40px; display:flex; justify-content:flex-end; cursor:pointer; -webkit-tap-highlight-color:transparent;">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+            </div>
         </div>
         
         <div style="flex:1; overflow-y:auto;">
@@ -2389,7 +2501,7 @@
                 <div class="detail-item">
                     <div>备注</div>
                     <div style="display:flex; align-items:center; gap:6px; flex:1; justify-content:flex-end;">
-                        <input type="text" id="detail-char-remark" placeholder="设置备注名" onchange="saveChatDetail()" style="border:none; background:transparent; text-align:right; font-size:14px; color:#333; outline:none; width:auto; max-width:180px;">
+                        <input type="text" id="detail-char-remark" placeholder="设置备注名" style="border:none; background:transparent; text-align:right; font-size:14px; color:#333; outline:none; width:auto; max-width:180px;">
                         <div style="font-size:12px; color:#999;" id="detail-char-realname">原名: ???</div>
                     </div>
                 </div>
@@ -2399,7 +2511,7 @@
                         <div style="font-size:11px; color:#999;">自定义聊天输入框的占位文字</div>
                     </div>
                     <div style="flex:1; display:flex; justify-content:flex-end;">
-                        <input type="text" id="detail-input-placeholder" placeholder="发送消息..." onchange="saveChatDetail()" style="border:none; background:transparent; text-align:right; font-size:14px; color:#333; outline:none; width:auto; max-width:180px;">
+                        <input type="text" id="detail-input-placeholder" placeholder="发送消息..." style="border:none; background:transparent; text-align:right; font-size:14px; color:#333; outline:none; width:auto; max-width:180px;">
                     </div>
                 </div>
             </div>
@@ -2442,13 +2554,13 @@
                 <div class="detail-item">
                     <div>主动发消息</div>
                     <label class="ios-switch">
-                        <input type="checkbox" id="detail-auto-chat-switch" onchange="saveChatDetail()">
+                        <input type="checkbox" id="detail-auto-chat-switch">
                         <span class="slider"></span>
                     </label>
                 </div>
                 <div class="detail-item">
                     <div>触发间隔 (分钟)</div>
-                    <input type="number" id="detail-auto-chat-interval" placeholder="30" style="border:none; background:transparent; width:60px; text-align:right; font-size:16px; color:#8e8e93; outline:none;" onchange="saveChatDetail()">
+                    <input type="number" id="detail-auto-chat-interval" placeholder="30" style="border:none; background:transparent; width:60px; text-align:right; font-size:16px; color:#8e8e93; outline:none;">
                 </div>
             </div>
 
@@ -2460,7 +2572,7 @@
                         <div style="font-size:12px; color:#999; line-height:1.4;">开启后角色用人设语言回复并附中文翻译</div>
                     </div>
                     <label class="ios-switch">
-                        <input type="checkbox" id="detail-foreign-lang-switch" onchange="saveChatDetail()">
+                        <input type="checkbox" id="detail-foreign-lang-switch">
                         <span class="slider"></span>
                     </label>
                 </div>
@@ -2480,7 +2592,7 @@
                         <div style="font-size:12px; color:#999; line-height:1.4;">角色可根据剧情尝试登录你的账号</div>
                     </div>
                     <label class="ios-switch">
-                        <input type="checkbox" id="detail-allow-check-switch" onchange="saveChatDetail()">
+                        <input type="checkbox" id="detail-allow-check-switch">
                         <span class="slider"></span>
                     </label>
                 </div>
@@ -2490,7 +2602,7 @@
                         <div style="font-size:12px; color:#999; line-height:1.4;">查岗的角色可以操作你的账号</div>
                     </div>
                     <label class="ios-switch">
-                        <input type="checkbox" id="detail-allow-shura-switch" onchange="saveChatDetail()">
+                        <input type="checkbox" id="detail-allow-shura-switch">
                         <span class="slider"></span>
                     </label>
                 </div>
@@ -2512,7 +2624,7 @@
                         <div style="font-size:12px; color:#999; line-height:1.4;">角色可从头像库自动更换头像，或发送情头邀请</div>
                     </div>
                     <label class="ios-switch">
-                        <input type="checkbox" id="detail-allow-avatar-switch" onchange="saveChatDetail()">
+                        <input type="checkbox" id="detail-allow-avatar-switch">
                         <span class="slider"></span>
                     </label>
                 </div>
@@ -2532,7 +2644,7 @@
                         <div style="font-size:12px; color:#999; line-height:1.4;">角色会在自己的手机上自主产生活动数据</div>
                     </div>
                     <label class="ios-switch">
-                        <input type="checkbox" id="detail-allow-autonomous-switch" onchange="saveChatDetail()">
+                        <input type="checkbox" id="detail-allow-autonomous-switch">
                         <span class="slider"></span>
                     </label>
                 </div>
@@ -2553,13 +2665,13 @@
                         <div style="font-size:12px; color:#999; line-height:1.4;">定时调用API让角色自主产生手机活动</div>
                     </div>
                     <label class="ios-switch">
-                        <input type="checkbox" id="detail-scheduled-activity-switch" onchange="saveChatDetail()">
+                        <input type="checkbox" id="detail-scheduled-activity-switch">
                         <span class="slider"></span>
                     </label>
                 </div>
                 <div class="detail-item">
                     <div>触发间隔 (分钟)</div>
-                    <input type="number" id="detail-scheduled-activity-interval" placeholder="30" style="border:none; background:transparent; width:60px; text-align:right; font-size:16px; color:#8e8e93; outline:none;" onchange="saveChatDetail()">
+                    <input type="number" id="detail-scheduled-activity-interval" placeholder="30" style="border:none; background:transparent; width:60px; text-align:right; font-size:16px; color:#8e8e93; outline:none;">
                 </div>
                 <div style="padding:12px 16px; font-size:12px; color:#999; line-height:1.6; background:#f8f8f8; border-radius:8px; margin:0 16px 12px 16px;">
                     <div style="font-weight:600; color:#666; margin-bottom:6px;">功能说明：</div>
@@ -2577,12 +2689,19 @@
                         <div>朋友圈频率</div>
                         <div style="font-size:12px; color:#999; line-height:1.4;">角色自动发朋友圈的频率</div>
                     </div>
-                    <select id="detail-moments-frequency" onchange="saveChatDetail()" style="border:1px solid #e0e0e0; background:#fff; padding:6px 12px; border-radius:8px; font-size:14px; color:#333; outline:none; -webkit-appearance:none; appearance:none; cursor:pointer;">
+                    <select id="detail-moments-frequency" style="border:1px solid #e0e0e0; background:#fff; padding:6px 12px; border-radius:8px; font-size:14px; color:#333; outline:none; -webkit-appearance:none; appearance:none; cursor:pointer;">
                         <option value="off">关闭</option>
-                        <option value="low">低</option>
-                        <option value="medium">中</option>
-                        <option value="high">高</option>
+                        <option value="low">低（4~8小时）</option>
+                        <option value="medium">中（1~3小时）</option>
+                        <option value="high">高（15~60分钟）</option>
                     </select>
+                </div>
+                <div class="detail-item" onclick="manualTriggerMoment()" style="cursor:pointer;">
+                    <div style="display:flex; flex-direction:column; gap:4px;">
+                        <div>立即发一条朋友圈</div>
+                        <div style="font-size:12px; color:#999; line-height:1.4;">手动触发角色生成朋友圈并生成评论</div>
+                    </div>
+                    <div style="color:#ffb6c1; font-size:20px;">›</div>
                 </div>
             </div>
 
@@ -2591,7 +2710,7 @@
                 <div class="detail-item">
                     <div>上下文条数</div>
                     <div style="display:flex; align-items:center; gap:8px;">
-                        <input type="number" id="detail-context-count" value="20" style="border:none; background:transparent; width:60px; text-align:right; font-size:16px; color:#8e8e93; outline:none;" onchange="saveChatDetail()">
+                        <input type="number" id="detail-context-count" value="20" style="border:none; background:transparent; width:60px; text-align:right; font-size:16px; color:#8e8e93; outline:none;">
                         <span style="font-size:12px; color:#999;">条</span>
                     </div>
                 </div>
@@ -2608,9 +2727,9 @@
                         <div style="font-size:12px; color:#999; line-height:1.4;">AI每次回复的消息条数范围</div>
                     </div>
                     <div style="display:flex; align-items:center; gap:8px;">
-                        <input type="number" id="detail-reply-min-count" value="1" min="1" max="50" style="border:1px solid #e0e0e0; background:#fff; width:50px; text-align:center; font-size:16px; color:#333; outline:none; padding:4px; border-radius:6px;" onchange="saveChatDetail()">
+                        <input type="number" id="detail-reply-min-count" value="1" min="1" max="50" style="border:1px solid #e0e0e0; background:#fff; width:50px; text-align:center; font-size:16px; color:#333; outline:none; padding:4px; border-radius:6px;">
                         <span style="font-size:14px; color:#999;">~</span>
-                        <input type="number" id="detail-reply-max-count" value="3" min="1" max="50" style="border:1px solid #e0e0e0; background:#fff; width:50px; text-align:center; font-size:16px; color:#333; outline:none; padding:4px; border-radius:6px;" onchange="saveChatDetail()">
+                        <input type="number" id="detail-reply-max-count" value="3" min="1" max="50" style="border:1px solid #e0e0e0; background:#fff; width:50px; text-align:center; font-size:16px; color:#333; outline:none; padding:4px; border-radius:6px;">
                         <span style="font-size:12px; color:#999;">条</span>
                     </div>
                 </div>
@@ -2678,13 +2797,13 @@
                         <div style="font-size:12px; color:#999; line-height:1.4;">AI自动总结聊天内容到收藏</div>
                     </div>
                     <label class="ios-switch">
-                        <input type="checkbox" id="detail-auto-summary-switch" onchange="saveChatDetail()">
+                        <input type="checkbox" id="detail-auto-summary-switch">
                         <span class="slider"></span>
                     </label>
                 </div>
                 <div class="detail-item">
                     <div>每多少条总结</div>
-                    <input type="number" id="detail-summary-interval" placeholder="50" style="border:none; background:transparent; width:60px; text-align:right; font-size:16px; color:#8e8e93; outline:none;" onchange="saveChatDetail()">
+                    <input type="number" id="detail-summary-interval" placeholder="50" style="border:none; background:transparent; width:60px; text-align:right; font-size:16px; color:#8e8e93; outline:none;">
                 </div>
                 <div class="detail-item" onclick="showChatSummaries('private')" style="cursor:pointer;">
                     <div>查看总结记录</div>
@@ -2753,15 +2872,15 @@
                             <div id="chat-bubble-preview" style="background:#f5f5f5; border-radius:10px; padding:12px; min-height:80px; overflow:hidden;">
                                 <div class="message-row other" style="display:flex; gap:6px; align-items:flex-start; margin-bottom:10px;">
                                     <div class="message-avatar" style="width:28px !important; height:28px !important; border-radius:50%; background:#ccc; flex-shrink:0;"></div>
-                                    <div class="message-content ai-bubble" style="padding:6px 10px; border-radius:12px 12px 12px 4px; font-size:14px; line-height:1.5; display:inline-block;">你好呀 👋</div>
+                                    <div class="message-content ai-bubble">你好呀 👋</div>
                                 </div>
                                 <div class="message-row self" style="display:flex; gap:6px; align-items:flex-start; flex-direction:row-reverse; margin-bottom:10px;">
                                     <div class="message-avatar" style="width:28px !important; height:28px !important; border-radius:50%; background:#ddd; flex-shrink:0;"></div>
-                                    <div class="message-content user-bubble" style="padding:6px 10px; border-radius:12px 12px 4px 12px; font-size:14px; line-height:1.5; display:inline-block;">嗨~ 今天过得怎么样？🌞</div>
+                                    <div class="message-content user-bubble">嗨~ 今天过得怎么样？🌞</div>
                                 </div>
                                 <div class="message-row other" style="display:flex; gap:6px; align-items:flex-start;">
                                     <div class="message-avatar" style="width:28px !important; height:28px !important; border-radius:50%; background:#ccc; flex-shrink:0;"></div>
-                                    <div class="message-content ai-bubble" style="padding:6px 10px; border-radius:12px 12px 12px 4px; font-size:14px; line-height:1.5; display:inline-block;">挺好的，一起出去玩吧 🎈</div>
+                                    <div class="message-content ai-bubble">挺好的，一起出去玩吧 🎈</div>
                                 </div>
                             </div>
                         </div>
@@ -2989,21 +3108,21 @@
                                 <div style="width:28px; height:28px; border-radius:50%; background:#ccc; flex-shrink:0;"></div>
                                 <div>
                                     <div style="font-size:11px; color:#999; margin-bottom:2px;">群成员</div>
-                                    <div class="group-preview-bubble other-bubble" style="background:#f2f2f7; color:#000; padding:6px 10px; border-radius:18px 18px 18px 4px; font-size:14px; line-height:1.5; display:inline-block;">大家好呀 👋</div>
+                                    <div class="group-preview-bubble group-msg-content other-bubble">大家好呀 👋</div>
                                 </div>
                             </div>
                             <div style="display:flex; gap:6px; align-items:flex-start; flex-direction:row-reverse; margin-bottom:10px;">
                                 <div style="width:28px; height:28px; border-radius:50%; background:#ddd; flex-shrink:0;"></div>
                                 <div style="display:flex; flex-direction:column; align-items:flex-end;">
                                     <div style="font-size:11px; color:#999; margin-bottom:2px;">我</div>
-                                    <div class="group-preview-bubble self-bubble" style="background:#ffe4e8; color:#000; padding:6px 10px; border-radius:18px 18px 4px 18px; font-size:14px; line-height:1.5; display:inline-block;">你好！今天天气不错 🌞</div>
+                                    <div class="group-preview-bubble group-msg-content self-bubble">你好！今天天气不错 🌞</div>
                                 </div>
                             </div>
                             <div style="display:flex; gap:6px; align-items:flex-start;">
                                 <div style="width:28px; height:28px; border-radius:50%; background:#b8d4e3; flex-shrink:0;"></div>
                                 <div>
                                     <div style="font-size:11px; color:#999; margin-bottom:2px;">另一个成员</div>
-                                    <div class="group-preview-bubble other-bubble" style="background:#f2f2f7; color:#000; padding:6px 10px; border-radius:18px 18px 18px 4px; font-size:14px; line-height:1.5; display:inline-block;">是呀，出去走走吧 🚶</div>
+                                    <div class="group-preview-bubble group-msg-content other-bubble">是呀，出去走走吧 🚶</div>
                                 </div>
                             </div>
                         </div>
@@ -4866,7 +4985,7 @@
                         <div class="time-mode-sub">关闭=现实时间</div>
                     </div>
                     <label class="ios-switch">
-                        <input type="checkbox" id="cal-time-mode-toggle" checked>
+                        <input type="checkbox" id="cal-time-mode-toggle">
                         <span class="slider"></span>
                     </label>
                 </div>
@@ -5038,15 +5157,25 @@
         </div>
         
         <div class="chat-footer" id="offline-chat-footer" style="background:#fff; border-top:1px solid #f0f0f0;">
-            <div class="chat-input-bar" style="display:flex; align-items:center; gap:10px;">
-                <textarea id="offline-chat-input-box" class="chat-input" placeholder="输入消息..." rows="1" onkeydown="handleOfflineChatInputKey(event)" oninput="handleOfflineChatInputChange(this)" onfocus="onOfflineChatInputFocus()" style="flex:1; max-height:130px; resize:none;"></textarea>
-                <button onclick="rerollOfflineMessage()" style="width:32px; height:32px; border-radius:50%; border:1px solid #e8e8e8; background:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; transition:all 0.2s;" title="重新生成">
-                    <svg viewBox="0 0 24 24" style="width:18px; height:18px; stroke:#ffb3d1; fill:none; stroke-width:2;">
+            <!-- 接收回复按钮（独立一行） -->
+            <div id="offline-reply-bar" style="display:flex; justify-content:center; padding:8px 16px 4px; gap:8px;">
+                <button id="offline-btn-receive" onclick="requestOfflineReply()" style="display:flex; align-items:center; gap:6px; padding:8px 20px; border-radius:20px; border:1.5px solid #ffb3d1; background:#fff; color:#e0789b; font-size:14px; font-weight:500; cursor:pointer; transition:all 0.2s; font-family:-apple-system, BlinkMacSystemFont, sans-serif;">
+                    <svg viewBox="0 0 24 24" style="width:16px; height:16px; stroke:currentColor; fill:none; stroke-width:2;">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                    <span id="offline-btn-receive-text">接收回复</span>
+                </button>
+                <button onclick="rerollOfflineMessage()" style="display:flex; align-items:center; gap:6px; padding:8px 16px; border-radius:20px; border:1px solid #e8e8e8; background:#fff; color:#999; font-size:13px; cursor:pointer; transition:all 0.2s; font-family:-apple-system, BlinkMacSystemFont, sans-serif;" title="重新生成">
+                    <svg viewBox="0 0 24 24" style="width:15px; height:15px; stroke:currentColor; fill:none; stroke-width:2;">
                         <polyline points="23 4 23 10 17 10"></polyline>
                         <polyline points="1 20 1 14 7 14"></polyline>
                         <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
                     </svg>
+                    重新生成
                 </button>
+            </div>
+            <div class="chat-input-bar" style="display:flex; align-items:center; gap:10px;">
+                <textarea id="offline-chat-input-box" class="chat-input" placeholder="输入消息..." rows="1" onkeydown="handleOfflineChatInputKey(event)" oninput="handleOfflineChatInputChange(this)" onfocus="onOfflineChatInputFocus()" style="flex:1; max-height:130px; resize:none;"></textarea>
                 <button id="offline-btn-send" onclick="sendOfflineMessage()" onmousedown="event.preventDefault()" style="width:32px; height:32px; border-radius:50%; background:#ffb3d1; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; opacity:0.4; transition:all 0.2s;">
                     <svg viewBox="0 0 24 24" style="width:16px; height:16px; stroke:#fff; fill:none; stroke-width:2;">
                         <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -5100,6 +5229,28 @@
                 <div style="font-size:15px; font-weight:500; color:#333; margin-bottom:4px;">自定义预设</div>
                 <div style="font-size:12px; color:#999; margin-bottom:12px;">追加到系统提示词末尾，可用于自定义场景、地点、规则等。留空则使用默认设定。</div>
                 <textarea id="offline-custom-preset" placeholder="例如：&#10;场景是在一家安静的咖啡厅里，窗外下着小雨...&#10;&#10;或者：&#10;请使用更加文学化的描写风格，多使用比喻和象征手法。" style="width:100%; min-height:150px; border:1px solid #e0e0e0; background:#fafafa; padding:12px; border-radius:8px; font-size:14px; color:#333; line-height:1.6; resize:vertical; outline:none; box-sizing:border-box; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;" onfocus="this.style.borderColor='#ffb3d1'" onblur="this.style.borderColor='#e0e0e0'"></textarea>
+                
+                <div style="display:flex; gap:10px; margin-top:12px;">
+                    <div onclick="saveOfflineCustomPreset()" style="flex:1; padding:10px; background:#e8f5e9; color:#43a047; text-align:center; border-radius:8px; font-size:13px; font-weight:500; cursor:pointer;">💾 保存方案</div>
+                    <div onclick="loadOfflineCustomPreset()" style="flex:1; padding:10px; background:#e3f2fd; color:#1e88e5; text-align:center; border-radius:8px; font-size:13px; font-weight:500; cursor:pointer;">📂 加载方案</div>
+                </div>
+                <div id="offline-preset-list" style="display:none; margin-top:12px; border-top:1px dashed #eee; padding-top:12px;">
+                    <!-- 动态生成预设列表 -->
+                </div>
+            </div>
+
+            <!-- 自定义气泡CSS -->
+            <div style="background:#fff; border-radius:12px; padding:16px; margin-bottom:16px;">
+                <div style="font-size:15px; font-weight:500; color:#333; margin-bottom:4px;">自定义气泡CSS</div>
+                <div style="font-size:12px; color:#999; margin-bottom:12px; line-height:1.5;">
+                    可覆盖默认气泡样式。可用类名：<br>
+                    <code style="background:#f5f5f5; padding:1px 4px; border-radius:3px; font-size:11px;">.offline-msg-bubble</code> 所有气泡<br>
+                    <code style="background:#f5f5f5; padding:1px 4px; border-radius:3px; font-size:11px;">.offline-bubble-self</code> 自己的气泡<br>
+                    <code style="background:#f5f5f5; padding:1px 4px; border-radius:3px; font-size:11px;">.offline-bubble-other</code> 对方的气泡<br>
+                    <code style="background:#f5f5f5; padding:1px 4px; border-radius:3px; font-size:11px;">.offline-msg-row</code> 消息行<br>
+                    <code style="background:#f5f5f5; padding:1px 4px; border-radius:3px; font-size:11px;">.offline-msg-avatar</code> 头像
+                </div>
+                <textarea id="offline-custom-bubble-css" placeholder="例如：&#10;.offline-msg-bubble {&#10;  border-radius: 18px;&#10;  border: none;&#10;  box-shadow: 0 1px 3px rgba(0,0,0,0.1);&#10;}&#10;.offline-bubble-self {&#10;  background: #e8f5e9;&#10;}" style="width:100%; min-height:120px; border:1px solid #e0e0e0; background:#fafafa; padding:12px; border-radius:8px; font-size:13px; color:#333; line-height:1.6; resize:vertical; outline:none; box-sizing:border-box; font-family:'Courier New', monospace;" onfocus="this.style.borderColor='#ffb3d1'" onblur="this.style.borderColor='#e0e0e0'"></textarea>
             </div>
 
             <!-- 保存按钮 -->
@@ -7622,7 +7773,7 @@
     </div>
 
     <!-- 引入外部 JavaScript 文件 -->
-    <script src="script.JS" defer></script>
+    <script src="script.js" defer></script>
     
 
 </body>
