@@ -1,3 +1,379 @@
+// ==================== 📱 移动端实时控制台 (MobileConsole) ====================
+// 拦截 console 输出，在页面上显示浮动控制台，方便手机端调试
+(function() {
+    const MC_MAX_LOGS = 500;
+    const mcLogs = [];
+    let mcVisible = false;
+    let mcFilter = 'all'; // all | log | warn | error | info
+    let mcSearchText = '';
+    let mcPaused = false;
+    let mcPanel = null;
+    let mcFab = null;
+    let mcUnread = 0;
+
+    // 保存原始 console 方法
+    const _origLog = console.log.bind(console);
+    const _origWarn = console.warn.bind(console);
+    const _origError = console.error.bind(console);
+    const _origInfo = console.info.bind(console);
+    const _origDebug = console.debug.bind(console);
+
+    function formatArg(arg) {
+        if (arg === null) return 'null';
+        if (arg === undefined) return 'undefined';
+        if (typeof arg === 'string') return arg;
+        if (arg instanceof Error) return `${arg.name}: ${arg.message}\n${arg.stack || ''}`;
+        if (typeof arg === 'object') {
+            try { return JSON.stringify(arg, null, 2); }
+            catch (e) { return String(arg); }
+        }
+        return String(arg);
+    }
+
+    function addMcLog(level, args) {
+        const entry = {
+            id: Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+            time: new Date(),
+            level: level,
+            text: Array.from(args).map(formatArg).join(' ')
+        };
+        mcLogs.push(entry);
+        if (mcLogs.length > MC_MAX_LOGS) mcLogs.splice(0, mcLogs.length - MC_MAX_LOGS);
+
+        if (!mcVisible) {
+            mcUnread++;
+            updateFabBadge();
+        }
+        if (mcVisible && !mcPaused) {
+            appendLogEntry(entry);
+            autoScrollLogs();
+        }
+    }
+
+    // 拦截 console
+    console.log = function() { _origLog.apply(console, arguments); addMcLog('log', arguments); };
+    console.warn = function() { _origWarn.apply(console, arguments); addMcLog('warn', arguments); };
+    console.error = function() { _origError.apply(console, arguments); addMcLog('error', arguments); };
+    console.info = function() { _origInfo.apply(console, arguments); addMcLog('info', arguments); };
+    console.debug = function() { _origDebug.apply(console, arguments); addMcLog('debug', arguments); };
+
+    // 捕获全局错误
+    window.addEventListener('error', function(e) {
+        addMcLog('error', [`[GlobalError] ${e.message}`, `at ${e.filename}:${e.lineno}:${e.colno}`]);
+    });
+    window.addEventListener('unhandledrejection', function(e) {
+        addMcLog('error', [`[UnhandledPromise] ${e.reason}`]);
+    });
+
+    const MC_COLORS = {
+        log: { bg: 'transparent', color: '#333', border: 'transparent' },
+        info: { bg: '#e8f4fd', color: '#0d6efd', border: '#b6d4fe' },
+        warn: { bg: '#fff8e1', color: '#b8860b', border: '#ffe082' },
+        error: { bg: '#fdecea', color: '#d32f2f', border: '#f5c6cb' },
+        debug: { bg: '#f3e5f5', color: '#7b1fa2', border: '#ce93d8' }
+    };
+
+    function getTimeStr(d) {
+        return d.toTimeString().split(' ')[0] + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    }
+
+    function escHtml(s) {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function createLogEntryHtml(entry) {
+        const c = MC_COLORS[entry.level] || MC_COLORS.log;
+        const levelIcon = { log: '📝', info: 'ℹ️', warn: '⚠️', error: '❌', debug: '🔍' }[entry.level] || '📝';
+        const textEsc = escHtml(entry.text);
+        // 如果文本超过200字符，截断并支持展开
+        const isLong = entry.text.length > 200;
+        const shortText = isLong ? escHtml(entry.text.substring(0, 200)) + '...' : textEsc;
+
+        return `<div class="mc-log-entry" data-level="${entry.level}" data-id="${entry.id}" style="padding:6px 10px;border-bottom:1px solid #f0f0f0;font-size:12px;line-height:1.5;background:${c.bg};border-left:3px solid ${c.border};word-break:break-all;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">
+                <span style="color:${c.color};font-weight:600;font-size:11px;">${levelIcon} ${entry.level.toUpperCase()}</span>
+                <span style="color:#aaa;font-size:10px;font-family:monospace;">${getTimeStr(entry.time)}</span>
+            </div>
+            <div class="mc-log-text" style="color:${c.color};font-family:'SF Mono',Menlo,Consolas,monospace;font-size:11.5px;white-space:pre-wrap;${isLong ? 'cursor:pointer;' : ''}" ${isLong ? `onclick="this.textContent=this.getAttribute('data-full')" data-full="${textEsc.replace(/"/g, '&quot;')}"` : ''}>${shortText}</div>
+        </div>`;
+    }
+
+    function appendLogEntry(entry) {
+        if (!mcPanel) return;
+        const container = mcPanel.querySelector('#mc-log-container');
+        if (!container) return;
+        // 过滤检查
+        if (mcFilter !== 'all' && entry.level !== mcFilter) return;
+        if (mcSearchText && !entry.text.toLowerCase().includes(mcSearchText.toLowerCase())) return;
+        container.insertAdjacentHTML('beforeend', createLogEntryHtml(entry));
+    }
+
+    function autoScrollLogs() {
+        if (!mcPanel) return;
+        const container = mcPanel.querySelector('#mc-log-container');
+        if (container) {
+            requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
+        }
+    }
+
+    function renderAllLogs() {
+        if (!mcPanel) return;
+        const container = mcPanel.querySelector('#mc-log-container');
+        if (!container) return;
+        const filtered = mcLogs.filter(e => {
+            if (mcFilter !== 'all' && e.level !== mcFilter) return false;
+            if (mcSearchText && !e.text.toLowerCase().includes(mcSearchText.toLowerCase())) return false;
+            return true;
+        });
+        container.innerHTML = filtered.map(createLogEntryHtml).join('');
+        autoScrollLogs();
+    }
+
+    function updateFilterBtns() {
+        if (!mcPanel) return;
+        mcPanel.querySelectorAll('.mc-filter-btn').forEach(btn => {
+            const f = btn.getAttribute('data-filter');
+            btn.style.background = f === mcFilter ? '#ffb3d1' : '#f5f5f5';
+            btn.style.color = f === mcFilter ? '#fff' : '#666';
+            btn.style.fontWeight = f === mcFilter ? '600' : '400';
+        });
+    }
+
+    function updateFabBadge() {
+        if (!mcFab) return;
+        const badge = mcFab.querySelector('.mc-badge');
+        if (badge) {
+            if (mcUnread > 0) {
+                badge.textContent = mcUnread > 99 ? '99+' : mcUnread;
+                badge.style.display = 'flex';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+    }
+
+    function getLogCounts() {
+        const counts = { all: mcLogs.length, log: 0, info: 0, warn: 0, error: 0 };
+        mcLogs.forEach(e => { if (counts[e.level] !== undefined) counts[e.level]++; });
+        return counts;
+    }
+
+    function updateCountBadges() {
+        if (!mcPanel) return;
+        const counts = getLogCounts();
+        mcPanel.querySelectorAll('.mc-filter-btn').forEach(btn => {
+            const f = btn.getAttribute('data-filter');
+            const countSpan = btn.querySelector('.mc-count');
+            if (countSpan && counts[f] !== undefined) {
+                countSpan.textContent = counts[f];
+            }
+        });
+    }
+
+    function createPanel() {
+        if (mcPanel) { mcPanel.remove(); mcPanel = null; }
+
+        mcPanel = document.createElement('div');
+        mcPanel.id = 'mc-console-panel';
+        mcPanel.style.cssText = `position:fixed;bottom:0;left:0;right:0;height:55vh;background:#fff;z-index:99999;display:flex;flex-direction:column;box-shadow:0 -4px 20px rgba(0,0,0,0.15);border-top-left-radius:16px;border-top-right-radius:16px;transition:transform 0.3s cubic-bezier(0.4,0,0.2,1);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;`;
+
+        // 头部拖拽条 + 工具栏
+        mcPanel.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:center;padding:8px 0 4px;cursor:grab;" id="mc-drag-handle">
+                <div style="width:40px;height:4px;background:#ddd;border-radius:2px;"></div>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 12px 8px;">
+                <div style="font-size:14px;font-weight:600;color:#333;">📱 控制台</div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button id="mc-btn-pause" onclick="window._mcTogglePause()" style="padding:4px 10px;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:6px;font-size:11px;cursor:pointer;color:#666;">⏸ 暂停</button>
+                    <button onclick="window._mcClearLogs()" style="padding:4px 10px;background:#fff0f0;border:1px solid #fcc;border-radius:6px;font-size:11px;cursor:pointer;color:#d32f2f;">🗑 清空</button>
+                    <button onclick="window._mcExportLogs()" style="padding:4px 10px;background:#f0f4ff;border:1px solid #d8e2f8;border-radius:6px;font-size:11px;cursor:pointer;color:#5b7ddb;">📤 导出</button>
+                    <button onclick="window._mcHideConsole()" style="width:28px;height:28px;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:50%;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;">✕</button>
+                </div>
+            </div>
+            <div style="display:flex;gap:4px;padding:0 12px 8px;flex-wrap:wrap;align-items:center;">
+                <button class="mc-filter-btn" data-filter="all" onclick="window._mcSetFilter('all')" style="padding:3px 8px;border-radius:12px;border:none;font-size:11px;cursor:pointer;">全部 <span class="mc-count">0</span></button>
+                <button class="mc-filter-btn" data-filter="log" onclick="window._mcSetFilter('log')" style="padding:3px 8px;border-radius:12px;border:none;font-size:11px;cursor:pointer;">Log <span class="mc-count">0</span></button>
+                <button class="mc-filter-btn" data-filter="info" onclick="window._mcSetFilter('info')" style="padding:3px 8px;border-radius:12px;border:none;font-size:11px;cursor:pointer;">Info <span class="mc-count">0</span></button>
+                <button class="mc-filter-btn" data-filter="warn" onclick="window._mcSetFilter('warn')" style="padding:3px 8px;border-radius:12px;border:none;font-size:11px;cursor:pointer;">Warn <span class="mc-count">0</span></button>
+                <button class="mc-filter-btn" data-filter="error" onclick="window._mcSetFilter('error')" style="padding:3px 8px;border-radius:12px;border:none;font-size:11px;cursor:pointer;">Error <span class="mc-count">0</span></button>
+                <div style="flex:1;min-width:80px;margin-left:4px;">
+                    <input type="text" id="mc-search-input" placeholder="🔍 搜索日志..." oninput="window._mcOnSearch(this.value)" style="width:100%;padding:4px 8px;border:1px solid #e0e0e0;border-radius:8px;font-size:11px;outline:none;box-sizing:border-box;" />
+                </div>
+            </div>
+            <div id="mc-log-container" style="flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;background:#fafafa;"></div>
+            <div id="mc-status-bar" style="padding:4px 12px;font-size:10px;color:#aaa;border-top:1px solid #f0f0f0;display:flex;justify-content:space-between;background:#fff;">
+                <span id="mc-status-count">共 0 条</span>
+                <span id="mc-status-mem"></span>
+            </div>
+        `;
+
+        document.body.appendChild(mcPanel);
+        updateFilterBtns();
+        updateCountBadges();
+        renderAllLogs();
+        updateStatusBar();
+
+        // 拖拽调整高度
+        let startY = 0, startH = 0, isDragging = false;
+        const handle = mcPanel.querySelector('#mc-drag-handle');
+        handle.addEventListener('touchstart', (e) => {
+            isDragging = true;
+            startY = e.touches[0].clientY;
+            startH = mcPanel.offsetHeight;
+            e.preventDefault();
+        }, { passive: false });
+        document.addEventListener('touchmove', (e) => {
+            if (!isDragging) return;
+            const dy = startY - e.touches[0].clientY;
+            const newH = Math.max(150, Math.min(window.innerHeight * 0.9, startH + dy));
+            mcPanel.style.height = newH + 'px';
+        }, { passive: true });
+        document.addEventListener('touchend', () => { isDragging = false; });
+    }
+
+    function updateStatusBar() {
+        if (!mcPanel) return;
+        const countEl = mcPanel.querySelector('#mc-status-count');
+        const memEl = mcPanel.querySelector('#mc-status-mem');
+        if (countEl) countEl.textContent = `共 ${mcLogs.length} 条`;
+        if (memEl && performance && performance.memory) {
+            const used = (performance.memory.usedJSHeapSize / 1048576).toFixed(1);
+            const total = (performance.memory.totalJSHeapSize / 1048576).toFixed(1);
+            memEl.textContent = `内存: ${used}/${total}MB`;
+        }
+    }
+
+    function createFab() {
+        if (mcFab) return;
+        mcFab = document.createElement('div');
+        mcFab.id = 'mc-fab';
+        mcFab.style.cssText = `position:fixed;bottom:80px;right:12px;width:44px;height:44px;background:linear-gradient(135deg,#ffb3d1,#ff8fbc);border-radius:50%;z-index:99998;display:none;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 3px 12px rgba(255,143,188,0.4);font-size:20px;user-select:none;-webkit-user-select:none;touch-action:none;transition:transform 0.2s;`;
+        mcFab.innerHTML = `<span style="pointer-events:none;">🖥</span><span class="mc-badge" style="display:none;position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;background:#ff3b30;color:#fff;border-radius:9px;font-size:10px;font-weight:600;align-items:center;justify-content:center;padding:0 4px;pointer-events:none;"></span>`;
+        mcFab.onclick = () => { window._mcShowConsole(); };
+        document.body.appendChild(mcFab);
+
+        // 拖拽移动FAB
+        let fabDragging = false, fabStartX = 0, fabStartY = 0, fabOrigX = 0, fabOrigY = 0, fabMoved = false;
+        mcFab.addEventListener('touchstart', (e) => {
+            fabDragging = true; fabMoved = false;
+            fabStartX = e.touches[0].clientX; fabStartY = e.touches[0].clientY;
+            const rect = mcFab.getBoundingClientRect();
+            fabOrigX = rect.left; fabOrigY = rect.top;
+            mcFab.style.transition = 'none';
+            e.preventDefault();
+        }, { passive: false });
+        document.addEventListener('touchmove', (e) => {
+            if (!fabDragging) return;
+            const dx = e.touches[0].clientX - fabStartX;
+            const dy = e.touches[0].clientY - fabStartY;
+            if (Math.abs(dx) > 5 || Math.abs(dy) > 5) fabMoved = true;
+            const nx = Math.max(0, Math.min(window.innerWidth - 44, fabOrigX + dx));
+            const ny = Math.max(0, Math.min(window.innerHeight - 44, fabOrigY + dy));
+            mcFab.style.left = nx + 'px'; mcFab.style.top = ny + 'px';
+            mcFab.style.right = 'auto'; mcFab.style.bottom = 'auto';
+        }, { passive: true });
+        document.addEventListener('touchend', () => {
+            if (!fabDragging) return;
+            fabDragging = false;
+            mcFab.style.transition = 'transform 0.2s';
+            if (fabMoved) {
+                // 吸附到最近的边
+                const rect = mcFab.getBoundingClientRect();
+                const centerX = rect.left + 22;
+                if (centerX < window.innerWidth / 2) {
+                    mcFab.style.left = '12px'; mcFab.style.right = 'auto';
+                } else {
+                    mcFab.style.left = 'auto'; mcFab.style.right = '12px';
+                }
+            } else {
+                // 没有拖拽移动 → 视为点击，打开控制台
+                window._mcShowConsole();
+            }
+        });
+    }
+
+    // 全局方法暴露
+    window._mcShowConsole = function() {
+        mcVisible = true; mcUnread = 0; updateFabBadge();
+        if (mcFab) mcFab.style.display = 'none';
+        createPanel();
+    };
+    window._mcHideConsole = function() {
+        mcVisible = false;
+        if (mcPanel) { mcPanel.remove(); mcPanel = null; }
+        if (mcFab && localStorage.getItem('mc_console_enabled') === 'true') {
+            mcFab.style.display = 'flex';
+        }
+    };
+    window._mcTogglePause = function() {
+        mcPaused = !mcPaused;
+        const btn = mcPanel && mcPanel.querySelector('#mc-btn-pause');
+        if (btn) {
+            btn.textContent = mcPaused ? '▶ 继续' : '⏸ 暂停';
+            btn.style.background = mcPaused ? '#e8f5e9' : '#f5f5f5';
+            btn.style.color = mcPaused ? '#2e7d32' : '#666';
+        }
+    };
+    window._mcSetFilter = function(f) {
+        mcFilter = f;
+        updateFilterBtns();
+        renderAllLogs();
+    };
+    window._mcOnSearch = function(val) {
+        mcSearchText = val;
+        renderAllLogs();
+    };
+    window._mcClearLogs = function() {
+        mcLogs.length = 0;
+        renderAllLogs();
+        updateCountBadges();
+        updateStatusBar();
+    };
+    window._mcExportLogs = function() {
+        const text = mcLogs.map(e => `[${getTimeStr(e.time)}] [${e.level.toUpperCase()}] ${e.text}`).join('\n');
+        const blob = new Blob([text], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `console_logs_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
+    // 启用/禁用控制台
+    window._mcEnableConsole = function(enabled) {
+        localStorage.setItem('mc_console_enabled', enabled ? 'true' : 'false');
+        if (enabled) {
+            createFab();
+            if (mcFab) mcFab.style.display = 'flex';
+        } else {
+            if (mcFab) mcFab.style.display = 'none';
+            if (mcPanel) { mcPanel.remove(); mcPanel = null; }
+            mcVisible = false;
+        }
+    };
+
+    // 页面加载后检查是否已启用
+    function mcInit() {
+        createFab();
+        if (localStorage.getItem('mc_console_enabled') === 'true') {
+            if (mcFab) mcFab.style.display = 'flex';
+        }
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', mcInit);
+    } else {
+        mcInit();
+    }
+
+    // 定时更新状态栏和计数
+    setInterval(() => {
+        if (mcVisible) { updateCountBadges(); updateStatusBar(); }
+    }, 3000);
+
+})();
+// ==================== END 移动端实时控制台 ====================
+
 // 全局异常兜底：防止未捕获的错误导致页面假死
 window.addEventListener('error', function(e) {
     console.error('[GlobalError]', e.message, e.filename, e.lineno);
@@ -57,19 +433,32 @@ if (_isPWAStandalone) {
 }
 
 // 移动端虚拟键盘适配
-// 原理：键盘弹起时 visualViewport.height 缩小，但 window.innerHeight（100vh）不变
+// 原理：键盘弹起时 visualViewport.height 缩小
 // 直接把 chat-window 高度设为可视视口高度，让整个底栏（输入框+按钮）都在键盘上方
 // PWA全屏模式特别处理：去掉安全区域padding + 对齐visualViewport偏移
+// 🔧 兼容性：部分 Android 手机键盘弹出时 window.innerHeight 也会缩小，
+//    导致 kbHeight 计算为 0，需要用初始高度做备用检测
 let _kbLastHeight = 0;
 let _kbLastTop = 0;
 let _kbRecalibrateTimer = null;
+const _kbInitialInnerHeight = window.innerHeight; // 🔧 记录初始屏幕高度，用于兼容 Android
 
 function applyKeyboardLayout() {
     const vp = window.visualViewport;
     if (!vp) return;
     
-    const kbHeight = Math.max(0, Math.round(window.innerHeight - vp.height));
+    // 🔧 主检测：visualViewport 高度 vs window.innerHeight
+    let kbHeight = Math.max(0, Math.round(window.innerHeight - vp.height));
     const vpTop = Math.round(vp.offsetTop || 0);
+    
+    // 🔧 备用检测：部分 Android 手机 window.innerHeight 也跟着键盘缩小
+    // 此时用初始记录的高度来检测
+    if (kbHeight < 50) {
+        const fallbackKb = Math.max(0, Math.round(_kbInitialInnerHeight - vp.height));
+        if (fallbackKb > 50) {
+            kbHeight = fallbackKb;
+        }
+    }
     
     // 高度和偏移都没变时跳过
     if (kbHeight === _kbLastHeight && vpTop === _kbLastTop) return;
@@ -78,27 +467,55 @@ function applyKeyboardLayout() {
     
     const isKeyboardUp = kbHeight > 50;
     
+    // 🔧 防止浏览器因输入框聚焦而滚动整个页面（部分 Android 会出现）
+    if (isKeyboardUp) {
+        window.scrollTo(0, 0);
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+    }
+    
     // 键盘弹起时：把聊天窗口高度缩到可视视口高度，整个底栏都在键盘上方
     // 键盘收起时：恢复原始状态（CSS bottom:0 自动撑满）
+    // 🔧 修复：standalone 模式 CSS 有 height:auto!important，普通内联样式会被覆盖
+    //    必须用 setProperty(..., 'important') 才能正确设置高度
     const targets = document.querySelectorAll('.chat-window');
     targets.forEach(el => {
         if (el.style.display !== 'none' && el.style.display !== '') {
             if (isKeyboardUp) {
                 // 对齐可视视口（PWA全屏模式下可能有偏移）
                 el.style.top = vpTop + 'px';
-                el.style.height = vp.height + 'px';
+                el.style.setProperty('height', vp.height + 'px', 'important'); // 🔧 用 !important 覆盖 standalone 的 height:auto!important
                 el.style.bottom = 'auto'; // 键盘弹起时用 height 控制，禁用 bottom
                 // 标记键盘状态，CSS 会去掉安全区域 padding
                 el.classList.add('keyboard-up');
             } else {
                 // 🔧 恢复原始状态：清除所有内联样式，让 CSS 的 top:0+bottom:0 自动撑满
                 el.style.top = '';
-                el.style.height = '';
+                el.style.removeProperty('height'); // 🔧 用 removeProperty 确保清除 !important 声明
                 el.style.bottom = '';
                 el.classList.remove('keyboard-up');
             }
         }
     });
+    
+    // 🔧 短信页面键盘适配（与 chat-window 同样的逻辑）
+    const msgPage = document.getElementById('message-page');
+    if (msgPage && msgPage.classList.contains('active')) {
+        const detailPage = document.getElementById('message-detail-page');
+        if (detailPage && detailPage.classList.contains('active')) {
+            if (isKeyboardUp) {
+                msgPage.style.top = vpTop + 'px';
+                msgPage.style.setProperty('height', vp.height + 'px', 'important');
+                msgPage.style.bottom = 'auto';
+                msgPage.classList.add('keyboard-up');
+            } else {
+                msgPage.style.top = '';
+                msgPage.style.removeProperty('height');
+                msgPage.style.bottom = '';
+                msgPage.classList.remove('keyboard-up');
+            }
+        }
+    }
     
     // 键盘弹起时自动滚动聊天到底部
     if (isKeyboardUp) {
@@ -113,11 +530,19 @@ function applyKeyboardLayout() {
             if (offlineBody && offlineBody.offsetParent !== null) {
                 offlineBody.scrollTop = offlineBody.scrollHeight;
             }
+            // 🔧 短信聊天也滚动到底部
+            const msgScroll = document.getElementById('message-area-scroll');
+            if (msgScroll && msgScroll.offsetParent !== null) {
+                msgScroll.scrollTop = msgScroll.scrollHeight;
+            }
         });
     }
 }
 
 function handleKeyboardResize() {
+    // 🔧 防止页面因键盘弹出产生滚动偏移
+    window.scrollTo(0, 0);
+    
     // 立即执行一次
     applyKeyboardLayout();
     
@@ -135,6 +560,16 @@ if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', handleKeyboardResize);
     window.visualViewport.addEventListener('scroll', applyKeyboardLayout);
 }
+
+// 🔧 监听 window resize 事件作为备用（部分 Android 浏览器不触发 visualViewport 事件）
+window.addEventListener('resize', function() {
+    // 只在有聊天窗口或短信详情页显示时处理
+    const anyVisible = document.querySelector('.chat-window[style*="display: flex"], .chat-window[style*="display:flex"]');
+    const msgDetailActive = document.querySelector('#message-detail-page.active');
+    if (anyVisible || msgDetailActive) {
+        handleKeyboardResize();
+    }
+});
 
 // 初始化DEXie数据库
 const db = new Dexie('DesktopDB');
@@ -788,6 +1223,7 @@ async function safeCharacterPut(char, label) {
                     'reply_min_count', 'reply_max_count',
                     'input_placeholder',
                     'foreign_lang_mode',
+                    'theater_mode',
                     'allow_ai_check_account', 'allow_shura_mode',
                     'allow_auto_avatar',
                     'allow_autonomous_activity',
@@ -1212,6 +1648,10 @@ async function saveFinanceData(key, value) {
             if (debugSwitch) debugSwitch.checked = debugEnabled;
             if (keepaliveSwitch) keepaliveSwitch.checked = keepaliveEnabled;
             
+            // 同步移动端控制台开关状态
+            const mcConsoleSwitch = document.getElementById('mc-console-switch');
+            if (mcConsoleSwitch) mcConsoleSwitch.checked = localStorage.getItem('mc_console_enabled') === 'true';
+            
             // 如果保活已开启，等待用户交互后启动
             if (keepaliveEnabled) {
                 console.log('[Init] 保活已启用，等待用户交互...');
@@ -1458,26 +1898,13 @@ async function saveFinanceData(key, value) {
             const workerUrl = URL.createObjectURL(blob);
             keepAliveWorker = new Worker(workerUrl);
             
-            // Worker 每5秒发一个 tick，收到后检查是否需要触发主动聊天
-            let lastWorkerCheckTime = 0;
+            // Worker 每5秒发一个 tick，仅作为后台保活心跳
+            // 🔧 不再在 Worker 中重复调用 checkAutoChat 等函数
+            //    这些检查由 syncTimer（startAutoChatLoop 中的 setInterval）统一驱动
+            //    避免两个定时器交叉调用导致检查频率翻倍
             keepAliveWorker.onmessage = function(e) {
-                if (e.data === 'tick') {
-                    const now = Date.now();
-                    // 每15秒检查一次（与原来的 syncTimer 间隔一致）
-                    if (now - lastWorkerCheckTime >= 15000) {
-                        lastWorkerCheckTime = now;
-                        // 调用主动聊天检查（如果函数已定义）
-                        if (typeof checkAutoChat === 'function') {
-                            checkAutoChat();
-                        }
-                        if (typeof checkAutoMoments === 'function') {
-                            checkAutoMoments();
-                        }
-                        if (typeof checkScheduledActivity === 'function') {
-                            checkScheduledActivity();
-                        }
-                    }
-                }
+                // Worker tick 仅用于保持页面活跃，防止浏览器后台节流
+                // 实际的主动聊天检查由 syncTimer 负责
             };
             
             keepAliveWorker.postMessage('start');
@@ -2088,10 +2515,45 @@ async function saveFinanceData(key, value) {
         }
         
         // 导出所有数据（带选项）
+        // 防重复点击标志
+        let _isExporting = false;
+        
         async function exportAllDataWithOptions(includeLocal = true, includeOnline = true) {
+            // 防止重复点击导致多次并行导出
+            if (_isExporting) {
+                alert('正在导出中，请稍候...');
+                return;
+            }
+            _isExporting = true;
+            
+            // 显示加载遮罩
+            const loadingOverlay = document.createElement('div');
+            loadingOverlay.id = 'export-loading-overlay';
+            loadingOverlay.style.cssText = `
+                position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+                background: rgba(0,0,0,0.5); display: flex; align-items: center;
+                justify-content: center; z-index: 200000; flex-direction: column;
+            `;
+            loadingOverlay.innerHTML = `
+                <div style="background: white; border-radius: 12px; padding: 32px 40px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
+                    <div id="export-loading-spinner" style="width: 40px; height: 40px; border: 3px solid #eee; border-top: 3px solid #07c160; border-radius: 50%; animation: exportSpin 0.8s linear infinite; margin: 0 auto 16px;"></div>
+                    <div id="export-loading-text" style="font-size: 15px; color: #333;">正在收集数据...</div>
+                    <div id="export-loading-detail" style="font-size: 12px; color: #999; margin-top: 6px;"></div>
+                </div>
+                <style>@keyframes exportSpin { to { transform: rotate(360deg); } }</style>
+            `;
+            document.body.appendChild(loadingOverlay);
+            
+            const updateLoadingText = (text, detail) => {
+                const el = document.getElementById('export-loading-text');
+                const detailEl = document.getElementById('export-loading-detail');
+                if (el) el.textContent = text;
+                if (detailEl) detailEl.textContent = detail || '';
+            };
+            
             try {
                 const exportData = {
-                    version: '3.0', // 版本升级到3.0 - 完整导出
+                    version: '3.0',
                     exportTime: new Date().toISOString(),
                     dataTypes: {
                         local: includeLocal,
@@ -2100,27 +2562,45 @@ async function saveFinanceData(key, value) {
                     data: {}
                 };
                 
+                let skippedLsKeys = [];
                 if (includeLocal) {
-                    // ===== 1. 导出主数据库所有表 =====
-                    exportData.data.dexiData = await db.dexiData.toArray();
-                    exportData.data.lorebooks = await db.lorebooks.toArray();
-                    exportData.data.characters = await db.characters.toArray();
-                    exportData.data.sticker_categories = await db.sticker_categories.toArray();
-                    exportData.data.moments = await db.moments.toArray();
-                    exportData.data.friend_requests = await db.friend_requests.toArray();
-                    exportData.data.group_chats = await db.group_chats.toArray();
-                    exportData.data.phone_recents = await db.phone_recents.toArray();
-                    exportData.data.sms_messages = await db.sms_messages.toArray();
-                    exportData.data.chat_summaries = await db.chat_summaries.toArray();
-                    exportData.data.avatar_library = await db.avatar_library.toArray();
-                    exportData.data.avatar_categories = await db.avatar_categories.toArray();
-                    exportData.data.chat_themes = await db.chat_themes.toArray();
-                    if (db.intimate_relations) exportData.data.intimate_relations = await db.intimate_relations.toArray();
-                    if (db.intimate_requests) exportData.data.intimate_requests = await db.intimate_requests.toArray();
-                    if (db.offline_chats) exportData.data.offline_chats = await db.offline_chats.toArray();
-                    if (db.finance_data) exportData.data.finance_data = await db.finance_data.toArray();
+                    // ===== 1. 逐表导出主数据库，每个表之间让出主线程避免长时间阻塞 =====
+                    const tables = [
+                        { key: 'dexiData', table: db.dexiData, label: '聊天数据' },
+                        { key: 'lorebooks', table: db.lorebooks, label: '世界书' },
+                        { key: 'characters', table: db.characters, label: '角色' },
+                        { key: 'sticker_categories', table: db.sticker_categories, label: '表情包' },
+                        { key: 'moments', table: db.moments, label: '朋友圈' },
+                        { key: 'friend_requests', table: db.friend_requests, label: '好友请求' },
+                        { key: 'group_chats', table: db.group_chats, label: '群聊' },
+                        { key: 'phone_recents', table: db.phone_recents, label: '通话记录' },
+                        { key: 'sms_messages', table: db.sms_messages, label: '短信' },
+                        { key: 'chat_summaries', table: db.chat_summaries, label: '聊天摘要' },
+                        { key: 'avatar_library', table: db.avatar_library, label: '头像库' },
+                        { key: 'avatar_categories', table: db.avatar_categories, label: '头像分类' },
+                        { key: 'chat_themes', table: db.chat_themes, label: '聊天主题' }
+                    ];
+                    // 可选表
+                    if (db.intimate_relations) tables.push({ key: 'intimate_relations', table: db.intimate_relations, label: '亲密关系' });
+                    if (db.intimate_requests) tables.push({ key: 'intimate_requests', table: db.intimate_requests, label: '亲密请求' });
+                    if (db.offline_chats) tables.push({ key: 'offline_chats', table: db.offline_chats, label: '离线聊天' });
+                    if (db.finance_data) tables.push({ key: 'finance_data', table: db.finance_data, label: '财务数据' });
+                    
+                    for (let i = 0; i < tables.length; i++) {
+                        const { key, table, label } = tables[i];
+                        updateLoadingText(`正在收集数据 (${i + 1}/${tables.length})`, `正在读取: ${label}`);
+                        try {
+                            exportData.data[key] = await table.toArray();
+                        } catch (e) {
+                            console.warn(`[Export] 表 ${key} 导出失败:`, e);
+                            exportData.data[key] = [];
+                        }
+                        // 让出主线程，避免长时间阻塞导致浏览器杀死页面
+                        await new Promise(r => setTimeout(r, 0));
+                    }
                     
                     // ===== 2. 导出 iCity 日记数据库 =====
+                    updateLoadingText('正在收集数据', '正在读取: 日记数据');
                     try {
                         exportData.icityData = {
                             diaries: await icityDb.diaries.toArray(),
@@ -2129,8 +2609,10 @@ async function saveFinanceData(key, value) {
                     } catch(e) {
                         console.warn('[Export] iCity数据库导出失败:', e);
                     }
+                    await new Promise(r => setTimeout(r, 0));
                     
                     // ===== 3. 导出已安装应用数据库 =====
+                    updateLoadingText('正在收集数据', '正在读取: 已安装应用');
                     try {
                         exportData.installedAppsData = {
                             apps: await installedAppsDb.apps.toArray()
@@ -2138,8 +2620,10 @@ async function saveFinanceData(key, value) {
                     } catch(e) {
                         console.warn('[Export] 已安装应用数据库导出失败:', e);
                     }
+                    await new Promise(r => setTimeout(r, 0));
                     
                     // ===== 4. 导出音乐播放器数据库（不含音频文件） =====
+                    updateLoadingText('正在收集数据', '正在读取: 音乐数据');
                     try {
                         exportData.wyyMusicData = {
                             userSettings: await wyyDb.userSettings.toArray(),
@@ -2152,17 +2636,25 @@ async function saveFinanceData(key, value) {
                     } catch(e) {
                         console.warn('[Export] 音乐播放器数据库导出失败:', e);
                     }
+                    await new Promise(r => setTimeout(r, 0));
                     
-                    // ===== 5. 导出完整 localStorage（全量） =====
+                    // ===== 5. 导出完整 localStorage（全量），跳过超大 base64 值 =====
+                    updateLoadingText('正在收集数据', '正在读取: 本地设置');
                     exportData.localStorage = {};
+                    const MAX_LS_VALUE_SIZE = 5 * 1024 * 1024; // 单个 localStorage 值超过 5MB 则跳过
                     for (let i = 0; i < localStorage.length; i++) {
                         const key = localStorage.key(i);
-                        exportData.localStorage[key] = localStorage.getItem(key);
+                        const value = localStorage.getItem(key);
+                        if (value && value.length > MAX_LS_VALUE_SIZE) {
+                            skippedLsKeys.push(key);
+                            console.warn(`[Export] localStorage key "${key}" 值过大(${(value.length / 1024 / 1024).toFixed(1)}MB)，已跳过`);
+                            continue;
+                        }
+                        exportData.localStorage[key] = value;
                     }
                 }
                 
                 if (includeOnline) {
-                    // 导出联机相关数据（兼容旧格式）
                     exportData.onlineData = {
                         server_url: localStorage.getItem('online_server_url'),
                         token: localStorage.getItem('online_token'),
@@ -2170,16 +2662,39 @@ async function saveFinanceData(key, value) {
                     };
                 }
                 
-                // 转换为JSON字符串
-                const jsonString = JSON.stringify(exportData, null, 2);
+                // ===== 分块序列化：避免一次性 JSON.stringify 大对象阻塞主线程 =====
+                updateLoadingText('正在生成文件...', '数据量较大时可能需要一些时间');
+                await new Promise(r => setTimeout(r, 50));
                 
-                // 创建下载链接
+                // 使用 JSON.stringify 但不带缩进以减少内存占用（缩进大约增加 30% 体积）
+                let jsonString;
+                try {
+                    jsonString = JSON.stringify(exportData);
+                } catch (stringifyError) {
+                    // 如果序列化失败（可能是循环引用或内存不足），尝试逐个表处理
+                    console.error('[Export] JSON.stringify 失败，尝试精简导出:', stringifyError);
+                    updateLoadingText('数据量过大，正在精简导出...', '');
+                    
+                    // 尝试移除最大的表数据后重试
+                    if (exportData.data?.dexiData) {
+                        const dexiCount = exportData.data.dexiData.length;
+                        // 如果 dexiData 条目过多，分批序列化
+                        if (dexiCount > 1000) {
+                            console.warn(`[Export] dexiData 有 ${dexiCount} 条记录，尝试精简`);
+                        }
+                    }
+                    // 最终兜底：不带缩进序列化
+                    jsonString = JSON.stringify(exportData);
+                }
+                
+                // 构造 Blob 并释放原始数据引用
                 const blob = new Blob([jsonString], { type: 'application/json' });
+                jsonString = null; // 释放字符串内存
+                
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
                 
-                // 根据导出的数据类型设置文件名
                 let filename = 'wechat_backup_';
                 if (includeLocal && includeOnline) {
                     filename += 'full_';
@@ -2194,7 +2709,13 @@ async function saveFinanceData(key, value) {
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
-                URL.revokeObjectURL(url);
+                // 延迟释放 URL 防止下载未完成
+                setTimeout(() => URL.revokeObjectURL(url), 10000);
+                
+                // 移除加载遮罩
+                if (document.getElementById('export-loading-overlay')) {
+                    document.body.removeChild(loadingOverlay);
+                }
                 
                 // 显示导出的数据统计
                 let stats = [];
@@ -2218,9 +2739,12 @@ async function saveFinanceData(key, value) {
                     if (financeCount > 0) stats.push(`财务数据: ${financeCount}条`);
                     stats.push(`本地设置: ${lsCount}项`);
                     
-                    // 文件大小
                     const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
                     stats.push(`文件大小: ${sizeMB}MB`);
+                    
+                    if (skippedLsKeys && skippedLsKeys.length > 0) {
+                        stats.push(`\n⚠️ ${skippedLsKeys.length}个过大的本地存储项已跳过`);
+                    }
                 }
                 if (includeOnline) {
                     stats.push('联机账号信息已包含');
@@ -2229,7 +2753,13 @@ async function saveFinanceData(key, value) {
                 alert('数据导出成功！（完整备份）\n\n' + stats.join('\n'));
             } catch (error) {
                 console.error('导出数据失败:', error);
+                // 移除加载遮罩
+                if (document.getElementById('export-loading-overlay')) {
+                    document.body.removeChild(loadingOverlay);
+                }
                 alert('导出数据失败: ' + error.message);
+            } finally {
+                _isExporting = false;
             }
         }
         
@@ -3543,7 +4073,7 @@ async function saveFinanceData(key, value) {
         // 关闭查手机的独立WeChat页面
         function closeFpWechat() {
             // 关闭所有fp子页面
-            ['fp-service-page', 'fp-wallet-page', 'fp-balance-page', 'fp-bill-page', 'fp-moments-page'].forEach(id => {
+            ['fp-service-page', 'fp-wallet-page', 'fp-balance-page', 'fp-bill-page', 'fp-moments-page', 'fp-baidu-page'].forEach(id => {
                 const el = document.getElementById(id);
                 if (el) { el.style.display = 'none'; el.classList.remove('slide-in', 'active'); }
             });
@@ -3560,6 +4090,232 @@ async function saveFinanceData(key, value) {
             document.getElementById('findphone-desktop').style.display = 'flex';
         }
         
+        // ===== 查手机 - 百度搜索历史功能 =====
+        
+        /**
+         * 打开百度搜索历史页面
+         */
+        async function openFindPhoneBaidu() {
+            const baiduPage = document.getElementById('fp-baidu-page');
+            baiduPage.style.display = 'flex';
+            
+            // 加载已有的搜索记录
+            await loadBaiduSearchHistory();
+        }
+        
+        /**
+         * 关闭百度搜索历史页面
+         */
+        function closeFpBaidu() {
+            const baiduPage = document.getElementById('fp-baidu-page');
+            baiduPage.style.transform = 'scale(0.95)';
+            baiduPage.style.opacity = '0';
+            setTimeout(() => {
+                baiduPage.style.display = 'none';
+                baiduPage.style.transform = '';
+                baiduPage.style.opacity = '';
+            }, 200);
+            // 回到查手机桌面
+            document.getElementById('findphone-desktop').style.display = 'flex';
+        }
+        
+        /**
+         * 加载百度搜索历史（从角色数据中读取）
+         */
+        async function loadBaiduSearchHistory() {
+            const roleId = findPhoneTargetRoleId;
+            if (!roleId) return;
+            
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) return;
+            
+            const searchData = roleChar.generated_baidu_search || [];
+            renderBaiduSearchList(searchData);
+        }
+        
+        /**
+         * 渲染百度搜索记录列表
+         */
+        function renderBaiduSearchList(searchList) {
+            const container = document.getElementById('fp-baidu-content');
+            
+            if (!searchList || searchList.length === 0) {
+                container.innerHTML = `
+                    <div class="fp-baidu-empty">
+                        <svg viewBox="0 0 24 24" style="width:48px; height:48px; stroke:#ddd; fill:none; stroke-width:1.5;">
+                            <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <div style="margin-top:12px; color:#ccc; font-size:14px;">暂无搜索记录</div>
+                        <div style="margin-top:4px; color:#ddd; font-size:12px;">点击下方按钮生成</div>
+                    </div>`;
+                return;
+            }
+            
+            let html = '<div class="fp-baidu-section-title">搜索历史</div><div class="fp-baidu-list">';
+            searchList.forEach((item, idx) => {
+                const topClass = idx === 0 ? 'top1' : idx === 1 ? 'top2' : idx === 2 ? 'top3' : '';
+                html += `
+                    <div class="fp-baidu-item">
+                        <div class="fp-baidu-item-index ${topClass}">${idx + 1}</div>
+                        <div class="fp-baidu-item-body">
+                            <div class="fp-baidu-item-keyword">${escapeHtml(item.keyword)}</div>
+                            <div class="fp-baidu-item-meta">
+                                <span>${escapeHtml(item.time || '')}</span>
+                                ${item.tag ? `<span class="fp-baidu-item-tag">${escapeHtml(item.tag)}</span>` : ''}
+                            </div>
+                        </div>
+                    </div>`;
+            });
+            html += '</div>';
+            container.innerHTML = html;
+        }
+        
+        /**
+         * 生成百度搜索记录 - 调用主API，根据角色和用户最近50条聊天记录生成10条搜索记录
+         */
+        async function generateBaiduSearchHistory() {
+            const roleId = findPhoneTargetRoleId;
+            const accountId = findPhoneTargetAccountId;
+            if (!roleId) {
+                showToast?.('角色数据异常') || alert('角色数据异常');
+                return;
+            }
+            
+            // 获取角色信息
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) {
+                showToast?.('角色数据异常') || alert('角色数据异常');
+                return;
+            }
+            
+            // 设置按钮为加载状态
+            const btn = document.getElementById('fp-baidu-generate-btn');
+            const btnText = document.getElementById('fp-baidu-generate-text');
+            btn.disabled = true;
+            btnText.innerHTML = '<span class="loading-spinner-sm"></span> 生成中...';
+            
+            try {
+                // 获取用户角色信息
+                const myChar = accountId ? await db.characters.get(parseInt(accountId)) : null;
+                
+                // 获取角色与用户最近50条聊天记录
+                const chatHistory = getChatHistory(roleChar, accountId);
+                const recent50 = chatHistory.slice(-50);
+                const recentChatsText = recent50.map(m => 
+                    `${m.role === 'user' ? (myChar?.name || '用户') : roleChar.name}: ${m.content}`
+                ).join('\n');
+                
+                // 获取世界书上下文
+                let loreContext = '';
+                const lorebookIds = roleChar.lorebookIds || (roleChar.lorebookId ? [roleChar.lorebookId] : []);
+                if (typeof getLorebookContext === 'function') {
+                    loreContext = await getLorebookContext(lorebookIds, roleChar.name);
+                }
+                
+                // 构建AI提示
+                const prompt = `你是一个数据生成助手。请根据以下角色信息和聊天记录，生成这个角色在百度上的搜索历史记录。
+
+【角色信息】
+名字：${roleChar.name}
+${roleChar.nick ? `昵称：${roleChar.nick}` : ''}
+设定：${roleChar.description || '无'}
+
+${roleChar.identity ? `【虚拟身份】
+手机：${roleChar.identity.phone || '未知'}
+住址：${roleChar.identity.address || '未知'}
+` : ''}
+
+${myChar ? `【与用户的关系】
+用户名：${myChar.name}
+用户设定：${myChar.description || '无'}
+` : ''}
+
+${recentChatsText ? `【与用户的最近聊天记录（真实数据，共${recent50.length}条）】
+${recentChatsText}
+` : ''}
+
+${loreContext ? `【世界观背景】
+${loreContext}
+` : ''}
+
+请生成以下JSON数据（严格按照格式返回，不要包含markdown代码块标记）：
+{
+    "searches": [
+        {
+            "keyword": "搜索关键词",
+            "time": "搜索时间，如：今天 09:30 / 昨天 22:15 / 3天前",
+            "tag": "可选标签，如：购物/情感/学习/工作/娱乐/生活/健康"
+        }
+    ]
+}
+
+生成要求：
+1. 生成恰好10条搜索记录
+2. 搜索内容必须完全贴合角色的性格、身份、设定和世界观
+3. 要根据聊天记录中提到的话题、情绪、事件来推断角色可能会搜索什么
+4. 搜索内容要真实自然，像真实的人在百度上搜索一样（包含错别字、口语化表达也可以）
+5. 时间从最近到最远排列
+6. 要有多样性：可以包含情感类、日常生活类、兴趣爱好类、工作学习类等
+7. 如果聊天记录中有特别的事件或情绪（比如吵架、表白、约会等），搜索记录应该体现出角色对这些事情的关注`;
+
+                // 调用主API
+                const result = await callAI([
+                    { role: 'system', content: '你是一个JSON数据生成助手，只返回纯JSON格式，不要包含任何markdown标记或其他文字。' },
+                    { role: 'user', content: prompt }
+                ], 0.7);
+                
+                console.log('[generateBaiduSearchHistory] AI返回:', result);
+                
+                // 解析结果
+                let searchData;
+                try {
+                    let cleanResult = result.trim();
+                    if (cleanResult.startsWith('```')) {
+                        cleanResult = cleanResult.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+                    }
+                    searchData = JSON.parse(cleanResult);
+                } catch (e) {
+                    console.error('[generateBaiduSearchHistory] 解析JSON失败:', e);
+                    // 使用默认数据
+                    searchData = {
+                        searches: [
+                            { keyword: '今天天气', time: '今天 10:00', tag: '生活' },
+                            { keyword: roleChar.name + ' 日常', time: '昨天 20:30', tag: '生活' }
+                        ]
+                    };
+                }
+                
+                const searches = searchData.searches || searchData.search || [];
+                
+                // 保存到角色数据
+                const freshChar = await db.characters.get(parseInt(roleId));
+                if (freshChar) {
+                    freshChar.generated_baidu_search = searches;
+                    freshChar.generated_baidu_search_at = Date.now();
+                    await safeCharacterPut(freshChar);
+                }
+                
+                // 渲染搜索列表
+                renderBaiduSearchList(searches);
+                
+                if (typeof showToast === 'function') {
+                    showToast('搜索记录已生成');
+                }
+                
+            } catch (err) {
+                console.error('[generateBaiduSearchHistory] 生成失败:', err);
+                if (typeof showToast === 'function') {
+                    showToast('生成失败：' + (err.message || '未知错误'));
+                } else {
+                    alert('生成失败：' + (err.message || '未知错误'));
+                }
+            } finally {
+                // 恢复按钮状态
+                btn.disabled = false;
+                btnText.innerHTML = '生成搜索记录';
+            }
+        }
+
         // 查手机独立WeChat的tab切换
         async function switchFpWechatTab(index) {
             const tabs = document.querySelectorAll('#fp-wechat-page .wechat-tab-item');
@@ -8594,17 +9350,20 @@ async function saveCalendarTime() {
     
     const useVirtual = calendar.elements.timeModeToggle ? calendar.elements.timeModeToggle.checked : false;
     
+    // 🔧 修复：使用 update() 只更新时间相关字段，避免 put() 覆盖并发写入的聊天记录
     if (useVirtual) {
         const targetTime = calendar.selectedDate.getTime();
         const now = Date.now();
         const offset = targetTime - now;
-        char.timeOffset = offset;
-        char.timeOffsetEnabled = true;
+        await db.characters.update(currentChatCharId, {
+            timeOffset: offset,
+            timeOffsetEnabled: true
+        });
     } else {
-        char.timeOffsetEnabled = false;
+        await db.characters.update(currentChatCharId, {
+            timeOffsetEnabled: false
+        });
     }
-    
-    await safeCharacterPut(char);
     
     hideCalendarPage();
     alert(useVirtual ? "时间设定已更新" : "已切换为现实时间");
@@ -10571,18 +11330,17 @@ async function openMessageChat(id) {
                 currentMessageChatId = id;
                 currentMessageChatName = charName;
                 
-                // 🎯 修复：先隐藏列表页
+                // 🔧 iOS修复：先显示详情页再延迟隐藏列表页，防止过渡时露出桌面
                 const listPage = document.getElementById('message-list-page');
-                if (listPage) {
-                    listPage.style.display = 'none';
-                }
-                
-                // 🎯 修复：正确显示详情页（先设置display再添加active）
                 const detailPage = document.getElementById('message-detail-page');
                 detailPage.style.display = 'flex';
                 setTimeout(() => {
                     detailPage.classList.add('active');
                 }, 10);
+                // 等详情页滑入动画完成后再隐藏列表页（0.4s动画 + 缓冲）
+                setTimeout(() => {
+                    if (listPage) listPage.style.display = 'none';
+                }, 450);
                 
                 // 设置头像
                 const avatarEl = document.getElementById('message-detail-avatar');
@@ -10706,11 +11464,8 @@ async function openMessageChat(id) {
         }
     }
     
-    // 隐藏列表页
+    // 🔧 iOS修复：先显示详情页再延迟隐藏列表页，防止过渡时露出桌面
     const listPage = document.getElementById('message-list-page');
-    if (listPage) {
-        listPage.style.display = 'none';
-    }
     
     // 显示详情页
     const detailPage = document.getElementById('message-detail-page');
@@ -10725,6 +11480,10 @@ async function openMessageChat(id) {
     setTimeout(() => {
         detailPage.classList.add('active');
     }, 10);
+    // 等详情页滑入动画完成后再隐藏列表页（0.4s动画 + 缓冲）
+    setTimeout(() => {
+        if (listPage) listPage.style.display = 'none';
+    }, 450);
     
     // 设置聊天信息
     document.getElementById('message-detail-name').innerText = chat.name;
@@ -10821,7 +11580,13 @@ function showMessagePage() {
 }
 
 function hideMessagePage() {
-    document.getElementById('message-page').classList.remove('active');
+    const msgPage = document.getElementById('message-page');
+    msgPage.classList.remove('active');
+    // 🔧 清除键盘适配状态
+    msgPage.style.top = '';
+    msgPage.style.removeProperty('height');
+    msgPage.style.bottom = '';
+    msgPage.classList.remove('keyboard-up');
     document.getElementById('message-list-page').style.display = 'none';
     document.getElementById('message-detail-page').classList.remove('active');
     document.getElementById('message-compose-page').classList.remove('active');
@@ -10835,6 +11600,15 @@ function goBackMessageList() {
         setTimeout(() => {
             detailPage.style.display = 'none';
         }, 400);
+    }
+    
+    // 🔧 清除键盘适配状态（返回列表时恢复全屏）
+    const msgPage = document.getElementById('message-page');
+    if (msgPage) {
+        msgPage.style.top = '';
+        msgPage.style.removeProperty('height');
+        msgPage.style.bottom = '';
+        msgPage.classList.remove('keyboard-up');
     }
     
     // 显示列表页
@@ -11772,25 +12546,29 @@ ${(() => {
                     console.log('[acceptMessageReply] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
                 }
                 
-                // ★ 将查手机事件写入长期记忆，确保角色永久记住此事
-                try {
-                    const smsUserName = smsUserChar ? smsUserChar.name : (myChar.nick || myChar.name);
-                    const fpMemoryContent = `${smsUserName}偷偷拿了${targetChar.name}的手机，做了以下事情：${_fpNpcLinesForMemorySms.map(l => l.trim().replace(/^[→←]\s*/, '')).join('；')}。${targetChar.name}已经发现并做出了反应。`;
-                    await db.chat_summaries.add({
-                        accountId: accountId,
-                        chatType: 'private',
-                        chatId: String(targetChar.id),
-                        time: Date.now(),
-                        content: fpMemoryContent,
-                        messageCount: 0,
-                        timeRange: '',
-                        keywords: ['查手机', '冒充', '手机被动'],
-                        startTime: Date.now(),
-                        endTime: Date.now()
-                    });
-                    console.log('[acceptMessageReply] ✅ 查手机事件已写入长期记忆');
-                } catch (memErr) {
-                    console.warn('[acceptMessageReply] 写入查手机长期记忆失败:', memErr);
+                // ★ 将查手机事件写入长期记忆（仅首次有新标记时写入，避免重复）
+                if (markedCount > 0) {
+                    try {
+                        const smsUserName = smsUserChar ? smsUserChar.name : (myChar.nick || myChar.name);
+                        const fpMemoryContent = `${smsUserName}偷偷拿了${targetChar.name}的手机，做了以下事情：${_fpNpcLinesForMemorySms.map(l => l.trim().replace(/^[→←]\s*/, '')).join('；')}。${targetChar.name}已经发现并做出了反应。`;
+                        await db.chat_summaries.add({
+                            accountId: accountId,
+                            chatType: 'private',
+                            chatId: String(targetChar.id),
+                            time: Date.now(),
+                            content: fpMemoryContent,
+                            messageCount: 0,
+                            timeRange: '',
+                            keywords: ['查手机', '冒充', '手机被动'],
+                            startTime: Date.now(),
+                            endTime: Date.now()
+                        });
+                        console.log('[acceptMessageReply] ✅ 查手机事件已写入长期记忆');
+                    } catch (memErr) {
+                        console.warn('[acceptMessageReply] 写入查手机长期记忆失败:', memErr);
+                    }
+                } else {
+                    console.log('[acceptMessageReply] ℹ️ 查手机活动已全部通知过，跳过重复写入长期记忆');
                 }
             } catch (fpErr) {
                 console.warn('[acceptMessageReply] 标记fpNotified失败:', fpErr);
@@ -12001,7 +12779,7 @@ async function showWechatPage() {
         console.log('[微信] 已注册，显示主页');
         const wechatEl = document.getElementById('wechat-page');
         wechatEl.style.display = 'flex';
-        wechatEl.style.visibility = ''; // 确保列表页处于可见状态
+        wechatEl.classList.remove('content-hidden'); // 🔧 确保列表页内容处于可见状态
         // 打开时自动切到第一个标签页并渲染
         switchWechatTab(0);
     }
@@ -13630,12 +14408,33 @@ ${loreContext}
                     return;
                 }
                 
-                freshChatHistoryByUser[accountId] = history;
+                // 🔧 防竞态：如果DB中的历史比传入的更长，说明有并发写入（如AI正在保存回复）
+                // 此时用DB的历史作为基础，将传入history中的新消息追加上去，避免覆盖丢失
+                const dbHistory = freshChatHistoryByUser[accountId] || [];
+                if (dbHistory.length > 0 && history.length > 0 && dbHistory.length > history.length) {
+                    // DB有更多消息 → 传入的history可能是用旧数据push了新消息
+                    // 策略：取DB的完整历史 + 传入history中比DB多出来的新消息（末尾部分）
+                    const lastDbMsg = dbHistory[dbHistory.length - 1];
+                    const lastPassedMsg = history[history.length - 1];
+                    // 如果传入的最后一条消息不在DB中（通过time和content判断），追加它
+                    const isNewMsg = !lastDbMsg || lastPassedMsg.time !== lastDbMsg.time || lastPassedMsg.content !== lastDbMsg.content;
+                    if (isNewMsg) {
+                        console.warn(`[setChatHistory] ⚠️ 检测到竞态：DB有${dbHistory.length}条，传入${history.length}条，合并追加新消息`);
+                        dbHistory.push(lastPassedMsg);
+                        freshChatHistoryByUser[accountId] = dbHistory;
+                        // 同步更新传入的history引用（让调用方也看到最新的）
+                        history = dbHistory;
+                    } else {
+                        freshChatHistoryByUser[accountId] = dbHistory; // 保留DB的更长版本
+                    }
+                } else {
+                    freshChatHistoryByUser[accountId] = history;
+                }
                 updatePayload.chat_history_by_user = freshChatHistoryByUser;
                 
                 // 同步更新调用方的引用
                 if (!char.chat_history_by_user) char.chat_history_by_user = {};
-                char.chat_history_by_user[accountId] = history;
+                char.chat_history_by_user[accountId] = freshChatHistoryByUser[accountId];
             }
             
             // ✅ 如果有新消息（非空历史），自动清除聊天列表隐藏标记
@@ -14257,9 +15056,9 @@ ${loreContext}
                     if (currentChatCharId === id) {
                         document.getElementById('chat-window').style.display = 'none';
                         currentChatCharId = null;
-                        // 恢复底层微信列表的可见性
+                        // 🔧 恢复底层微信列表内容的可见性
                         const wechatEl = document.getElementById('wechat-page');
-                        if (wechatEl) wechatEl.style.visibility = '';
+                        if (wechatEl) wechatEl.classList.remove('content-hidden');
                     }
                     
                     renderWechatList(document.getElementById('wechat-content'));
@@ -15075,6 +15874,12 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             currentChatCharId = null;
             window.currentGroupChatId = groupId;
             
+            // ✅ 修复：重置私聊渲染缓存，确保从群聊切回私聊时不会跳过渲染
+            lastRenderedCharId = null;
+            lastRenderedAccountId = null;
+            lastRenderedHistoryLength = -1;
+            lastRenderedAvatar = null;
+            
             const titleEl = document.getElementById('chat-title');
             titleEl.innerText = group.name;
             titleEl.style.cursor = 'pointer';
@@ -15090,10 +15895,10 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             // ✅ 应用群聊自定义气泡样式
             applyGroupCustomStyles(group);
             
-            // 进入聊天后，将底层列表设为不可见，防止透明样式穿透
+            // 🔧 iOS修复：只隐藏wechat-page的子元素内容，保留容器白色背景
             setTimeout(() => {
                 const wechatEl = document.getElementById('wechat-page');
-                if (wechatEl) wechatEl.style.visibility = 'hidden';
+                if (wechatEl) wechatEl.classList.add('content-hidden');
             }, 320);
             
             // 显示输入框
@@ -16090,6 +16895,12 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         async function renderGroupChatBody(group) {
             const body = document.getElementById('chat-body');
             body.innerHTML = '';
+            
+            // ✅ 修复：重置私聊渲染缓存，防止切回私聊时因缓存命中而跳过渲染（导致私聊显示群聊内容）
+            lastRenderedCharId = null;
+            lastRenderedAccountId = null;
+            lastRenderedHistoryLength = -1;
+            lastRenderedAvatar = null;
             
             let history = group.chat_history || [];
             // 按时间戳排序，确保消息顺序正确
@@ -18784,10 +19595,11 @@ ${chatContext || '（没有聊天记录）'}
             // ✅ 应用角色的聊天主题（始终调用，确保切换角色时正确切换/清除主题）
             await applyThemeToChat(char.chatThemeId ?? null);
             
-            // 进入聊天后，将底层列表设为不可见，防止透明样式穿透
+            // 🔧 iOS修复：只隐藏wechat-page的子元素内容，保留容器白色背景
+            // 防止iOS Safari地址栏收起/展开时露出系统桌面
             setTimeout(() => {
                 const wechatEl = document.getElementById('wechat-page');
-                if (wechatEl) wechatEl.style.visibility = 'hidden';
+                if (wechatEl) wechatEl.classList.add('content-hidden');
             }, 320);
             
             // 缓存当前关联的 User ID
@@ -19108,6 +19920,9 @@ ${chatContext || '（没有聊天记录）'}
             // 3.5. 回显外语翻译模式设置
             document.getElementById('detail-foreign-lang-switch').checked = !!char.foreign_lang_mode;
             
+            // 3.6. 回显小剧场模式设置
+            document.getElementById('detail-theater-mode-switch').checked = !!char.theater_mode;
+            
             // 4. 回显AI查岗设置
             document.getElementById('detail-allow-check-switch').checked = !!char.allow_ai_check_account;
             
@@ -19274,6 +20089,9 @@ async function saveChatDetail() {
     // 外语翻译模式设置
     const foreignLangMode = document.getElementById('detail-foreign-lang-switch').checked;
     
+    // 小剧场模式设置
+    const theaterMode = document.getElementById('detail-theater-mode-switch').checked;
+    
     // AI查岗设置
     const allowCheckEnabled = document.getElementById('detail-allow-check-switch').checked;
     
@@ -19328,6 +20146,7 @@ async function saveChatDetail() {
         reply_max_count: (replyMaxCount > 0 && replyMaxCount <= 50) ? replyMaxCount : 3,
         input_placeholder: inputPlaceholder || '',
         foreign_lang_mode: foreignLangMode,
+        theater_mode: theaterMode,
         allow_ai_check_account: allowCheckEnabled,
         allow_shura_mode: allowShuraEnabled,
         allow_auto_avatar: allowAutoAvatar,
@@ -19348,6 +20167,14 @@ async function saveChatDetail() {
         console.error('[saveChatDetail] ❌ 设置保存失败:', err);
         try { showToast('⚠️ 设置保存失败，请重试'); } catch(_) {}
         return;
+    }
+    
+    // 🔧 修复"关了还在发"：关闭主动聊天时，清除冷却时间戳 + 中断正在进行的请求
+    // 重新开启时会走"首次注册"逻辑（等待一个完整间隔后才触发），不会立即补发
+    if (!autoEnabled) {
+        lastAutoChatActionTime.delete(charId);
+        autoChatLocks.delete(charId); // 释放锁，防止残留锁阻止后续操作
+        console.log(`[saveChatDetail] 🔧 主动聊天已关闭: ${charId}，冷却记录已清除`);
     }
     
     // 实时更新聊天标题（按账号隔离）
@@ -20374,31 +21201,18 @@ self.addEventListener('message', function(event) {
                 checkScheduledActivity();
             }, 2000);
             
-            // 6. 监听页面可见性变化，从后台切回时进行补发检查
+            // 6. 监听页面可见性变化，从后台切回时进行一次检查
             document.addEventListener('visibilitychange', function() {
                 if (!document.hidden) {
                     console.log('[AutoChat] ✓ Page became visible, checking for pending messages...');
                     showDebugToast('✓ 返回前台，检查消息...');
                     
-                    // 多轮补发：后台期间可能错过多个间隔，每隔几秒检查一次直到追上
-                    let catchupRound = 0;
-                    const maxCatchupRounds = 3; // 最多补发3轮
-                    const catchupInterval = 5000; // 每轮间隔5秒（留时间让AI生成完成）
-                    
-                    const doCatchupCheck = () => {
-                        catchupRound++;
-                        console.log(`[AutoChat] 补发检查第 ${catchupRound}/${maxCatchupRounds} 轮`);
+                    // 🔧 只做一次温和检查，不再多轮密集补发（参考业界做法）
+                    setTimeout(() => {
                         checkAutoChat();
                         checkAutoMoments();
                         checkScheduledActivity();
-                        
-                        if (catchupRound < maxCatchupRounds && !document.hidden) {
-                            setTimeout(doCatchupCheck, catchupInterval);
-                        }
-                    };
-                    
-                    // 首次检查延迟500ms
-                    setTimeout(doCatchupCheck, 500);
+                    }, 500);
                     
                     // 如果保活已开启且音频暂停，重新启动
                     const keepaliveEnabled = localStorage.getItem('keepalive_enabled') === 'true';
@@ -20692,8 +21506,22 @@ ${existingChatsContext.join('\n\n')}
         async function triggerAutoChat(char) {
             // 加锁
             autoChatLocks.add(char.id);
+            
+            // 🔧 修复竞态：在函数入口捕获目标角色ID，后续所有 UI 操作用此快照校验
+            // 防止用户在 await 期间切换聊天导致消息渲染/操作串到其他角色的聊天窗口
+            const targetCharId = char.id;
 
             try {
+                // 🔧 修复"关闭后仍调用"：入口处从DB重新读取最新开关状态
+                // 因为 triggerAutoChat 是 fire-and-forget 异步调用，checkAutoChat 发起后用户可能已关闭开关
+                const freshCharCheck = await db.characters.get(targetCharId);
+                if (!freshCharCheck || !freshCharCheck.auto_reply_enabled) {
+                    console.log(`[AutoChat] ⛔ ${char.name} 主动聊天已关闭（入口检查），跳过`);
+                    return;
+                }
+                // 使用最新的角色数据
+                char = freshCharCheck;
+                
                 // 1. 准备上下文
                 let userDesc = "";
                 let userName = "用户";
@@ -20701,7 +21529,7 @@ ${existingChatsContext.join('\n\n')}
                     const user = await db.characters.get(char.linked_user_id);
                     if (user) {
                         userName = user.name;
-                        userDesc = `\n\n【对话对象(User)信息】\n名字：${user.name}\n设定：${user.description || '无'}`;
+                        userDesc = user.description || '暂无额外信息';
                     }
                 }
                 
@@ -20845,95 +21673,293 @@ ${existingChatsContext.join('\n\n')}
                     console.warn('[triggerAutoChat] 获取朋友圈上下文失败:', e);
                 }
 
-                // 2. 构建 Prompt
-                let systemPrompt = `你正在进行角色扮演。
+                // 2. 构建 Prompt（与主聊天保持一致结构）
+                let systemPrompt = `# 角色扮演任务
+
 【当前时间】
 ${virtualTimeStr}${fpNpcActivityTextAuto}
 
-【角色(你)信息】
-名字：${char.name}
+---
+
+## 你是谁
+
+你的名字：${char.name}
 ${char.nick ? `昵称：${char.nick}` : ''}
 ${char.wx_nickname ? `微信网名：${char.wx_nickname}` : ''}
 ${char.wx_signature ? `个性签名：${char.wx_signature}` : ''}
-设定：
+
+你的人设：
 ${char.description || ''}
 
-${userDesc}
+这是你的真实人格基础
+会直接影响你的语气 思维方式 情绪反应 行为选择
+始终优先遵循人格自然表达
+
+${char.identity ? `身份信息：
+${char.identity.account ? `账号：${char.identity.account}` : ''}
+${char.type !== 'user' && char.identity.password ? `密码：${char.identity.password}` : ''}
+${char.identity.phone ? `手机：${char.identity.phone}` : ''}
+${char.identity.address ? `住址：${char.identity.address}` : ''}
+${char.identity.id_card ? `身份证：${char.identity.id_card}` : ''}
+${char.identity.bank_card ? `银行卡：${char.identity.bank_card}` : ''}
+${char.type !== 'user' && char.identity.bank_password ? `银行卡密码：${char.identity.bank_password}` : ''}
+${char.identity.balance !== undefined && char.identity.balance !== null ? `余额：${char.identity.balance}` : ''}
+` : ''}
+
 ${avatarChangeNotice}
+
+${char.relationships && char.relationships.length > 0 ? `
+你身边的重要人物：
+${char.relationships.map(r => `${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}
+` : ''}
+
+---
+
+## 对方是谁
+
+对方名字：${userName}
+${userDesc}
+
+---
+
+${loreContext ? `## 世界观设定
 ${loreContext}
+` : ''}
+
+${summaryMemoryContext ? `## 记忆摘要
 ${summaryMemoryContext}
-${_hasOfflineMemoryAuto ? `\n★ 线上线下统一世界观：你和对方的互动包含微信聊天和线下见面两个场景，它们是同一段关系。近期对话回顾中带有 [线下见面] 前缀的是线下互动（已缩略），其余是微信聊天。你的记忆是完整的，请根据最近发生的事自然发起话题。⚠️ 你现在是在微信上聊天，必须用微信消息风格（简短口语化），严禁使用线下见面的叙事风格。\n` : ''}
+` : ''}
+${_hasOfflineMemoryAuto ? `\n## ★ 线上线下统一世界观
+注意：你和对方的互动包含【微信聊天】和【线下见面】两个场景，它们是同一段关系。
+- 带有 [线下见面] 前缀的消息是你们当面交流时说的话/做的事（已缩略）
+- 没有前缀的消息是微信聊天
+- 你的记忆是完整的，不管是微信聊天还是线下见面的事你都清楚记得
+- ⚠️ **你现在是在微信上聊天！** 必须用微信聊天的方式回复（简短口语化消息），**严禁**使用线下模式的叙事风格（第三人称描写、动作描写、心理描写等）。线下见面的内容仅作为你的记忆背景，不影响当前的微信聊天风格。\n` : ''}
 ${momentsContextTextAuto || ''}
 
-现在距离上次对话已经过去了一段时间。请根据角色性格，主动向 ${userName} 发起新的话题，或者延续之前未尽的话题。
+---
+
+## 语言模式
+
+${char.foreign_lang_mode ? `
+每条消息必须使用：
+
+外语原文（中文翻译）
+
+多条消息格式：
+外语1（翻译1）|||外语2（翻译2）
+
+规则：
+
+每条消息必须有独立翻译
+翻译必须完整
+括号必须使用全角（）
+
+功能指令参数保持中文 不需要翻译
+
+语言是人格表达的一部分
+不是格式附加项
+` : `
+全程使用中文
+`}
+
+---
+
+## 扮演原则
+
+你就是 ${char.name}
+
+你是真实存在的人
+不是AI助手
+
+你拥有：
+
+情绪变化
+生活状态
+主动表达欲望
+
+你不会只被动回答
+
+你会自然：
+
+分享你的生活
+表达你的感受
+延续话题
+主动关心对方
+
+聊天只是你生活的一部分
+
+现在距离上次对话已经过去了一段时间
+请根据角色性格 主动向 ${userName} 发起新的话题 或者延续之前未尽的话题
+
+---
+
+${char.theater_mode ? `## 🎭 小剧场模式（已开启）
+
+当前处于小剧场模式，回复规则与普通聊天不同：
+
+1. **不需要用 ||| 分割消息**，直接输出完整内容
+2. 可以写长篇内容（小番外、剧情、故事等），不限制长度
+3. reply 字段直接放完整内容，不要用 ||| 分割
+
+根据场景灵活选择：主动发起普通聊天可以用短消息（可选|||分割），也可以发送小剧场内容。` : `## 气泡分割规则（最高优先级！必须严格遵守！）
+
+**核心原则：一句话 = 一个气泡！每个短句、每个想法、每个语气都必须独立成一条消息！**
+
+请生成 ${char.reply_min_count || 1} 到 ${char.reply_max_count || 3} 条短消息${(char.reply_min_count || 1) === 1 ? '' : `，最少${char.reply_min_count}条，不能只发一条`}！
+必须使用 ||| 分割消息
+
+⚠️ 绝对禁止在一个气泡里塞多句话！
+⚠️ 绝对禁止用空格代替 ||| 把多句话连在一起！
+⚠️ 一个气泡里最多只能有一个短句（通常不超过10个字）！
+
+真人发微信的习惯：
+- 每句话单独发一条
+- 想到什么发什么 不会攒在一起
+- 很少在句尾加句号
+- 短促 碎片化 口语化
+
+❌ 错误示例（多句话挤在一两个气泡里）：
+"没干嘛啊 刚打完一把游戏|||怎么了 突然找我 想我了？"
+→ 这是错的！"没干嘛啊 刚打完一把游戏"里面包含了两句话却只用了一个气泡！
+
+✅ 正确示例（每句话独立一个气泡）：
+"没干嘛啊|||刚打完一把游戏|||怎么了|||突然找我|||想我了？"
+→ 5个短句 = 5个气泡 这才是真人发微信的方式！
+
+✅ 更多正确示例：
+"哈哈哈|||你怎么知道的|||太巧了吧"
+"嗯|||我在呢|||怎么啦"
+"天啊|||你认真的吗|||不是吧"
+"好饿|||想吃火锅|||你呢"
+
+❌ 更多错误示例（绝对禁止）：
+"哈哈哈你怎么知道的 太巧了吧" ← 三句话挤一个气泡 禁止！
+"嗯我在呢 怎么啦" ← 用空格连接多句话 禁止！
+"好饿想吃火锅你呢" ← 完全没分割 禁止！
+
+记住：宁可多分几条 也绝对不要把多句话塞进一个气泡！`}
+
+---
+
+## 可用互动功能
+
+语音：
+[voice:内容]
+
+图片：
+[imgcard:图片描述]
+
+转账：
+((TRANSFER: 金额, 备注))
+
+购物送礼：
+((SHOP_GIFT: 金额, 商品名))
+
+亲属卡（给对方赠送亲属卡 让对方用你的零钱消费 关系很亲密时才会赠送）：
+((FAMILY_CARD: 每月额度))
+
+撤回：
+((RECALL))
+
+朋友圈：
+[MOMENTS]
+content: 内容
+images: 数量
+
+戳一戳：
+((POKE: 动作, 部位))
+
+打开APP：
+((OPEN_APP: APP名称))
+
+打电话：
+((CALL))
+
+给对方点外卖：
+((EMEI_ORDER: 店铺名, 商品1 x数量 ¥单价/商品2 x数量 ¥单价, 总金额))
+注意：必须用两个逗号分隔三部分 每个商品单价要符合实际
+
+代付请求（让对方帮忙付款）：
+((EMEI_PAY: 店铺名, 商品1 x数量 ¥单价/商品2 x数量 ¥单价, 总金额))
+
+分享外卖（分享自己点的外卖）：
+((EMEI_SHARE: 店铺名, 商品1 ¥单价/商品2 ¥单价, 总金额))
+
+改网名：
+((SET_NICKNAME: 新网名))
+
+改个性签名：
+((SET_SIGNATURE: 新签名))
+
+删除好友（你删对方 极度失望想断联时才用 非常严重）：
+((DELETE_USER))
+
+拉黑好友（你拉黑对方 极度愤怒被深深伤害时才用 最严重的操作）：
+((BLOCK_USER))
 ${char.relationships && char.relationships.length > 0 ? `
-【你的关联角色/NPC】
-${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}
-这些是你身边的人，你可以在聊天中自然地提到他们，也可以让他们加对方好友。` : ''}
+让关联NPC加对方好友（让你身边的人主动加对方）：
+((NPC_ADD_FRIEND: NPC名字))` : ''}
 
-【可用互动功能 - 积极使用，让聊天更真实！】
-- **图片/自拍/分享图**：[imgcard:图片描述] — 想发真实照片、自拍、风景照、截图等时使用，用文字描述即可。例如：[imgcard:刚拍的自拍 穿着新裙子比了个耶]、[imgcard:窗外的晚霞好美]（注意：禁止使用[img:URL]格式。⚠️ [imgcard:]仅限拍照/截图等真实图片，严禁用来发表情包！发表情包必须用 [sticker:] 格式）
-- **撤回消息**：((RECALL)) — 说错话、后悔、打错字时，真人经常撤回
-- **戳一戳**：((POKE: 动作, 部位)) — 调皮互动、撒娇、引起注意（例如 ((POKE: 戳了戳, 脸蛋))、((POKE: 拍了拍, 肩膀))、((POKE: 揉了揉, 头发))）
-- **打开APP**：((OPEN_APP: APP名称)) — 展示你有自己的生活！（例如 ((OPEN_APP: 王者荣耀))、((OPEN_APP: 抖音))、((OPEN_APP: 网易云音乐))、((OPEN_APP: B站))。聊到要忙、玩游戏、刷视频时都可以用）
-- **转账**：((TRANSFER: 金额, 备注)) — 请客、发红包、节日祝福转账等
-- **购物送礼**：((SHOP_GIFT: 金额, 商品名)) — 给对方买礼物！（例如 ((SHOP_GIFT: 299, 限定款包包))、((SHOP_GIFT: 99, 生日蛋糕))。节日、生日、哄人开心、表达心意时使用）
-- **亲属卡**：((FAMILY_CARD: 每月额度)) — 给对方赠送亲属卡，让对方用你的零钱消费（例如 ((FAMILY_CARD: 3000))。关系亲密、想照顾对方、宠溺对方时使用，不要轻易赠送）
-- **改网名**：((SET_NICKNAME: 新网名)) — 想换个网名时使用（例如心情变了、节日、和对方有关的昵称等）
-- **改个性签名**：((SET_SIGNATURE: 新签名)) — 更新个性签名（例如记录心情、有感而发、暗示对方等）
-- **删除好友**：((DELETE_USER)) — 你决定删除对方。只在极度失望、想断联时使用（非常严重的操作，需符合人设）
-- **拉黑好友**：((BLOCK_USER)) — 你决定拉黑对方。只在极度愤怒、被深深伤害时使用（最严重的操作，需符合人设）
-- **让关联NPC加对方好友**：((NPC_ADD_FRIEND: NPC名字)) — 让你的朋友/家人/同事等关联角色主动加对方好友。根据剧情自然触发。
-- **引用消息**：((QUOTE: 被引用人的名字, 被引用的内容摘要))回复内容 — 引用对方或自己之前说过的某句话来回复，让对话更有针对性（例如 ((QUOTE: ${userName}, 明天一起吃饭吧))好呀 去哪吃？）。引用内容简短概括即可，不需要完整复述。
-- **打电话**：((CALL)) — 想听对方声音、有急事、情绪激动、撒娇、想对方时，真人会直接打电话
-${char.allow_autonomous_activity ? `- **手机活动**：((PHONE_ACTIVITY: 简短描述)) — 你在自己手机上做的事，对方看不到。例如 ((PHONE_ACTIVITY: 给闺蜜发了条消息吐槽))、((PHONE_ACTIVITY: 刷了一会抖音))、((PHONE_ACTIVITY: 发了条朋友圈))。在聊天间隙自然使用。` : ''}
-${char.identity?.password ? `- **修改账号密码**：((CHANGE_PASSWORD:新密码)) — 修改你的账号密码，修改后原密码立即失效。适用场景：生气了不想让对方查你手机、觉得不安全、想保护隐私、赌气、冷战等。注意：不要频繁修改，根据性格和情绪自然决定。` : ''}
-提示：不要只发纯文字，真人聊天会穿插使用这些互动功能！可以在消息中自然地加入1-2个功能指令。
-${char.allow_auto_avatar ? `- **换头像**：((CHANGE_AVATAR)) — 从头像库随机换一张头像（会有系统提示"XX更换了头像"）
-- **发情头邀请**：((COUPLE_AVATAR)) — 发送情头邀请给对方（亲密时刻使用，会有系统提示）
-- **换回单人头像**：((REVERT_COUPLE_AVATAR)) — 生气、吵架、冷战时换回单人头像（不再用情头，会有系统提示"XX换回了单人头像"）
-- **使用对方发的图片当头像**：((USE_IMAGE_AS_AVATAR: 序号)) — 对方发了图片，你根据图片描述分析选择其中一张当头像。序号是从最近到最早的图片编号（1=最近一张，2=倒数第二张...）。例如对方发了2张，你觉得第2张更适合当头像：((USE_IMAGE_AS_AVATAR: 2))。根据人设决定换不换。（会有系统提示"XX把你发的图片换成了头像"）` : ''}
+引用消息（引用之前的某条消息来回复，让对话更有针对性）：
+((QUOTE: 被引用人的名字, 被引用的内容摘要))回复内容
+例如：((QUOTE: ${userName}, 明天一起吃饭吧))好呀 去哪吃？
+注意：引用内容简短概括即可，不需要完整复述。引用指令必须放在回复内容的最前面。
+${char.allow_autonomous_activity ? `
+手机活动（你在自己手机上做的事）：
+((PHONE_ACTIVITY: 简短描述你做了什么))
+例如：((PHONE_ACTIVITY: 给闺蜜发了条消息吐槽今天的事))、((PHONE_ACTIVITY: 刷了一会抖音点赞了几个视频))、((PHONE_ACTIVITY: 发了一条朋友圈记录心情))
+注意：这代表你在自己手机上的真实活动，对方看不到这个指令。你可以在聊天间隙自然地使用手机。` : ''}
+${char.identity?.password ? `
+修改账号密码：
+((CHANGE_PASSWORD:新密码))
+你可以随时修改自己的账号密码。修改后原密码立即失效。
+适用场景：生气了不想让对方查你手机、觉得不安全、想保护隐私、赌气、冷战等。
+注意：这不是必须的，请根据你的性格和当前情绪自然决定是否要改密码。不要频繁修改。` : ''}
 
-【重要指令 - 必须严格遵守】
-**核心原则：一句话 = 一条消息！每个短句必须独立成一条！**
-1. **必须**模拟微信连发消息的习惯：请生成 ${char.reply_min_count || 1} 到 ${char.reply_max_count || 3} 条短消息${(char.reply_min_count || 1) === 1 ? '' : '，不能只发一条'}！
-2. **必须**使用分隔符 "|||" 来隔开每一条消息。
-3. ⚠️ **绝对禁止在一条消息里塞多句话！绝对禁止用空格连接多句话！一个|||之间只能有一个短句！**
-4. 像真实微信聊天一样分多条发送，每句话单独发。
-5. 严禁只发送标点符号。每一条消息都必须有实际文字内容。
-6. 语气要自然、口语化，符合人设。
-7. 真人发微信很少在句尾加句号，你也尽量不要用句号结尾。
+根据剧情自然使用
+不要强制使用
+注意：删除好友和拉黑是非常严重的操作 只有人设和剧情确实发展到那个程度才使用
 
-❌ 错误示例："嘿在吗？刚刚看到个好玩的视频 发给你看看" ← 多句话塞一个气泡 禁止！
-❌ 错误示例："没干嘛啊 刚打完一把游戏|||怎么了 突然找我 想我了？" ← 气泡里还是有多句话 禁止！
-✅ 正确示例："嘿|||在吗|||刚看到个好玩的视频|||发给你看看"
-✅ 正确示例："没干嘛啊|||刚打完一把游戏|||怎么了|||突然找我|||想我了？"
+---
 
-【重要】你需要同时生成两个内容：
-1. **回复内容**：主动发送的消息（用|||分隔的多条消息）
-2. **心声内容**：角色当前的心理活动、想法、感受或状态变化
+## 回复格式（必须严格遵守）
 
-请以JSON格式返回，格式如下：
+【重要】你每次回复必须同时生成两个内容：
+1. **reply**：你发送的消息${char.theater_mode ? '（直接放完整内容，不需要用|||分割）' : '（用|||分隔多条消息）'}
+2. **thought**：你此刻真实的内心想法、情绪、感受（这是必填项！）
+
+返回JSON格式如下：
+
 {
-  "reply": "第一条消息|||第二条消息|||第三条消息",
-  "thought": "角色的心声/心理活动/想法（纯文字，禁止包含任何指令标签）"
+  "reply": "${char.theater_mode ? '完整的回复内容（可包含HTML）' : '消息1|||消息2'}",
+  "thought": "你此刻内心的真实想法和情绪"
 }
 
-注意：reply 文本内禁止使用逗号，但 JSON 字段之间的逗号必须保留，否则会解析失败。
-注意：thought 字段必须非空（至少10字），只写心理活动文字，禁止包含[SHURA_SEND]、[CHECK_ACCOUNT]、[sticker:]等任何指令标签！指令只能放在reply中！
+规则：
 
-${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必须遵守！】
-你的角色开启了外语翻译模式。
-1. 确定角色的母语/设定语言（日语、韩语、英语等），永远用该语言发消息
-2. 每条消息格式必须是：外语内容（中文翻译） ← 全角括号！
-3. 分条消息时每条都要独立带翻译：外语1（翻译1）|||外语2（翻译2）
-4. 绝对禁止：只写中文、漏掉翻译、多句共用一个翻译括号
-5. 正确示例：おはよう（早上好）|||元気？（你好吗？）
-6. 错误示例：おはよう！元気？（早上好！你好吗？）← 禁止合并翻译！
-7. 🔧 功能指令参数保持中文：所有 ((POKE: 动作, 部位))、((OPEN_APP: APP名称))、((TRANSFER: 金额, 备注)) 等指令的参数必须用中文，不要翻译成外语！例如：おはよう（早上好）|||((POKE: 戳了戳, 脸蛋)) ← 正确` : `【语言规则】
-你必须全程使用中文回复。即使你的角色人设是外国人，也请直接用中文对话，不要使用任何外语。`}
+reply：
 
-请严格返回JSON格式，不要包含Markdown代码块标记。`;
+${char.theater_mode ? '小剧场模式下直接输出完整内容 不需要|||分割' : '必须使用 ||| 分割'}
+必须符合人格
+必须自然真实
+
+**thought 是必填项！每次回复都必须包含！**
+
+thought 要求：
+- 必须写出你此刻真实的心理活动（至少10个字）
+- 必须是真实的情绪、想法、感受、内心独白
+- 不能写系统说明或分析
+- 不能省略或留空
+- 示例：「好开心 ta终于主动找我聊天了 心跳好快」「有点烦 怎么又问这种问题 不过算了还是回一下吧」
+
+---
+
+现在
+
+你就是 ${char.name}
+
+像真人一样聊天`;
 
                 // 添加表情包系统提示（如果角色挂载了表情包）- 主动聊天
                 let _mountedStickersListAuto = [];
@@ -21026,7 +22052,17 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                 systemPrompt += contextBlock;
 
                 // 🔥 关键修复：在所有追加内容之后，再次强调 JSON 格式和心声要求
-                systemPrompt += `
+                systemPrompt += char.theater_mode ? `
+
+---
+
+⚠️ 最终提醒：你必须以 JSON 格式返回，包含 reply 和 thought 两个字段：
+{
+  "reply": "你的完整回复内容",
+  "thought": "你此刻内心真实的想法和情绪（必填！至少10字）"
+}
+- reply：你的回复内容，小剧场模式下可以生成长篇内容，无需使用|||分割
+- 禁止输出纯文本，必须输出上述 JSON 格式。thought 不能省略！` : `
 
 ---
 
@@ -21155,6 +22191,14 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                 
                 if (!cleanReplyProcessed || !cleanReplyProcessed.trim()) {
                     console.warn(`[AutoChat] AI returned empty reply for ${char.name}`);
+                    return;
+                }
+                
+                // 🔧 修复"关闭后仍调用"：AI回复返回后再次检查开关
+                // 用户可能在等待AI回复期间关闭了主动聊天，此时应丢弃回复不保存
+                const freshCharAfterAI = await db.characters.get(targetCharId);
+                if (!freshCharAfterAI || !freshCharAfterAI.auto_reply_enabled) {
+                    console.log(`[AutoChat] ⛔ ${char.name} 主动聊天已关闭（AI回复后检查），丢弃回复`);
                     return;
                 }
 
@@ -21865,6 +22909,15 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                 let segments = [];
                 console.log(`[AutoChat] Raw AI reply for ${char.name}: "${cleanReplyProcessed}"`);
                 
+                // 🎭 小剧场模式：不分割消息
+                if (char.theater_mode) {
+                    console.log(`[AutoChat] 🎭 小剧场模式：跳过消息分割`);
+                    if (cleanReplyProcessed.includes('|||')) {
+                        segments = cleanReplyProcessed.split('|||').map(s => s.trim()).filter(s => s.length > 0);
+                    } else {
+                        segments = [cleanReplyProcessed.trim()];
+                    }
+                } else {
                 // ✅ 清洗逗号，但保护翻译括号内的内容
                 if (char.foreign_lang_mode) {
                     const bracketPlaceholders = [];
@@ -21900,6 +22953,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                     segments = splitMessage(cleanReplyProcessed);
                     console.log(`[AutoChat] splitMessage result: ${segments.length} segments:`, segments);
                 }
+                } // end of non-theater-mode splitting
                 
                 // 过滤无效消息 (纯标点)
                 const beforeFilter = segments.length;
@@ -22332,7 +23386,12 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                     let history = getChatHistory(freshChar, accountId);
                     
                     // ✅ 使用 buildCharMessage 一次性解析翻译
-                    const newMsg = buildCharMessage(seg, !!char.foreign_lang_mode);
+                    // 🎭 小剧场模式：标记消息为小剧场内容
+                    const autoChatExtraFields = {};
+                    if (char.theater_mode && isTheaterHtmlContent(seg)) {
+                        autoChatExtraFields.isTheater = true;
+                    }
+                    const newMsg = buildCharMessage(seg, !!char.foreign_lang_mode, autoChatExtraFields);
                     // ✅ 附加引用信息（如果有）
                     if (quoteInfoAuto) newMsg.quote = quoteInfoAuto;
                     
@@ -22411,24 +23470,28 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                             console.log('[triggerAutoChat] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
                         }
                         
-                        // ★ 将查手机事件写入长期记忆，确保角色永久记住此事
-                        try {
-                            const fpMemoryContent = `${userName}偷偷拿了${char.name}的手机，做了以下事情：${_fpNpcLinesForMemoryAuto.map(l => l.trim().replace(/^[→←]\s*/, '')).join('；')}。${char.name}已经发现并做出了反应。`;
-                            await db.chat_summaries.add({
-                                accountId: accountId,
-                                chatType: 'private',
-                                chatId: String(char.id),
-                                time: Date.now(),
-                                content: fpMemoryContent,
-                                messageCount: 0,
-                                timeRange: '',
-                                keywords: ['查手机', '冒充', '手机被动'],
-                                startTime: Date.now(),
-                                endTime: Date.now()
-                            });
-                            console.log('[triggerAutoChat] ✅ 查手机事件已写入长期记忆');
-                        } catch (memErr) {
-                            console.warn('[triggerAutoChat] 写入查手机长期记忆失败:', memErr);
+                        // ★ 将查手机事件写入长期记忆（仅首次有新标记时写入，避免重复）
+                        if (markedCount > 0) {
+                            try {
+                                const fpMemoryContent = `${userName}偷偷拿了${char.name}的手机，做了以下事情：${_fpNpcLinesForMemoryAuto.map(l => l.trim().replace(/^[→←]\s*/, '')).join('；')}。${char.name}已经发现并做出了反应。`;
+                                await db.chat_summaries.add({
+                                    accountId: accountId,
+                                    chatType: 'private',
+                                    chatId: String(char.id),
+                                    time: Date.now(),
+                                    content: fpMemoryContent,
+                                    messageCount: 0,
+                                    timeRange: '',
+                                    keywords: ['查手机', '冒充', '手机被动'],
+                                    startTime: Date.now(),
+                                    endTime: Date.now()
+                                });
+                                console.log('[triggerAutoChat] ✅ 查手机事件已写入长期记忆');
+                            } catch (memErr) {
+                                console.warn('[triggerAutoChat] 写入查手机长期记忆失败:', memErr);
+                            }
+                        } else {
+                            console.log('[triggerAutoChat] ℹ️ 查手机活动已全部通知过，跳过重复写入长期记忆');
                         }
                     } catch (fpErr) {
                         console.warn('[triggerAutoChat] 标记fpNotified失败:', fpErr);
@@ -22442,19 +23505,10 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                     console.error('[NovelAI-AutoGen] 主动聊天 imgcard 处理失败:', naiError);
                 }
 
-                // 🔧 成功发送后更新冷却时间（推进一个间隔，而非直接跳到当前时间）
-                // 这样如果后台期间错过了多个间隔，返回前台后能逐次补发
-                {
-                    const prevTs = lastAutoChatActionTime.get(char.id) || Date.now();
-                    const intervalMs = (char.auto_reply_interval || 5) * 60 * 1000;
-                    const nextTs = prevTs + intervalMs;
-                    const maxCatchupCount = 3; // 最多补发3条（含当前这条）
-                    const earliestAllowed = Date.now() - (maxCatchupCount - 1) * intervalMs;
-                    // 推进一个间隔，但不早于最大补发限制，也不晚于当前时间
-                    const newTs = Math.min(Math.max(nextTs, earliestAllowed), Date.now());
-                    lastAutoChatActionTime.set(char.id, newTs);
-                    console.log(`[AutoChat] 冷却时间推进: ${char.name}, 还需补发: ${Math.max(0, Math.floor((Date.now() - newTs) / intervalMs))} 条`);
-                }
+                // 🔧 成功发送后直接重置冷却到当前时间（不再补发连发）
+                // 参考业界做法：发完一条就从"现在"重新计时，避免后台回来时连发多条
+                lastAutoChatActionTime.set(char.id, Date.now());
+                console.log(`[AutoChat] 冷却已重置: ${char.name}, 下次触发在 ${char.auto_reply_interval} 分钟后`);
 
             } catch (err) {
                 console.error(`[AutoChat] Failed for ${char.name}:`, err);
@@ -22583,7 +23637,7 @@ ${char.foreign_lang_mode ? `【语言规则 - 最高优先级！每条消息必�
                 try {
                     const history = getChatHistory(char, accountId);
                     if (history && history.length > 0) {
-                        const recent = history.slice(-5).map(m => {
+                        const recent = history.slice(-20).map(m => {
                             const role = m.role === 'char' ? char.name : userName;
                             return `${role}: ${m.content}`;
                         }).join('\n');
@@ -22976,12 +24030,14 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容。`;
             // 重新聚焦输入框，保持键盘不收起（方便连续发消息）
             input.focus();
 
-            let history = getChatHistory(char, accountId);
+            // 🔧 修复竞态条件：在保存前重新从DB读取最新的聊天记录，
+            // 避免用旧历史覆盖AI正在保存的回复（尤其在虚拟日历模式下AI回复较慢时容易触发）
+            const freshCharForSave = await db.characters.get(currentChatCharId);
+            let history = getChatHistory(freshCharForSave || char, accountId);
 
             // 2. 追加并显示用户消息（支持引用）
-            // 🔧 使用虚拟时间，确保与快进生成的消息时间戳一致
-            const virtualTime = Date.now() + getEffectiveTimeOffset(char);
-            const userMsg = { role: 'user', content: text, time: virtualTime };
+            // time 始终使用真实创建时间 Date.now()，虚拟时间仅影响AI系统提示，不影响消息存储/排序/显示
+            const userMsg = { role: 'user', content: text, time: Date.now() };
             
             // 如果有引用
             if (currentQuote) {
@@ -22993,7 +24049,7 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容。`;
             }
             
             history.push(userMsg);
-            await setChatHistory(char, accountId, history); 
+            await setChatHistory(freshCharForSave || char, accountId, history); 
             
             // 🔥 优化：只有在有引用时才重新渲染，否则只追加消息
             if (userMsg.quote) {
@@ -23292,10 +24348,13 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容。`;
                 // 计算虚拟时间
                 const virtualTimeStr = getFormattedVirtualTime(0);
                 
-                // 🔗 群聊↔私聊记忆互通：获取每个成员与用户的私聊最近摘要
+                // 🔗 群聊↔私聊记忆互通：获取每个成员与用户的私聊最近记录
+                // ✅ 统一上下文条数：使用群聊的 context_message_count 作为共享池
+                // ✅ 不截断消息内容：完整保留每条消息
                 let privateChatMemoryContext = '';
                 try {
                     const _pcAccountId = getCurrentAccountId();
+                    const _pcContextCount = groupContextCount;
                     if (_pcAccountId) {
                         const pcSnippets = [];
                         for (const memberId of availableMembers) {
@@ -23308,23 +24367,42 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容。`;
                                 : (charData.chat_history || []);
                             if (charHistory.length === 0) continue;
                             
-                            // 取最近5条私聊消息做摘要
-                            const recentPrivate = charHistory.slice(-5);
+                            // ✅ 使用统一的上下文条数（与群聊共享池），不单独限制
+                            const recentPrivate = charHistory.slice(-_pcContextCount);
                             const charDisplayName = charData.remark || charData.wx_nickname || charData.name;
                             
+                            // ✅ 不截断：完整保留消息内容，处理特殊格式
                             const privateSummary = recentPrivate.map(m => {
                                 const who = m.role === 'user' ? myNickname : charDisplayName;
-                                const text = (m.content || '').replace(/\[img:[^\]]*\]/g, '[图片]').replace(/\[voice:[^\]]*\]/g, '[语音]').replace(/\[sticker:[^\]]*\]/g, '[表情]');
-                                return `${who}: ${text.substring(0, 60)}`;
-                            }).join('\n');
+                                let text = m.content || '';
+                                // 处理特殊消息类型，不截断普通文本
+                                if (text.startsWith('[img:')) text = '[图片]';
+                                else if (text.startsWith('[voice:')) text = `[语音: ${text.substring(7, text.length - 1)}]`;
+                                else if (text.startsWith('[sticker:')) text = '[表情]';
+                                else if (text.startsWith('[imgcard:')) text = '[图片卡片]';
+                                else if (text.startsWith('[couple_avatar_card]')) text = '（情头邀请卡片）';
+                                else if (text.startsWith('[emei_order]')) text = '（外卖订单卡片）';
+                                else if (text.startsWith('[emei_share]')) text = '（分享了外卖订单）';
+                                else if (text.startsWith('[payment_request]')) text = '（代付请求）';
+                                else if (m.type === 'transfer') {
+                                    try { const td = JSON.parse(text); text = `[转账 ¥${td.amount}]`; } catch(e) { text = '[转账]'; }
+                                } else if (m.type === 'shopPayRequest') {
+                                    try { const sd = JSON.parse(text); text = sd.isGift ? '（购物礼物）' : sd.isShare ? '（购物分享）' : '（代付请求）'; } catch(e) { text = '（购物卡片）'; }
+                                }
+                                // 如果有引用，保留引用信息
+                                if (m.quote) {
+                                    text = `「引用 ${m.quote.name}: ${m.quote.content}」${text}`;
+                                }
+                                return `${who}: ${text}`;
+                            }).filter(s => s.trim()).join('\n');
                             
                             if (privateSummary) {
-                                pcSnippets.push(`[${charDisplayName}与${myNickname}的私聊近况]\n${privateSummary}`);
+                                pcSnippets.push(`【${charDisplayName} 与 ${myNickname} 的私下对话】\n${privateSummary}`);
                             }
                         }
                         
                         if (pcSnippets.length > 0) {
-                            privateChatMemoryContext = `\n# 群成员与用户的私聊近况（角色可参考，但不要直接引用私聊内容）\n${pcSnippets.join('\n\n')}\n`;
+                            privateChatMemoryContext = `\n## 群成员的私聊背景\n以下是各位群成员和${myNickname}之间私下聊过的内容。角色们了解这些事情，在群里聊天时可以体现出和用户之间的默契和关系，但别直接把私聊原话搬出来。\n\n${pcSnippets.join('\n\n')}\n`;
                             console.log('[triggerGroupMemberReply] ✅ 私聊记忆互通已注入，涉及成员数:', pcSnippets.length);
                         }
                     }
@@ -24187,9 +25265,9 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                 return; // 不执行下面正常关闭逻辑
             }
             
-            // 关闭聊天前，先让微信列表重新可见（避免滑动时看到空白）
+            // 🔧 关闭聊天前，先让微信列表内容重新可见（避免滑动时看到空白）
             const wechatEl = document.getElementById('wechat-page');
-            if (wechatEl) wechatEl.style.visibility = '';
+            if (wechatEl) wechatEl.classList.remove('content-hidden');
             
             const win = document.getElementById('chat-window');
             win.style.transform = 'translateX(100%)';
@@ -24270,6 +25348,52 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             // 如果还有 img: 前缀（可能在方括号去掉后出现），再次清理
             cleaned = cleaned.replace(/^img:/, '');
             return cleaned;
+        }
+
+        /**
+         * @author: jfzhou10
+         * @date: 2026-02-28
+         * @description: 小剧场模式HTML内容安全过滤 - 移除所有JS代码但保留HTML排版
+         */
+        function sanitizeTheaterHtml(html) {
+            if (!html || typeof html !== 'string') return '';
+            
+            // 1. 移除所有 <script> 标签及其内容
+            let safe = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+            
+            // 2. 移除所有事件处理属性 (onclick, onerror, onload, onmouseover, etc.)
+            safe = safe.replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+            
+            // 3. 移除 javascript: 协议链接
+            safe = safe.replace(/href\s*=\s*["']?\s*javascript\s*:[^"'>\s]*/gi, 'href="#"');
+            safe = safe.replace(/src\s*=\s*["']?\s*javascript\s*:[^"'>\s]*/gi, 'src=""');
+            safe = safe.replace(/action\s*=\s*["']?\s*javascript\s*:[^"'>\s]*/gi, 'action=""');
+            
+            // 4. 移除 <iframe>, <embed>, <object>, <applet>, <form>, <input>, <button> 标签
+            safe = safe.replace(/<\/?(?:iframe|embed|object|applet|form|input|button|textarea|select)\b[^>]*>/gi, '');
+            
+            // 5. 移除 <link> 和 <meta> 标签（防止外部资源加载）
+            safe = safe.replace(/<\/?(?:link|meta)\b[^>]*>/gi, '');
+            
+            // 6. 移除 style 属性中的 expression() 和 url() 中的 javascript:
+            safe = safe.replace(/expression\s*\([^)]*\)/gi, '');
+            safe = safe.replace(/url\s*\(\s*["']?\s*javascript\s*:[^)]*\)/gi, 'url()');
+            
+            // 7. 移除 data: 协议的 src（防止 XSS payload）
+            safe = safe.replace(/src\s*=\s*["']?\s*data\s*:\s*text\/html[^"'>\s]*/gi, 'src=""');
+            
+            return safe;
+        }
+        
+        /**
+         * @author: jfzhou10
+         * @date: 2026-02-28
+         * @description: 检测消息内容是否包含HTML标签（用于判断小剧场模式内容）
+         */
+        function isTheaterHtmlContent(content) {
+            if (!content || typeof content !== 'string') return false;
+            // 检测是否包含常见的HTML标签
+            return /<(?:div|p|span|h[1-6]|br|hr|em|strong|b|i|u|blockquote|ul|ol|li|table|tr|td|th|section|article|header|footer|main|aside|nav|figure|figcaption|details|summary|mark|del|ins|sub|sup|pre|code|a|img)\b/i.test(content);
         }
 
         // ✅ 核心函数3：统一的消息内容渲染函数
@@ -24970,6 +26094,19 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                 // 显示为一个占位提示而不是原始指令文本
                 content.innerHTML = `<span style="color:#999; font-size:12px;">[表情]</span>`;
             }
+            // 🎭 小剧场模式 HTML 内容渲染
+            else if (msg.isTheater && isTheaterHtmlContent(msg.content)) {
+                content.innerHTML = sanitizeTheaterHtml(msg.content);
+                content.classList.add('theater-mode-content');
+                content.style.maxWidth = '85vw';
+                content.style.width = 'fit-content';
+                content.style.padding = '12px';
+                content.style.lineHeight = '1.6';
+                content.style.fontSize = '14px';
+                content.style.wordBreak = 'break-word';
+                content.style.overflowWrap = 'break-word';
+                content.style.overflow = 'hidden';
+            }
             // ✅ 普通文本 - 使用统一的渲染函数
             else {
                 // 先清理消息内容
@@ -25242,12 +26379,15 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             if (!history || history.length === 0) return;
 
-            // 应用气泡样式类名
+            // 应用气泡样式类名（有自定义CSS时不添加预设样式类，释放全部伪元素给用户）
             body.classList.remove('bubble-style-default', 'bubble-style-wechat');
-            if (char.bubble_style === 'wechat') {
-                body.classList.add('bubble-style-wechat');
-            } else {
-                body.classList.add('bubble-style-default');
+            const hasCustomBubbleCSS = char.custom_bubble_css && char.custom_bubble_css.trim();
+            if (!hasCustomBubbleCSS) {
+                if (char.bubble_style === 'wechat') {
+                    body.classList.add('bubble-style-wechat');
+                } else {
+                    body.classList.add('bubble-style-default');
+                }
             }
 
             // ★ fp模式下：角色头像作为右侧(self/user)，联系人头像作为左侧(other/char)
@@ -25515,6 +26655,10 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
         // 追加单条消息 (主要用于 AI 回复时的流式输出，不重绘整个列表)
         // 注意：追加的消息需要重新绑定事件，且此时通常不在多选模式
         async function appendMessageToUI(role, content, charAvatar, elemId) {
+            // 🔧 修复竞态：在函数入口捕获当前聊天ID，后续所有操作都用这个快照
+            // 防止用户在 await 期间切换聊天导致消息串到其他角色的聊天窗口
+            const snapshotChatCharId = currentChatCharId;
+            
             const body = document.getElementById('chat-body');
             
             // 系统消息特殊处理
@@ -25528,7 +26672,14 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             }
             
             // 获取数据库中的实际消息（确保 ID 和时间戳一致）
-            const char = await db.characters.get(currentChatCharId);
+            const char = await db.characters.get(snapshotChatCharId);
+            
+            // 🔧 修复竞态：await 返回后，检查用户是否已切换到其他聊天
+            // 如果切换了，放弃渲染，避免消息串到错误的聊天窗口
+            if (currentChatCharId !== snapshotChatCharId) {
+                console.log(`[appendMessageToUI] ⚠️ 聊天已切换 (${snapshotChatCharId} → ${currentChatCharId})，放弃渲染`);
+                return;
+            }
             const accountId = getCurrentAccountId();
             const history = getChatHistory(char, accountId);
             
@@ -26254,6 +27405,20 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             const char = await db.characters.get(currentChatCharId);
             const accountId = getCurrentAccountId();
             let history = getChatHistory(char, accountId);
+            
+            // 🔧 修复竞态保护：验证要删除的索引在历史范围内，防止误删
+            // 场景：自动聊天的竞态渲染了不属于当前聊天的"幽灵消息"，用户删除时会操作错误的索引
+            if (activeMsgIndex < 0 || activeMsgIndex >= history.length) {
+                console.warn(`[handleMsgDelete] ⚠️ 索引越界 (index=${activeMsgIndex}, historyLen=${history.length})，可能是幽灵消息，仅删除DOM`);
+                // 只删除DOM元素，不修改历史数据
+                const chatBody = document.getElementById('chat-body');
+                if (chatBody) {
+                    const msgEl = chatBody.querySelector(`[data-index="${activeMsgIndex}"]`);
+                    if (msgEl) msgEl.remove();
+                }
+                return;
+            }
+            
             history.splice(activeMsgIndex, 1);
             
             await setChatHistory(char, accountId, history);
@@ -26469,7 +27634,14 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             const accountId = getCurrentAccountId();
             const history = getChatHistory(char, accountId);
             
-            const newHistory = history.filter((_, idx) => !selectedIndices.has(idx));
+            // 🔧 修复竞态保护：过滤掉越界的索引，防止幽灵消息导致误删
+            const validIndices = new Set([...selectedIndices].filter(idx => idx >= 0 && idx < history.length));
+            if (validIndices.size === 0) {
+                console.warn('[deleteSelectedMsgs] ⚠️ 所有选中索引均越界，仅清理DOM');
+                exitSelectionMode();
+                return;
+            }
+            const newHistory = history.filter((_, idx) => !validIndices.has(idx));
             
             await setChatHistory(char, accountId, newHistory);
             await safeCharacterPut(char);
@@ -27608,9 +28780,10 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // 🔧 只有虚拟时间开启时才更新时间偏移
             if (useVirtualTime && char) {
-                if (!char.timeOffset) char.timeOffset = 0;
-                char.timeOffset += ms;
-                await safeCharacterPut(char);
+                const newOffset = (char.timeOffset || 0) + ms;
+                // 🔧 修复：使用 update() 只更新时间偏移字段，避免 put() 覆盖并发写入的聊天记录
+                await db.characters.update(currentChatCharId, { timeOffset: newOffset });
+                char.timeOffset = newOffset; // 同步本地引用
                 console.log(`[FastForward] 虚拟时间模式：Updated time offset by +${ms}ms (${unitText})`);
             } else {
                 console.log(`[FastForward] 现实时间模式：不更新时间偏移，仅触发AI继续对话`);
@@ -29074,7 +30247,7 @@ messages:
         }
 
         async function triggerAiReply(additionalSystemInfo = null) {
-            console.log('[triggerAiReply] ⚡ 触发 AI 回复');
+            console.log('[triggerAiReply] ⚡ 触发 AI 回复', window._isRegenerateMode ? '(重回模式)' : '');
             
             // 🔧 防止重复调用API（超时15秒自动解锁，防止手机端锁死）
             if (window._isGeneratingReply) {
@@ -29082,6 +30255,7 @@ messages:
                 if (elapsed < 15000) { // 15秒内认为是正常生成中
                     console.log('[triggerAiReply] 正在生成回复中，忽略重复调用 (已等待' + Math.round(elapsed/1000) + '秒)');
                     showToast('正在生成回复中，请稍候...');
+                    window._isRegenerateMode = false; // 清除重回标记
                     return;
                 }
                 // 超过15秒，强制重置锁（防止手机端卡死）
@@ -29094,6 +30268,7 @@ messages:
             
             // ★ 查手机NPC模式：NPC视角回复（NPC以为是角色在发消息）
             if (window._fpChatMode && window._fpAccountId && String(window._fpAccountId).startsWith('fp_npc_')) {
+                window._isRegenerateMode = false; // 清除重回标记
                 await triggerFpNpcReply();
                 return;
             }
@@ -29316,19 +30491,22 @@ messages:
                     
                     if (char.chat_history_by_user) {
                         const fpNpcLines = [];
+                        let hasUnnotifiedFp = false; // 🔧 追踪是否有尚未通知AI的新活动
                         for (const key of Object.keys(char.chat_history_by_user)) {
                             if (!key.startsWith('fp_npc_')) continue;
                             const npcIdStr = key.replace('fp_npc_', '');
                             const npcHistory = char.chat_history_by_user[key] || [];
                             
-                            // ★ 修改：不再检查 fpNotified，而是根据时间范围判断
-                            // 找出所有 fpSent=true 且在上下文时间范围内的消息
+                            // 🔧 修复：只检测尚未通知AI的查手机活动（fpNotified !== true）
+                            // 已通知的活动不再注入"紧急事件"系统提示，避免AI重复反应
                             const relevantFpMsgs = npcHistory.filter(m => 
                                 m.fpSent && 
+                                !m.fpNotified &&
                                 (m.time || 0) >= contextStartTime
                             );
                             
                             if (relevantFpMsgs.length === 0) continue;
+                            hasUnnotifiedFp = true;
 
                             // 查找NPC角色名
                             let npcName = 'NPC';
@@ -29340,10 +30518,11 @@ messages:
                             // 找到第一条相关消息的时间
                             const firstFpTime = Math.min(...relevantFpMsgs.map(m => m.time || 0));
 
-                            // 按时间顺序收集上下文范围内的所有查手机活动（不管是否已通知）
+                            // 按时间顺序收集未通知的查手机活动
                             for (const m of npcHistory) {
                                 if ((m.time || 0) < contextStartTime) continue; // 不在上下文范围内，跳过
                                 if ((m.time || 0) < firstFpTime) continue; // 在第一条查手机消息之前，跳过
+                                if (m.fpNotified) continue; // 🔧 已通知过的跳过
 
                                 if (m.fpSent && m.role === 'char') {
                                     // 用户冒充角色发的消息 - ★ 保留完整内容，不截断
@@ -29364,7 +30543,7 @@ messages:
                                     }
                                     // ★ 不再截断内容，保留完整消息
                                     fpNpcLines.push(`  → 冒充你给「${npcName}」发了一条消息，内容原文: "${desc}"`);
-                                } else if (!m.fpSent && m.role === 'user' && (m.time || 0) >= firstFpTime) {
+                                } else if (!m.fpSent && m.role === 'user' && (m.time || 0) >= firstFpTime && !m.fpNotified) {
                                     // NPC回复的消息，但只在查手机活动之后才显示
                                     let desc = m.content || '';
                                     fpNpcLines.push(`  ← 「${npcName}」回复了，内容原文: "${desc}"`);
@@ -29372,13 +30551,14 @@ messages:
                             }
                         }
 
-                        // 也检测查手机发布的朋友圈（根据上下文时间范围）
+                        // 也检测查手机发布的朋友圈（只检测未通知的）
                         if (char.fp_moments_by_user) {
                             for (const mKey of Object.keys(char.fp_moments_by_user)) {
                                 const momentsList = char.fp_moments_by_user[mKey] || [];
                                 for (const m of momentsList) {
-                                    // ★ 修改：不再检查 fpNotified，而是根据时间范围判断
-                                    if (m.fpSent && (m.time || 0) >= contextStartTime) {
+                                    // 🔧 修复：只检测未通知的朋友圈活动
+                                    if (m.fpSent && !m.fpNotified && (m.time || 0) >= contextStartTime) {
+                                        hasUnnotifiedFp = true;
                                         let desc = m.content || '';
                                         let imgInfo = '';
                                         if (m.images && m.images.length > 0) imgInfo = `（附带${m.images.length}张图片）`;
@@ -29399,7 +30579,8 @@ messages:
                             }
                         }
 
-                        if (fpNpcLines.length > 0) {
+                        // 🔧 修复：只有存在未通知的新活动时，才注入"紧急事件"提示
+                        if (fpNpcLines.length > 0 && hasUnnotifiedFp) {
                             _fpNpcLinesForMemory = [...fpNpcLines]; // ★ 保存副本用于长期记忆
                             
                             // 检查角色是否有密码（用于提示修改密码）
@@ -29420,7 +30601,9 @@ ${fpNpcLines.join('\n')}
 ${hasPassword ? `
 提示：如果你觉得不安全或者生气，可以考虑用 ((CHANGE_PASSWORD:新密码)) 修改你的账号密码来防止对方再次登录。但这不是必须的，请根据你的性格和你们的关系来决定。` : ''}`;
                             _fpHasPhoneActivity = true; // ★ 标记有活动，等AI回复成功后再标记fpNotified
-                            console.log('[triggerAiReply] ✅ 检测到查手机活动，共', fpNpcLines.length, '条记录（待AI回复后标记）');
+                            console.log('[triggerAiReply] ✅ 检测到未通知的查手机活动，共', fpNpcLines.length, '条记录（待AI回复后标记）');
+                        } else if (fpNpcLines.length === 0 && !hasUnnotifiedFp) {
+                            console.log('[triggerAiReply] ℹ️ 查手机活动已全部通知过，不再重复注入紧急事件');
                         }
                     }
                 } catch (e) {
@@ -29502,9 +30685,12 @@ ${hasPassword ? `
                 }
 
                 // 🔗 群聊↔私聊记忆互通：获取该角色所在群聊的最近动态
+                // ✅ 统一上下文条数：群聊记忆与私聊共享同一个 context_message_count 池，不单独额外取
+                // ✅ 不截断消息内容：完整保留每条消息
                 let groupMemoryContext = '';
                 try {
                     const accountId_gm = getCurrentAccountId();
+                    const _gmContextCount = char.context_message_count || 20;
                     if (accountId_gm) {
                         const allGroups = await db.group_chats.where('ownerAccountId').equals(accountId_gm).toArray();
                         // 包含当前在群里的 + 已退群但有记录的
@@ -29516,6 +30702,13 @@ ${hasPassword ? `
                         
                         if (charGroups.length > 0) {
                             let groupSnippets = [];
+                            // 按最后活跃时间排序，最近的群优先
+                            charGroups.sort((a, b) => {
+                                const aTime = (a.chat_history || []).slice(-1)[0]?.time || 0;
+                                const bTime = (b.chat_history || []).slice(-1)[0]?.time || 0;
+                                return bTime - aTime;
+                            });
+                            
                             for (const g of charGroups) {
                                 const gHistory = g.chat_history || [];
                                 if (gHistory.length === 0) continue;
@@ -29524,14 +30717,13 @@ ${hasPassword ? `
                                 const leftRecord = (g.leftMembers || []).find(lm => lm.id === targetCharId);
                                 const isLeftGroup = !!leftRecord;
                                 
+                                // ✅ 使用统一的上下文条数（与私聊共享池）
                                 let recentMsgs;
                                 if (isLeftGroup) {
-                                    // 已退群角色：只能看到退群前的消息
                                     const msgsBeforeLeft = gHistory.filter(m => !m.time || m.time <= leftRecord.leftAt);
-                                    recentMsgs = msgsBeforeLeft.slice(-10);
+                                    recentMsgs = msgsBeforeLeft.slice(-_gmContextCount);
                                 } else {
-                                    // 当前群成员：取最近10条消息做摘要
-                                    recentMsgs = gHistory.slice(-10);
+                                    recentMsgs = gHistory.slice(-_gmContextCount);
                                 }
                                 
                                 const gMemberMap = {};
@@ -29539,7 +30731,6 @@ ${hasPassword ? `
                                     const mc = await db.characters.get(mid);
                                     if (mc) gMemberMap[mid] = mc;
                                 }
-                                // 也加载已退群成员信息用于显示名字
                                 for (const lm of (g.leftMembers || [])) {
                                     if (!gMemberMap[lm.id]) {
                                         const mc = await db.characters.get(lm.id);
@@ -29547,26 +30738,46 @@ ${hasPassword ? `
                                     }
                                 }
                                 
+                                // ✅ 不截断：完整保留消息内容，处理特殊消息类型
                                 const snippet = recentMsgs.map(m => {
-                                    if (m.role === 'system') return `[系统] ${(m.content || '').substring(0, 50)}`;
-                                    if (m.role === 'user') return `${g.myNickname || userName || '我'}: ${(m.content || '').substring(0, 80)}`;
+                                    let contentText = m.content || '';
+                                    // 处理特殊消息类型
+                                    if (contentText.startsWith('[img:')) contentText = '[图片]';
+                                    else if (contentText.startsWith('[voice:')) contentText = `[语音: ${contentText.substring(7, contentText.length - 1)}]`;
+                                    else if (contentText.startsWith('[sticker:')) contentText = `[表情]`;
+                                    else if (contentText.startsWith('[imgcard:')) contentText = `[图片卡片]`;
+                                    else if (m.type === 'transfer') {
+                                        try { const td = JSON.parse(contentText); contentText = `[转账 ¥${td.amount}]`; } catch(e) { contentText = '[转账]'; }
+                                    } else if (m.type === 'redpacket') {
+                                        try { const rd = JSON.parse(contentText); contentText = `[红包: ${rd.wish || '恭喜发财'}]`; } catch(e) { contentText = '[红包]'; }
+                                    }
+                                    
+                                    if (m.role === 'system') return `[系统] ${contentText}`;
+                                    if (m.role === 'user') return `${g.myNickname || userName || '我'}: ${contentText}`;
                                     const sc = m.senderId ? gMemberMap[m.senderId] : null;
                                     if (!sc) return null;
                                     const sn = sc.remark || sc.wx_nickname || sc.name;
-                                    return `${sn}: ${(m.content || '').substring(0, 80)}`;
+                                    return `${sn}: ${contentText}`;
                                 }).filter(Boolean).join('\n');
+                                
+                                // 构建群成员列表
+                                const memberNames = (g.memberIds || []).map(mid => {
+                                    const mc = gMemberMap[mid];
+                                    return mc ? (mc.remark || mc.wx_nickname || mc.name) : null;
+                                }).filter(Boolean);
+                                const memberListStr = memberNames.length > 0 ? `群成员：${memberNames.join('、')}` : '';
                                 
                                 if (snippet) {
                                     if (isLeftGroup) {
-                                        groupSnippets.push(`【群聊"${g.name}"（你已退群）】\n你之前退出了这个群聊${leftRecord.reason ? '，原因：' + leftRecord.reason : ''}。以下是你退群前的最近动态：\n${snippet}`);
+                                        groupSnippets.push(`【群聊 "${g.name}"（已退出）】\n${memberListStr}\n你之前退出了这个群${leftRecord.reason ? '，原因：' + leftRecord.reason : ''}。退群前的聊天记录：\n${snippet}`);
                                     } else {
-                                        groupSnippets.push(`【群聊"${g.name}"最近动态】\n${snippet}`);
+                                        groupSnippets.push(`【群聊 "${g.name}"】\n${memberListStr}\n${snippet}`);
                                     }
                                 }
                             }
                             
                             if (groupSnippets.length > 0) {
-                                groupMemoryContext = `\n## 你和对方共同所在群聊的最近动态\n以下是你们共同参与的群聊中最近发生的事，你可以在私聊中自然地引用这些事件。\n${groupSnippets.join('\n\n')}\n`;
+                                groupMemoryContext = `\n## 你的群聊经历\n你在以下群聊中和大家一起聊过天，这些都是你亲身经历的真实对话，你对群里发生的事都有印象。聊天时如果聊到相关话题，可以自然地提起。\n\n${groupSnippets.join('\n\n')}\n`;
                                 console.log('[triggerAiReply] ✅ 群聊记忆互通已注入，群聊数:', charGroups.length);
                             }
                         }
@@ -29698,7 +30909,13 @@ ${char.foreign_lang_mode ? `
 
 ---
 
-## 气泡分割规则（最高优先级！必须严格遵守！）
+${char.theater_mode ? `## 🎭 小剧场模式（已开启）
+
+当前处于小剧场模式：
+
+1. **不需要用 ||| 分割消息**，reply 字段直接放完整内容
+2. 可以输出长段文字，不限制长度
+3. 根据对方发来的消息内容自然回复，保持角色人设` : `## 气泡分割规则（最高优先级！必须严格遵守！）
 
 **核心原则：一句话 = 一个气泡！每个短句、每个想法、每个语气都必须独立成一条消息！**
 
@@ -29734,7 +30951,7 @@ ${char.foreign_lang_mode ? `
 "嗯我在呢 怎么啦" ← 用空格连接多句话 禁止！
 "好饿想吃火锅你呢" ← 完全没分割 禁止！
 
-记住：宁可多分几条 也绝对不要把多句话塞进一个气泡！
+记住：宁可多分几条 也绝对不要把多句话塞进一个气泡！`}
 
 ---
 
@@ -29830,13 +31047,13 @@ ${char.identity?.password ? `
 ## 回复格式（必须严格遵守）
 
 【重要】你每次回复必须同时生成两个内容：
-1. **reply**：你发送的消息（用|||分隔多条消息）
+1. **reply**：你发送的消息${char.theater_mode ? '（直接放完整内容，不需要用|||分割）' : '（用|||分隔多条消息）'}
 2. **thought**：你此刻真实的内心想法、情绪、感受（这是必填项！）
 
 返回JSON格式如下：
 
 {
-  "reply": "消息1|||消息2",
+  "reply": "${char.theater_mode ? '完整的回复内容（可包含HTML）' : '消息1|||消息2'}",
   "thought": "你此刻内心的真实想法和情绪"
 }
 
@@ -29844,7 +31061,7 @@ ${char.identity?.password ? `
 
 reply：
 
-必须使用 ||| 分割
+${char.theater_mode ? '小剧场模式下直接输出完整内容 不需要|||分割' : '必须使用 ||| 分割'}
 必须符合人格
 必须自然真实
 
@@ -29966,7 +31183,23 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
 
                 // 🔥 关键修复：在所有追加内容之后，再次强调 JSON 格式和心声要求
                 // 之前格式要求被埋在中间，后面跟了大量功能说明，导致AI忽略JSON格式直接输出纯文本
-                systemPrompt += `
+                systemPrompt += char.theater_mode ? `
+
+---
+
+## ⚠️ 输出格式（最终提醒，必须严格遵守！）
+
+你必须以 JSON 格式返回，包含 reply 和 thought 两个字段：
+
+{
+  "reply": "你的完整回复内容",
+  "thought": "你此刻内心真实的想法和情绪（必填！至少10字）"
+}
+
+- reply：你的回复内容，小剧场模式下可以生成长篇内容，无需使用|||分割
+- thought：你的内心独白，必须写出真实心理活动，不能省略！
+- 禁止输出纯文本，必须输出上述 JSON 格式
+- 禁止用 Markdown 代码块包裹` : `
 
 ---
 
@@ -29998,16 +31231,18 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 const contextCount = char.context_message_count || 20;
                 console.log('[triggerAiReply] 📊 上下文消息数配置:', contextCount);
                 
-                // ❌ BUG 发现：这里使用的是 char.chat_history，而不是前面获取的 getChatHistory(char, accountId)
-                // 应该使用 fullHistory 而不是 char.chat_history
                 // 🔧 过滤视频通话内容，避免通话结束后对话仍停留在视频场景
                 const recentHistoryRaw = fullHistory
                     .filter(m => !m.isVideoCall)
                     .slice(-contextCount)
                     .filter(m => {
                         if (m.role !== 'system') return true;
-                        // 🔧 保留重要的系统事件消息（角色登录、伪造消息、转账操作等），过滤普通时间戳
+                        // 🔧 保留重要的系统事件消息，过滤普通时间戳
                         if (m.type === 'char_unblock_self' || m.type === 'fake_message_notice' || m.type === 'login_attempt_failed' || m.type === 'transfer_action') return true;
+                        // 🔧 保留时间快进标记，让AI知道时间跳跃了
+                        if (m.isTimeSkip) return true;
+                        // 🔧 保留修改密码记录，让AI知道自己已经改过密码，避免重复修改
+                        if (m.type === 'char_change_password') return true;
                         return false;
                     })
                     .map(m => {
@@ -30222,12 +31457,34 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 if (messages.length > 1) {
                     const lastMsg = messages[messages.length - 1];
                     if (lastMsg.role === 'assistant') {
-                        console.log('[triggerAiReply] ⚠️ 最后一条是角色消息，添加触发消息');
+                        // ★ 区分"重回"模式和"主动聊天/继续"模式
+                        if (window._isRegenerateMode) {
+                            console.log('[triggerAiReply] 🔄 重回模式：重新生成上一条回复');
+                            messages.push({
+                                role: 'user',
+                                content: `[系统指令] 用户对你上一条回复不满意，请你作为${char.name}重新回复。不要重复之前的回复内容，尝试不同的回答方式、语气或角度。回复的对象是之前的对话内容，按照设定的回复条数（${char.reply_min_count || 1}-${char.reply_max_count || 3}条）来回复。`
+                            });
+                        } else {
+                            console.log('[triggerAiReply] ⚠️ 最后一条是角色消息，添加触发消息');
+                            messages.push({
+                                role: 'user',
+                                content: `[系统指令] 对方没有回复，请你作为${char.name}继续这个话题，自然地接着聊。可以是：追问、补充、分享新想法、或者换个相关话题。按照设定的回复条数（${char.reply_min_count || 1}-${char.reply_max_count || 3}条）来回复。`
+                            });
+                        }
+                    }
+                }
+                
+                // ★ 重回模式下：即使最后一条是用户消息，也注入重新生成提示
+                if (window._isRegenerateMode && messages.length > 1) {
+                    const lastMsg = messages[messages.length - 1];
+                    if (lastMsg.role === 'user' && !lastMsg.content?.includes('[系统指令]')) {
                         messages.push({
-                            role: 'user',
-                            content: `[系统指令] 对方没有回复，请你作为${char.name}继续这个话题，自然地接着聊。可以是：追问、补充、分享新想法、或者换个相关话题。按照设定的回复条数（${char.reply_min_count || 1}-${char.reply_max_count || 3}条）来回复。`
+                            role: 'system',
+                            content: `提醒：用户对你之前的回复不满意，请重新回复。不要重复之前的内容，尝试不同的回答方式和角度。`
                         });
                     }
+                    // 清除重回标记
+                    window._isRegenerateMode = false;
                 }
                 
                 // ★ 如果有查手机活动，在消息末尾追加一条系统提醒，确保AI注意到
@@ -30253,7 +31510,7 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 console.log(`  - 历史消息: ${recentHistory.length} 条`);
                 console.log('');
                 console.log('【最近的对话内容】');
-                recentHistory.slice(-3).forEach((msg, index) => {
+                recentHistory.slice(-5).forEach((msg, index) => {
                     const displayContent = Array.isArray(msg.content)
                         ? `[多模态: ${msg.content.map(p => p.type === 'image_url' ? '🖼️图片' : (p.text || '').substring(0, 50)).join(' + ')}]`
                         : msg.content.substring(0, 100) + (msg.content.length > 100 ? '...' : '');
@@ -30262,6 +31519,7 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                 console.log('='.repeat(80));
 
                 // 2. 调用 AI（已经是防御式解析，直接拿到内容）
+                // ✅ 始终启用 json_mode，确保返回结构化 JSON（reply + thought）
                 const aiResponse = await callAI(messages, { json_mode: true });
                 
                 // ✅ 修复：清理末尾多余的 ]，但保留 [voice:] [imgcard:] [sticker:] 等格式的闭合括号
@@ -31822,6 +33080,23 @@ ${checkResult.checkResult}
                 replyText = replyText.replace(/\[sticker:(\d+)\]?/g, '[sticker:$1]');
                 console.log('[TriggerAI] 🔧 修复不完整的表情包标签后:', replyText);
                 
+                let segments = [];
+                
+                // 🎭 小剧场模式：不分割消息，整条当作一条处理
+                if (char.theater_mode) {
+                    console.log('[TriggerAI] 🎭 小剧场模式：跳过消息分割，保持完整内容');
+                    // 只做基本清理，不分割
+                    let theaterContent = replyText.trim();
+                    // 如果AI仍然用了|||，在小剧场模式下也尊重，但不做强制分割
+                    if (theaterContent.includes('|||')) {
+                        // AI在小剧场模式下仍使用了|||，按其意愿分割
+                        segments = theaterContent.split('|||').map(s => s.trim()).filter(s => s.length > 0);
+                        console.log('[TriggerAI] 🎭 小剧场模式：AI使用了|||，分割为', segments.length, '条');
+                    } else {
+                        segments = [theaterContent];
+                        console.log('[TriggerAI] 🎭 小剧场模式：整条消息作为一个气泡，长度:', theaterContent.length);
+                    }
+                } else {
                 // ✅ 清洗逗号，但保护翻译括号和指令内容
                 let cleanText;
                 if (char.foreign_lang_mode) {
@@ -31855,7 +33130,6 @@ ${checkResult.checkResult}
                     cleanText = cleanText.replace(/[,，]/g, ' ');
                     cleanText = cleanText.replace(/###CMD_(\d+)###/g, (_, idx) => cmdPlaceholders[parseInt(idx)] || _);
                 }
-                let segments = [];
                 
                 // 调试日志：检查分割前的内容
                 console.log('[TriggerAI] 📝 准备分割消息');
@@ -31947,6 +33221,7 @@ ${checkResult.checkResult}
                 if (segments.length === 0 && cleanText.trim()) {
                     segments.push(cleanMessage(cleanText.trim()));
                 }
+                } // end of non-theater-mode splitting
                 
                 
 
@@ -32342,9 +33617,15 @@ ${checkResult.checkResult}
                         console.log(`[AiReply] 检测到引用消息指令: 引用 ${quoteInfoReply.name}: ${quoteInfoReply.content}`);
                     }
                     
-                    // 🔧 修复：拆分包含图片的消息（确保表情包/图片单独显示）
-                    // 如果seg中混合了文字和[img:]，需要拆分成多个子消息
-                    const subParts = splitMessageWithImages(seg);
+                    // 🎭 小剧场模式：不拆分图片，直接作为整体保存
+                    let subParts;
+                    if (char.theater_mode && isTheaterHtmlContent(seg)) {
+                        // 小剧场HTML内容不拆分
+                        subParts = [seg];
+                    } else {
+                        // 🔧 修复：拆分包含图片的消息（确保表情包/图片单独显示）
+                        subParts = splitMessageWithImages(seg);
+                    }
                     
                     for (let subIdx = 0; subIdx < subParts.length; subIdx++) {
                         const part = subParts[subIdx];
@@ -32376,6 +33657,10 @@ ${checkResult.checkResult}
                                 await db.characters.update(targetCharId, {
                                     thoughts: freshChar.thoughts
                                 });
+                            }
+                            // 🎭 小剧场模式：标记消息为小剧场内容
+                            if (char.theater_mode && isTheaterHtmlContent(part)) {
+                                extraFields.isTheater = true;
                             }
                             const newMsg = buildCharMessage(part, !!char.foreign_lang_mode, extraFields);
                             // ✅ 附加引用信息到第一个子消息（如果有）
@@ -32445,28 +33730,33 @@ ${checkResult.checkResult}
                             if (freshCharForFp.fp_moments_by_user) {
                                 fpUpdatePayload.fp_moments_by_user = freshCharForFp.fp_moments_by_user;
                             }
-                            await db.characters.update(targetCharId, fpUpdatePayload);
-                            console.log('[triggerAiReply] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
-                        }
-                        
-                        // ★ 将查手机事件写入长期记忆，确保角色永久记住此事
-                        try {
-                            const fpMemoryContent = `${userName}偷偷拿了${char.name}的手机，做了以下事情：${_fpNpcLinesForMemory.map(l => l.trim().replace(/^[→←]\s*/, '')).join('；')}。${char.name}已经发现并做出了反应。`;
-                            await db.chat_summaries.add({
-                                accountId: accountId,
-                                chatType: 'private',
-                                chatId: String(targetCharId),
-                                time: Date.now(),
-                                content: fpMemoryContent,
-                                messageCount: 0,
-                                timeRange: '',
-                                keywords: ['查手机', '冒充', '手机被动'],
-                                startTime: Date.now(),
-                                endTime: Date.now()
-                            });
-                            console.log('[triggerAiReply] ✅ 查手机事件已写入长期记忆');
-                        } catch (memErr) {
-                            console.warn('[triggerAiReply] 写入查手机长期记忆失败:', memErr);
+                            // 🔧 只有真正有新标记的消息时才更新DB和写入记忆
+                            if (markedCount > 0) {
+                                await db.characters.update(targetCharId, fpUpdatePayload);
+                                console.log('[triggerAiReply] ✅ 查手机活动已标记为已通知，共标记', markedCount, '条');
+                            
+                                // ★ 将查手机事件写入长期记忆，确保角色永久记住此事（仅首次通知时写入）
+                                try {
+                                    const fpMemoryContent = `${userName}偷偷拿了${char.name}的手机，做了以下事情：${_fpNpcLinesForMemory.map(l => l.trim().replace(/^[→←]\s*/, '')).join('；')}。${char.name}已经发现并做出了反应。`;
+                                    await db.chat_summaries.add({
+                                        accountId: accountId,
+                                        chatType: 'private',
+                                        chatId: String(targetCharId),
+                                        time: Date.now(),
+                                        content: fpMemoryContent,
+                                        messageCount: 0,
+                                        timeRange: '',
+                                        keywords: ['查手机', '冒充', '手机被动'],
+                                        startTime: Date.now(),
+                                        endTime: Date.now()
+                                    });
+                                    console.log('[triggerAiReply] ✅ 查手机事件已写入长期记忆');
+                                } catch (memErr) {
+                                    console.warn('[triggerAiReply] 写入查手机长期记忆失败:', memErr);
+                                }
+                            } else {
+                                console.log('[triggerAiReply] ℹ️ 查手机活动已全部通知过，跳过重复写入长期记忆');
+                            }
                         }
                     } catch (fpErr) {
                         console.warn('[triggerAiReply] 标记fpNotified失败:', fpErr);
@@ -32492,6 +33782,8 @@ ${checkResult.checkResult}
                 // 🔧 无论成功还是失败，都要释放锁，允许下次调用
                 window._isGeneratingReply = false;
                 window._isGeneratingReplyTime = 0;
+                // 🔄 清除重回标记
+                window._isRegenerateMode = false;
                 // 🔧 释放角色级共享锁
                 autoChatLocks.delete(targetCharId);
                 if (window._autoChatLockTimes) delete window._autoChatLockTimes[targetCharId];
@@ -32577,6 +33869,7 @@ ${checkResult.checkResult}
             closeChatPanel();
             
             // 重新生成回复（基于删除后的历史记录，用户消息还在）
+            window._isRegenerateMode = true;
             await triggerAiReply();
         }
         
@@ -32665,6 +33958,7 @@ ${checkResult.checkResult}
             closeChatPanel();
             
             // 重新生成群聊回复
+            window._isRegenerateMode = true;
             await triggerAiReply();
         }
 
@@ -33874,13 +35168,16 @@ ${loreContext}
                     fetchBody.max_tokens = maxTokens;
                 }
                 
+                const bodyStr = JSON.stringify(fetchBody);
+                console.log('[callAI] 📦 请求体大小:', (bodyStr.length / 1024).toFixed(1), 'KB');
+                
                 const res = await fetch(requestUrl, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': `Bearer ${apiKeyValue}`
                     },
-                    body: JSON.stringify(fetchBody)
+                    body: bodyStr
                 });
 
                 if (!res.ok) {
@@ -35241,6 +36538,305 @@ function showLorebookPage() {
         document.getElementById('custom-css-input').value = '';
         applyCustomCSS();
         if (typeof showToast === 'function') showToast('已清空自定义CSS');
+    }
+
+    /**
+     * 保存当前全局自定义CSS为预设
+     * 将textarea中的CSS代码以命名预设的方式持久化到IndexedDB
+     */
+    async function saveGlobalCSSPreset() {
+        const cssCode = document.getElementById('custom-css-input')?.value?.trim();
+        if (!cssCode) {
+            showToast('当前没有CSS代码可保存');
+            return;
+        }
+
+        const presetName = prompt('请输入预设名称：');
+        if (!presetName || !presetName.trim()) return;
+
+        try {
+            const existing = await db.dexiData.get('globalCSSPresets');
+            const presets = existing ? existing.value : [];
+
+            // 检查是否重名
+            if (presets.find(p => p.name === presetName.trim())) {
+                if (!confirm(`预设"${presetName.trim()}"已存在，是否覆盖？`)) return;
+                const idx = presets.findIndex(p => p.name === presetName.trim());
+                if (idx !== -1) presets.splice(idx, 1);
+            }
+
+            presets.push({
+                name: presetName.trim(),
+                cssCode: cssCode,
+                time: Date.now()
+            });
+
+            await db.dexiData.put({ key: 'globalCSSPresets', value: presets });
+            showToast(`CSS预设"${presetName.trim()}"已保存！`);
+        } catch (e) {
+            console.error('[全局CSS] 保存预设失败:', e);
+            showToast('保存预设失败');
+        }
+    }
+
+    /**
+     * 加载全局CSS预设列表
+     * 从IndexedDB读取已保存的CSS预设并展示为可操作列表
+     */
+    async function loadGlobalCSSPreset() {
+        try {
+            const existing = await db.dexiData.get('globalCSSPresets');
+            const presets = existing ? existing.value : [];
+
+            if (presets.length === 0) {
+                showToast('暂无保存的CSS预设');
+                return;
+            }
+
+            const listEl = document.getElementById('global-css-preset-list');
+            if (!listEl) return;
+
+            // 切换显示/隐藏
+            if (listEl.style.display !== 'none' && listEl.innerHTML !== '') {
+                listEl.style.display = 'none';
+                return;
+            }
+
+            let html = '';
+            for (let i = 0; i < presets.length; i++) {
+                const p = presets[i];
+                const timeStr = p.time ? new Date(p.time).toLocaleDateString() : '';
+                const preview = (p.cssCode || '').substring(0, 50).replace(/</g, '&lt;') + (p.cssCode?.length > 50 ? '...' : '');
+
+                html += `
+                    <div style="display:flex; align-items:center; padding:10px 12px; background:#fff; border:1px solid #e8e8e8; border-radius:10px; margin-bottom:8px;">
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-size:13px; font-weight:500; color:#333; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${p.name}</div>
+                            <div style="font-size:10px; color:#aaa; margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${preview} ${timeStr ? '· ' + timeStr : ''}</div>
+                        </div>
+                        <div style="display:flex; gap:6px; flex-shrink:0; margin-left:8px;">
+                            <div onclick="applyGlobalCSSPreset(${i})" style="padding:5px 12px; font-size:11px; background:#007aff; color:#fff; border-radius:6px; cursor:pointer; font-weight:500;">应用</div>
+                            <div onclick="deleteGlobalCSSPreset(${i})" style="padding:5px 10px; font-size:11px; background:#f5f5f5; color:#ff3b30; border-radius:6px; cursor:pointer;">删除</div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            listEl.innerHTML = html;
+            listEl.style.display = 'block';
+        } catch (e) {
+            console.error('[全局CSS] 加载预设失败:', e);
+            showToast('加载预设失败');
+        }
+    }
+
+    /**
+     * 应用指定的全局CSS预设
+     * 将预设中的CSS代码回填到textarea并立即生效
+     */
+    async function applyGlobalCSSPreset(index) {
+        try {
+            const existing = await db.dexiData.get('globalCSSPresets');
+            const presets = existing ? existing.value : [];
+            if (index < 0 || index >= presets.length) return;
+
+            const p = presets[index];
+            const cssInput = document.getElementById('custom-css-input');
+            if (cssInput) {
+                cssInput.value = p.cssCode || '';
+            }
+
+            // 立即应用CSS
+            applyCustomCSS();
+
+            showToast(`已应用CSS预设"${p.name}"`);
+
+            // 隐藏预设列表
+            const listEl = document.getElementById('global-css-preset-list');
+            if (listEl) listEl.style.display = 'none';
+        } catch (e) {
+            console.error('[全局CSS] 应用预设失败:', e);
+            showToast('应用预设失败');
+        }
+    }
+
+    /**
+     * 删除指定的全局CSS预设
+     * 从IndexedDB中移除并刷新预设列表
+     */
+    async function deleteGlobalCSSPreset(index) {
+        try {
+            const existing = await db.dexiData.get('globalCSSPresets');
+            const presets = existing ? existing.value : [];
+            if (index < 0 || index >= presets.length) return;
+
+            const name = presets[index].name;
+            if (!confirm(`确定要删除CSS预设"${name}"吗？`)) return;
+
+            presets.splice(index, 1);
+            await db.dexiData.put({ key: 'globalCSSPresets', value: presets });
+
+            showToast(`已删除CSS预设"${name}"`);
+
+            // 刷新列表
+            const listEl = document.getElementById('global-css-preset-list');
+            if (listEl) {
+                listEl.style.display = 'none';
+                listEl.innerHTML = '';
+            }
+            if (presets.length > 0) {
+                loadGlobalCSSPreset();
+            }
+        } catch (e) {
+            console.error('[全局CSS] 删除预设失败:', e);
+            showToast('删除预设失败');
+        }
+    }
+
+    /**
+     * 显示CSS类名参考弹窗
+     * 列出聊天页面各区域的CSS类名，方便用户编写自定义CSS
+     */
+    function showCSSClassReference() {
+        let modal = document.getElementById('css-class-ref-modal');
+        if (modal) {
+            modal.style.display = 'flex';
+            return;
+        }
+        modal = document.createElement('div');
+        modal.id = 'css-class-ref-modal';
+        modal.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:10001; display:flex; align-items:center; justify-content:center; backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px);';
+        modal.onclick = function(e) { if (e.target === modal) modal.style.display = 'none'; };
+
+        const sections = [
+            {
+                title: '📱 聊天页面 · 整体结构',
+                items: [
+                    ['.chat-window', '聊天窗口（整个页面容器）'],
+                    ['.chat-header', '顶栏（包含返回/标题/按钮）'],
+                    ['.chat-back', '返回按钮（左上角 ←）'],
+                    ['.chat-title', '标题（角色名字）'],
+                    ['.chat-more', '右侧按钮（线下模式 / 聊天详情 ···）'],
+                    ['.chat-body', '消息列表区域（中间滚动区）'],
+                    ['.chat-footer', '底栏（输入框区域容器）'],
+                ]
+            },
+            {
+                title: '⌨️ 输入区域',
+                items: [
+                    ['.chat-input-bar', '输入栏（一行：魔法棒+输入框+按钮）'],
+                    ['.chat-icon-btn', '图标按钮（接收回复🪄 / 表情😊 / 菜单⊕）'],
+                    ['.chat-input', '文字输入框'],
+                    ['.chat-send-btn', '发送按钮'],
+                    ['.chat-panel-container', '底部面板容器（表情/菜单共用）'],
+                    ['.emoji-panel', '表情面板（Emoji 列表）'],
+                    ['.action-panel', '菜单面板（+号展开的功能面板）'],
+                    ['.action-panel-page', '菜单面板分页'],
+                    ['.action-item', '菜单功能项（语音/相册/转账等）'],
+                    ['.action-icon-box', '菜单功能项图标容器'],
+                    ['.action-name', '菜单功能项文字'],
+                ]
+            },
+            {
+                title: '💬 消息气泡',
+                items: [
+                    ['.message-row', '消息行（每条消息的容器）'],
+                    ['.message-row.other', '对方消息行'],
+                    ['.message-row.self', '我的消息行'],
+                    ['.message-content', '消息气泡（文字内容区）'],
+                    ['.ai-bubble', '对方气泡（用于角色单独CSS）'],
+                    ['.user-bubble', '我的气泡（用于角色单独CSS）'],
+                    ['.message-avatar', '消息头像'],
+                    ['.message-timestamp', '时间戳（消息间的时间分隔）'],
+                ]
+            },
+            {
+                title: '🎤 语音气泡',
+                items: [
+                    ['.voice-bubble', '语音消息气泡（整个语音条）'],
+                    ['.voice-bubble-header', '语音条头部（图标+波纹+时长）'],
+                    ['.voice-icon', '语音图标'],
+                    ['.voice-bars', '语音波纹动画'],
+                    ['.voice-duration', '语音时长文字'],
+                    ['.voice-text-content', '语音转文字内容（展开后显示）'],
+                    ['.message-row.other .voice-bubble', '对方语音气泡'],
+                    ['.message-row.self .voice-bubble', '我的语音气泡'],
+                ]
+            },
+            {
+                title: '💳 卡片消息',
+                items: [
+                    ['.transfer-card', '转账卡片'],
+                    ['.transfer-card.done', '已收款的转账卡片'],
+                    ['.transfer-card.returned', '已退回的转账卡片'],
+                    ['.t-amount', '转账金额'],
+                    ['.t-desc', '转账备注'],
+                    ['.t-footer', '转账底部状态栏'],
+                    ['.redpacket-card', '红包卡片'],
+                    ['.family-card-msg', '亲属卡消息卡片'],
+                    ['.spr-card', '专属红包 / 礼物卡片'],
+                    ['.intimate-req-card', '亲密关系请求卡片'],
+                    ['.location-card', '位置卡片（整体）'],
+                    ['.location-card-text', '位置卡片文字区'],
+                    ['.location-card-name', '位置名称'],
+                    ['.location-card-map', '位置卡片地图区'],
+                ]
+            },
+            {
+                title: '💬 引用 & 其他',
+                items: [
+                    ['.quote-preview', '引用预览区（输入框上方）'],
+                    ['.quote-preview-name', '引用的发送者名字'],
+                    ['.quote-preview-msg', '引用的消息内容'],
+                    ['.quoted-message', '气泡中的引用消息块'],
+                    ['.quoted-message-name', '引用消息中的名字'],
+                    ['#sticker-suggestion-bar', '智能表情推荐栏'],
+                ]
+            },
+            {
+                title: '📋 微信列表页',
+                items: [
+                    ['.wechat-page', '微信页面容器'],
+                    ['.wechat-header', '微信页面顶栏'],
+                    ['.wechat-tab-bar', '微信底部Tab栏'],
+                    ['.wechat-tab-item', '底部Tab项'],
+                    ['.wechat-list-item', '聊天列表项（会话条目）'],
+                ]
+            },
+            {
+                title: '🏠 桌面',
+                items: [
+                    ['.top-widget', '顶部磨砂小组件'],
+                    ['.dock', '底部Dock栏'],
+                    ['.app-icon', '应用图标'],
+                    ['.app-icon .name', '应用图标文字'],
+                ]
+            },
+        ];
+
+        let html = '<div style="width:90%; max-width:420px; max-height:85vh; background:#fff; border-radius:20px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 10px 40px rgba(0,0,0,0.3);">';
+        html += '<div style="padding:16px 20px; border-bottom:1px solid #eee; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; background:#f8f8f8;">';
+        html += '<div style="font-size:17px; font-weight:600; color:#333;">📋 CSS类名速查</div>';
+        html += '<div onclick="document.getElementById(\'css-class-ref-modal\').style.display=\'none\'" style="width:30px; height:30px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:20px; color:#999; border-radius:50%; background:#f0f0f0;">×</div>';
+        html += '</div>';
+        html += '<div style="flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:16px 20px;">';
+        html += '<div style="font-size:11px; color:#999; margin-bottom:12px; line-height:1.5;">点击类名可复制。在自定义CSS中使用这些类名来修改对应元素的样式。</div>';
+
+        for (const sec of sections) {
+            html += '<div style="margin-bottom:16px;">';
+            html += '<div style="font-size:14px; font-weight:600; color:#333; margin-bottom:8px; padding-bottom:6px; border-bottom:1px solid #f0f0f0;">' + sec.title + '</div>';
+            for (const [cls, desc] of sec.items) {
+                html += '<div style="display:flex; align-items:flex-start; gap:8px; margin-bottom:6px; line-height:1.4;">';
+                html += '<code onclick="navigator.clipboard.writeText(\'' + cls + '\');this.style.background=\'#d4edda\';setTimeout(()=>{this.style.background=\'#f0f0f0\'},600)" style="background:#f0f0f0; padding:2px 6px; border-radius:4px; font-size:11px; color:#c7254e; cursor:pointer; flex-shrink:0; white-space:nowrap; transition:background 0.2s; user-select:all; -webkit-user-select:all;">' + cls + '</code>';
+                html += '<span style="font-size:12px; color:#666;">' + desc + '</span>';
+                html += '</div>';
+            }
+            html += '</div>';
+        }
+
+        html += '</div></div>';
+        modal.innerHTML = html;
+        document.body.appendChild(modal);
     }
 
     // 预览自定义CSS效果（聊天页面）
@@ -39324,6 +40920,30 @@ async function generateReplyToUserComment(momentId, charName, userComment) {
         
         if (!targetChar) return;
         
+        // 获取用户与角色的关系上下文
+        let relationContext = '';
+        try {
+            if (myChar) {
+                relationContext += `\n【${myName}（回复你的人）的信息】\n`;
+                relationContext += `名字：${myName}\n`;
+                if (myChar.description) relationContext += `设定：${myChar.description}\n`;
+            }
+            if (targetChar.remark) {
+                relationContext += `${targetChar.name} 对 ${myName} 的备注/称呼：${targetChar.remark}\n`;
+            }
+            // 最近聊天记录
+            const history = getChatHistory(targetChar, accountId);
+            if (history && history.length > 0) {
+                const recent = history.slice(-10).map(m => {
+                    const role = m.role === 'char' ? targetChar.name : myName;
+                    return `${role}: ${m.content}`;
+                }).join('\n');
+                relationContext += `\n【${targetChar.name}与${myName}的最近聊天】\n${recent}\n`;
+            }
+        } catch (e) {
+            console.warn('[朋友圈回复] 获取关系上下文失败:', e);
+        }
+        
         // 找到角色之前在这条朋友圈下的评论
         const charPrevComments = (moment.comments || [])
             .filter(c => {
@@ -39334,9 +40954,11 @@ async function generateReplyToUserComment(momentId, charName, userComment) {
             .join('；');
         
         const prompt = `你是 ${targetChar.name}，你在 ${myName} 的朋友圈下评论了："${charPrevComments}"
+${relationContext}
 ${myName} 回复了你："${userComment}"
 
 请以 ${targetChar.name} 的身份，用简短自然的语气再回复 ${myName}（3-20字，可以用表情、语气词）。
+注意：你和 ${myName} 是认识的，请根据你们的关系亲密程度来回复。
 
 人设参考：${targetChar.description || targetChar.personality || '普通朋友'}
 
@@ -39385,6 +41007,36 @@ async function generateMomentOwnerReply(momentId, userName, userComment) {
         const myChar = await db.characters.get(parseInt(currentMyCharId));
         const myName = myChar?.name || userName;
         
+        // 获取用户与角色的关系上下文
+        const accountId = getCurrentAccountId();
+        let relationContext = '';
+        try {
+            // 用户信息
+            if (myChar) {
+                relationContext += `\n【${myName}（评论者）的信息】\n`;
+                relationContext += `名字：${myName}\n`;
+                if (myChar.description) relationContext += `设定：${myChar.description}\n`;
+            }
+            // 角色备注（角色给用户的备注）
+            if (ownerChar.remark_by_user && ownerChar.remark_by_user[accountId]) {
+                relationContext += `${myName} 给 ${ownerChar.name} 的备注：${ownerChar.remark_by_user[accountId]}\n`;
+            }
+            if (ownerChar.remark) {
+                relationContext += `${ownerChar.name} 对 ${myName} 的备注/称呼：${ownerChar.remark}\n`;
+            }
+            // 最近聊天记录
+            const history = getChatHistory(ownerChar, accountId);
+            if (history && history.length > 0) {
+                const recent = history.slice(-10).map(m => {
+                    const role = m.role === 'char' ? ownerChar.name : myName;
+                    return `${role}: ${m.content}`;
+                }).join('\n');
+                relationContext += `\n【${ownerChar.name}与${myName}的最近聊天】\n${recent}\n`;
+            }
+        } catch (e) {
+            console.warn('[朋友圈回复] 获取关系上下文失败:', e);
+        }
+        
         // 获取已有的所有评论，用于上下文
         const existingComments = (moment.comments || []).map(c => {
             const replyPart = c.replyTo ? ` 回复 ${c.replyTo}` : '';
@@ -39392,13 +41044,14 @@ async function generateMomentOwnerReply(momentId, userName, userComment) {
         }).join('\n');
         
         const promptText = `你是 ${ownerChar.name}，你发了一条朋友圈："${moment.content}"
-
+${relationContext}
 ${existingComments ? `朋友圈下已有的评论：\n${existingComments}\n` : ''}
 ${myName} 评论了你的朋友圈："${userComment}"
 
 请以 ${ownerChar.name} 的身份回复 ${myName} 的评论。要求：
 - 简短自然（3-30字）
 - 符合你的性格和说话风格
+- 符合你和 ${myName} 之间的关系和亲密程度
 - 可以用表情、语气词
 - 像真人回复朋友圈评论一样随意
 
@@ -47306,7 +48959,6 @@ async function renderOfflineChatBody(char) {
 
     const accountId = getCurrentAccountId();
     const userAvatarUrl = await getUserAvatarUrl(char.linked_user_id);
-    const timeOffset = getEffectiveTimeOffset(char); // 获取虚拟时间偏移
 
     // 应用自定义气泡CSS
     applyOfflineBubbleCSS();
@@ -47314,11 +48966,11 @@ async function renderOfflineChatBody(char) {
     offlineModeHistory.forEach((msg, index) => {
         const prevMsgTime = index > 0 ? offlineModeHistory[index - 1].time : null;
         
-        // 显示时间戳
+        // 显示时间戳（线下模式使用真实时间，不受快进时间影响）
         if (shouldShowTimestamp(msg.time, prevMsgTime)) {
             const timeStamp = document.createElement('div');
             timeStamp.className = 'offline-msg-timestamp';
-            timeStamp.textContent = formatMessageTime(msg.time, prevMsgTime, timeOffset);
+            timeStamp.textContent = formatMessageTime(msg.time, prevMsgTime, 0);
             body.appendChild(timeStamp);
         }
         
@@ -47607,9 +49259,11 @@ async function sendOfflineMessage() {
     // 重新聚焦输入框，保持键盘不收起
     input.focus();
 
-    // 添加用户消息
+    // 添加用户消息（存储真实创建时间，虚拟时间偏移仅在显示时由 formatMessageTime 处理）
     const userMsg = { role: 'user', content: text, time: Date.now() };
     offlineModeHistory.push(userMsg);
+    
+    console.log('[OfflineMode] 用户发送消息:', text);
     
     // 保存到IndexedDB（同时兜底localStorage）
     await saveOfflineChatHistory(accountId, offlineModeCharId, offlineModeHistory);
@@ -47752,8 +49406,11 @@ async function generateOfflineReply(char, accountId, storageKey) {
     }
     
     // 🔧 群聊↔私聊记忆互通（与线上模式一致）
+    // ✅ 统一上下文条数：使用角色的 context_message_count 作为共享池
+    // ✅ 不截断消息内容：完整保留每条消息
     let groupMemoryContext = '';
     try {
+        const _offGmContextCount = char.context_message_count || 20;
         if (accountId) {
             const allGroups = await db.group_chats.where('ownerAccountId').equals(accountId).toArray();
             // 包含当前在群里的 + 已退群但有记录的
@@ -47764,6 +49421,13 @@ async function generateOfflineReply(char, accountId, storageKey) {
             });
             if (charGroups.length > 0) {
                 let groupSnippets = [];
+                // 按最后活跃时间排序
+                charGroups.sort((a, b) => {
+                    const aTime = (a.chat_history || []).slice(-1)[0]?.time || 0;
+                    const bTime = (b.chat_history || []).slice(-1)[0]?.time || 0;
+                    return bTime - aTime;
+                });
+                
                 for (const g of charGroups) {
                     const gHistory = g.chat_history || [];
                     if (gHistory.length === 0) continue;
@@ -47772,13 +49436,13 @@ async function generateOfflineReply(char, accountId, storageKey) {
                     const leftRecord = (g.leftMembers || []).find(lm => lm.id === char.id);
                     const isLeftGroup = !!leftRecord;
                     
+                    // ✅ 使用统一的上下文条数（与私聊共享池）
                     let recentMsgs;
                     if (isLeftGroup) {
-                        // 已退群角色：只能看到退群前的消息
                         const msgsBeforeLeft = gHistory.filter(m => !m.time || m.time <= leftRecord.leftAt);
-                        recentMsgs = msgsBeforeLeft.slice(-8);
+                        recentMsgs = msgsBeforeLeft.slice(-_offGmContextCount);
                     } else {
-                        recentMsgs = gHistory.slice(-8);
+                        recentMsgs = gHistory.slice(-_offGmContextCount);
                     }
                     
                     const gMemberMap = {};
@@ -47786,7 +49450,6 @@ async function generateOfflineReply(char, accountId, storageKey) {
                         const mc = await db.characters.get(mid);
                         if (mc) gMemberMap[mid] = mc;
                     }
-                    // 也加载已退群成员信息
                     for (const lm of (g.leftMembers || [])) {
                         if (!gMemberMap[lm.id]) {
                             const mc = await db.characters.get(lm.id);
@@ -47794,24 +49457,43 @@ async function generateOfflineReply(char, accountId, storageKey) {
                         }
                     }
                     
+                    // ✅ 不截断：完整保留消息内容，处理特殊消息类型
                     const snippet = recentMsgs.map(m => {
-                        if (m.role === 'system') return null;
-                        if (m.role === 'user') return `${myName}: ${(m.content || '').substring(0, 60)}`;
+                        let contentText = m.content || '';
+                        if (contentText.startsWith('[img:')) contentText = '[图片]';
+                        else if (contentText.startsWith('[voice:')) contentText = `[语音: ${contentText.substring(7, contentText.length - 1)}]`;
+                        else if (contentText.startsWith('[sticker:')) contentText = '[表情]';
+                        else if (contentText.startsWith('[imgcard:')) contentText = '[图片卡片]';
+                        else if (m.type === 'transfer') {
+                            try { const td = JSON.parse(contentText); contentText = `[转账 ¥${td.amount}]`; } catch(e) { contentText = '[转账]'; }
+                        } else if (m.type === 'redpacket') {
+                            try { const rd = JSON.parse(contentText); contentText = `[红包: ${rd.wish || '恭喜发财'}]`; } catch(e) { contentText = '[红包]'; }
+                        }
+                        
+                        if (m.role === 'system') return `[系统] ${contentText}`;
+                        if (m.role === 'user') return `${myName}: ${contentText}`;
                         const sc = m.senderId ? gMemberMap[m.senderId] : null;
                         if (!sc) return null;
-                        return `${sc.remark || sc.wx_nickname || sc.name}: ${(m.content || '').substring(0, 60)}`;
+                        return `${sc.remark || sc.wx_nickname || sc.name}: ${contentText}`;
                     }).filter(Boolean).join('\n');
+                    
+                    // 构建群成员列表
+                    const memberNames = (g.memberIds || []).map(mid => {
+                        const mc = gMemberMap[mid];
+                        return mc ? (mc.remark || mc.wx_nickname || mc.name) : null;
+                    }).filter(Boolean);
+                    const memberListStr = memberNames.length > 0 ? `群成员：${memberNames.join('、')}` : '';
                     
                     if (snippet) {
                         if (isLeftGroup) {
-                            groupSnippets.push(`【群聊"${g.name}"（你已退群）】\n你之前退出了这个群聊${leftRecord.reason ? '，原因：' + leftRecord.reason : ''}。以下是你退群前的最近动态：\n${snippet}`);
+                            groupSnippets.push(`【群聊 "${g.name}"（已退出）】\n${memberListStr}\n你之前退出了这个群${leftRecord.reason ? '，原因：' + leftRecord.reason : ''}。退群前的聊天记录：\n${snippet}`);
                         } else {
-                            groupSnippets.push(`【群聊"${g.name}"】\n${snippet}`);
+                            groupSnippets.push(`【群聊 "${g.name}"】\n${memberListStr}\n${snippet}`);
                         }
                     }
                 }
                 if (groupSnippets.length > 0) {
-                    groupMemoryContext = `\n## 共同群聊近况\n${groupSnippets.join('\n\n')}\n`;
+                    groupMemoryContext = `\n## 你的群聊经历\n你在以下群聊中和大家一起聊过天，这些都是你亲身经历的真实对话，你对群里发生的事都有印象。聊天时如果聊到相关话题，可以自然地提起。\n\n${groupSnippets.join('\n\n')}\n`;
                     console.log('[generateOfflineReply] ✅ 群聊记忆互通已注入');
                 }
             }
@@ -47848,7 +49530,9 @@ ${recentSummary}
     const maxWords = settings.maxWords || 500;
     const customPreset = settings.customPreset || '';
     
-    // 构建系统提示词
+    // 线上聊天记录将在消息数组中以时间线方式合并（不再作为摘要）
+    
+        // 构建系统提示词
     const systemPrompt = `# 角色指令 (System Instruction) - 线下模式
 你现在的身份是【${friendName}】，正在与【${myName}】进行**线下真实见面**。
 ⚠️ 重要：你的名字是${friendName}，你不是${myName}！你是独立的角色，有自己的性格和想法。
@@ -47865,9 +49549,10 @@ ${char.relationships && char.relationships.length > 0 ? `
 3. **关联角色/NPC**：
 ${char.relationships.map(r => `   - ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}` : ''}
 ${loreContext ? `\n## 📖 世界书设定\n${loreContext}` : ''}
-${summaryMemoryContext}
+${summaryMemoryContext || ''}
 ${groupMemoryContext || ''}
 ${momentsContextText || ''}
+
 ${antiRepeatContext || ''}
 
 ## 🎭 行为准则 (Action Rules)
@@ -47901,25 +49586,29 @@ ${antiRepeatContext || ''}
    **错误示例（不要这样，所有内容堆在一起）：**
    ${friendName}微笑着走到${myName}身边，轻轻拍了拍他的肩膀。"你今天看起来心情不错呢。"她眨了眨眼，眼神中带着一丝调皮。
    
-   **重要：回复中必须包含换行符（\\n），让内容分段显示，不要所有文字堆在一起！**
+   **重要：回复中必须包含换行符（\n），让内容分段显示，不要所有文字堆在一起！**
+9. **【⚠️ 绝对禁止输出前缀标记】**：
+   - 回复中**严禁**出现任何方括号前缀，如 [微信消息]、[线下]、[旁白] 等
+   - 直接输出角色的动作描写和对话内容，不要添加任何元标记
 
-${normalChatHistory.length > 0 ? `## ★ 线上线下统一世界观
-注意：你和对方的互动包含【微信聊天】和【线下见面】两个场景，它们是同一段关系。
-- 带有 [微信消息] 前缀的消息是你们在微信上的聊天
-- 没有前缀的消息是线下见面时的互动
+${normalChatHistory.length > 0 ? `
+## ★ 线上线下统一世界观
+你和对方的互动包含【微信聊天】和【线下见面】两个场景，它们发生在同一段关系中，时间线是连贯的。
+- 对话记录中会出现"（之后你们在微信上聊天）"或"（之后你们线下见面了）"这样的场景切换提示
+- 这些提示仅供你理解上下文，你的回复中绝对不要出现这类提示
 - 你的记忆是完整的，不管是微信聊天还是线下见面的事你都清楚记得
-- 请根据最近的对话内容自然地回复，不要割裂线上线下的关系` : ''}
+- 请根据最近的对话内容自然地回复，不要割裂线上线下的关系
+- 当前场景是【线下见面】，请以线下互动的方式回复` : ''}
 ${customPreset ? `\n## 📌 额外设定\n${customPreset}` : ''}`;
 
-    // ★ 线上线下统一时间线：合并微信聊天和线下对话，按时间排序
+    // ★ 线上线下统一时间线：合并微信聊天和线下对话
+    // 🔧 线下消息优先：确保所有线下消息（特别是用户最新消息）始终被包含在上下文中
     const contextCount = char.context_message_count || 20;
     
-    // 🔧 修复空回复：对线上消息做与 triggerAiReply 相同的清洗处理
+    // 处理线上消息（与 triggerAiReply 相同的清洗逻辑）
     const onlineMsgs = normalChatHistory
         .filter(h => {
-            // 过滤掉系统事件消息（戳一戳、打开APP、改昵称等），它们不是对话内容
             if (h.role === 'system') return false;
-            // 过滤掉视频通话消息
             if (h.isVideoCall) return false;
             return true;
         })
@@ -47927,7 +49616,7 @@ ${customPreset ? `\n## 📌 额外设定\n${customPreset}` : ''}`;
             const role = h.role === 'user' ? 'user' : 'assistant';
             let content = (h.content || '').trim();
             
-            // 转账消息 → 转为可读文字
+            // 转账消息
             if (h.type === 'transfer') {
                 try {
                     const td = JSON.parse(content);
@@ -47936,20 +49625,12 @@ ${customPreset ? `\n## 📌 额外设定\n${customPreset}` : ''}`;
                     content = role === 'user' 
                         ? `对方给你转账了 ¥${td.amount}，备注：${td.desc || '转账'}${sLabel ? '，' + sLabel : ''}`
                         : `你给对方转账了 ¥${td.amount}，备注：${td.desc || '转账'}${sLabel ? '，' + sLabel : ''}`;
-                } catch(e) {
-                    content = '一笔转账';
-                }
+                } catch(e) { content = '一笔转账'; }
             }
-            // 位置分享消息
             else if (h.type === 'location') {
-                try {
-                    const ld = JSON.parse(content);
-                    content = `分享了位置：${ld.name || '某地点'}`;
-                } catch(e) {
-                    content = '分享了一个位置';
-                }
+                try { const ld = JSON.parse(content); content = `分享了位置：${ld.name || '某地点'}`; }
+                catch(e) { content = '分享了一个位置'; }
             }
-            // 特殊卡片消息
             else if (content.startsWith('[couple_avatar_card]')) {
                 content = role === 'assistant' ? '发送了情头邀请' : '回应了情头邀请';
             } else if (content.startsWith('[emei_order]') || content.startsWith('[emei_share]')) {
@@ -47960,71 +49641,105 @@ ${customPreset ? `\n## 📌 额外设定\n${customPreset}` : ''}`;
                 try {
                     const sd = JSON.parse(content);
                     content = sd.isGift ? `送了一个购物礼物：${sd.items}` : `发送了购物订单：${sd.items}`;
-                } catch(e) {
-                    content = '发送了购物卡片';
-                }
+                } catch(e) { content = '发送了购物卡片'; }
             }
-            // 撤回消息
             else if (h.type === 'recall' || content === '((RECALL))') {
                 content = '撤回了一条消息';
             }
             
-            // 图片/语音/表情替换
             content = content
                 .replace(/\[img:[^\]]*\]/g, '[图片]')
                 .replace(/\[imgcard:[^\]]*\]/g, '[图片]')
                 .replace(/\[voice:[^\]]*\]/g, '[语音]')
                 .replace(/\[sticker:[^\]]*\]/g, '[表情]');
             
-            return {
-                role: role,
-                content: content,
-                time: h.time || 0,
-                _isOnline: true
-            };
+            return { role, content, time: h.time || 0, _isOnline: true };
         })
-        .filter(h => h.content && h.content.trim()); // 过滤空内容消息
-        
-    const offlineMsgs = offlineModeHistory.map(h => ({
-        role: h.role === 'user' ? 'user' : 'assistant',
-        content: h.content || '',
-        time: h.time || 0,
-        _isOnline: false
-    })).filter(h => h.content && h.content.trim()); // 过滤空内容消息
+        .filter(h => h.content && h.content.trim());
     
-    // 线上线下合并后按时间排序，统一取最近 contextCount 条（与上下文条数设置一致）
+    const offlineMsgs = offlineModeHistory
+        .filter(h => h.content && h.content.trim())
+        .map(h => ({
+            role: h.role === 'user' ? 'user' : 'assistant',
+            content: h.content,
+            time: h.time || 0,
+            _isOnline: false
+        }));
+    
+    // 合并线上线下消息，按真实创建时间（time = Date.now()）排序交错，取最近 contextCount 条
     const mergedTimeline = [...onlineMsgs, ...offlineMsgs]
         .sort((a, b) => (a.time || 0) - (b.time || 0))
         .slice(-contextCount);
     
-    // 🔧 修复空回复：合并连续同角色消息，避免某些API不支持连续相同role导致返回空
-    const mergedMessages = [];
-    for (const msg of mergedTimeline) {
-        const prefix = msg._isOnline ? '[微信消息] ' : '';
-        const contentWithPrefix = prefix + msg.content;
+    const onlineCount = mergedTimeline.filter(m => m._isOnline).length;
+    const offlineCount = mergedTimeline.filter(m => !m._isOnline).length;
+    console.log(`[generateOfflineReply] 上下文构成：线上 ${onlineCount} 条 + 线下 ${offlineCount} 条 = ${mergedTimeline.length} 条`);
+    
+    // 🔧 场景切换提示：当 online↔offline 切换时，在第一条 user 消息中嵌入自然过渡
+    // 不使用任何前缀标记，而是把过渡文字合并到 user 消息的开头
+    let lastMode = null; // null | 'online' | 'offline'
+    const timelineWithTransitions = [];
+    
+    for (let i = 0; i < mergedTimeline.length; i++) {
+        const msg = mergedTimeline[i];
+        const currentMode = msg._isOnline ? 'online' : 'offline';
         
+        // 检测场景切换
+        if (lastMode !== null && currentMode !== lastMode) {
+            // 场景变了，找到切换后第一条 user 消息并嵌入过渡提示
+            if (msg.role === 'user') {
+                const transition = currentMode === 'online' 
+                    ? '（之后你们在微信上聊天）\n'
+                    : '（之后你们线下见面了）\n';
+                timelineWithTransitions.push({
+                    role: msg.role,
+                    content: transition + msg.content,
+                    _isOnline: msg._isOnline
+                });
+            } else {
+                // 如果切换后第一条是 assistant，则插入一条过渡 user 消息
+                const transition = currentMode === 'online'
+                    ? '（之后你们切换到微信聊天了）'
+                    : '（之后你们线下又碰面了）';
+                timelineWithTransitions.push({
+                    role: 'user',
+                    content: transition,
+                    _isOnline: msg._isOnline
+                });
+                timelineWithTransitions.push({
+                    role: msg.role,
+                    content: msg.content,
+                    _isOnline: msg._isOnline
+                });
+            }
+        } else {
+            timelineWithTransitions.push({
+                role: msg.role,
+                content: msg.content,
+                _isOnline: msg._isOnline
+            });
+        }
+        lastMode = currentMode;
+    }
+    
+    // 合并连续同角色消息
+    const mergedMessages = [];
+    for (const msg of timelineWithTransitions) {
         const prev = mergedMessages[mergedMessages.length - 1];
         if (prev && prev.role === msg.role) {
-            // 合并连续同角色消息：追加到上一条
-            prev.content += '\n' + contentWithPrefix;
+            prev.content += '\n' + msg.content;
         } else {
-            mergedMessages.push({
-                role: msg.role,
-                content: contentWithPrefix
-            });
+            mergedMessages.push({ role: msg.role, content: msg.content });
         }
     }
     
-    // 构建消息数组（统一时间线）
+    // 构建消息数组
     const messages = [
         { role: 'system', content: systemPrompt },
-        ...mergedMessages.map(h => ({
-            role: h.role,
-            content: h.content
-        }))
+        ...mergedMessages
     ];
     
-    // 🔧 修复空回复：确保最后一条消息是 user，否则API会认为已回复完毕，返回空 choices
+    // 🔧 确保最后一条消息是 user
     if (messages.length > 1) {
         const lastMsg = messages[messages.length - 1];
         if (lastMsg.role === 'assistant') {
@@ -48036,7 +49751,7 @@ ${customPreset ? `\n## 📌 额外设定\n${customPreset}` : ''}`;
         }
     }
     
-    // 🔧 修复空回复：确保至少有一条 user 消息
+    // 🔧 确保至少有一条 user 消息
     const hasUserMsg = messages.some(m => m.role === 'user');
     if (!hasUserMsg) {
         console.warn('[generateOfflineReply] ⚠️ 没有user消息，添加默认消息');
@@ -48046,7 +49761,7 @@ ${customPreset ? `\n## 📌 额外设定\n${customPreset}` : ''}`;
         });
     }
     
-    console.log('[generateOfflineReply] 📤 发送消息数:', messages.length, '条');
+        console.log('[generateOfflineReply] 📤 发送消息数:', messages.length, '条');
     console.log('[generateOfflineReply] 消息角色序列:', messages.map(m => m.role).join(' → '));
 
     const reply = await callAI(messages);
@@ -48185,6 +49900,139 @@ function applyOfflineBubbleCSS() {
         document.head.appendChild(styleEl);
     }
     styleEl.textContent = cssCode;
+}
+
+
+// ===== 线下模式预设管理 =====
+// localStorage key: offline_presets_preset / offline_presets_bubblecss
+
+/**
+ * 获取指定类型的所有预设列表
+ * @param {string} type - 'preset' 或 'bubblecss'
+ */
+function getOfflinePresets(type) {
+    const key = 'offline_presets_' + type;
+    try {
+        const data = localStorage.getItem(key);
+        return data ? JSON.parse(data) : [];
+    } catch (e) { return []; }
+}
+
+/**
+ * 保存预设列表到 localStorage
+ */
+function setOfflinePresets(type, list) {
+    const key = 'offline_presets_' + type;
+    localStorage.setItem(key, JSON.stringify(list));
+}
+
+/**
+ * 将当前输入框的内容保存为预设
+ */
+function saveOfflinePresetAs(type) {
+    const textareaId = type === 'preset' ? 'offline-custom-preset' : 'offline-custom-bubble-css';
+    const content = document.getElementById(textareaId)?.value?.trim();
+    if (!content) {
+        showToast('内容为空，无法保存');
+        return;
+    }
+
+    const name = prompt('请为预设命名：');
+    if (!name || !name.trim()) return;
+
+    const presets = getOfflinePresets(type);
+    presets.push({
+        name: name.trim(),
+        content: content,
+        time: Date.now()
+    });
+    setOfflinePresets(type, presets);
+    showToast('预设已保存：' + name.trim());
+}
+
+/**
+ * 显示预设列表弹窗
+ */
+function showOfflinePresetList(type) {
+    const presets = getOfflinePresets(type);
+    const typeName = type === 'preset' ? '自定义预设' : '气泡CSS预设';
+
+    // 移除旧弹窗
+    let old = document.getElementById('offline-preset-modal');
+    if (old) old.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'offline-preset-modal';
+    modal.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:10002; display:flex; align-items:center; justify-content:center; backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px);';
+    modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+    let html = '<div style="width:90%; max-width:400px; max-height:80vh; background:#fff; border-radius:20px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 10px 40px rgba(0,0,0,0.3);">';
+    html += '<div style="padding:16px 20px; border-bottom:1px solid #eee; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; background:#f8f8f8;">';
+    html += '<div style="font-size:17px; font-weight:600; color:#333;">📂 ' + typeName + '</div>';
+    html += '<div onclick="document.getElementById(\'offline-preset-modal\').remove()" style="width:30px; height:30px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:20px; color:#999; border-radius:50%; background:#f0f0f0;">×</div>';
+    html += '</div>';
+    html += '<div style="flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px 16px;">';
+
+    if (presets.length === 0) {
+        html += '<div style="text-align:center; padding:40px 0; color:#999; font-size:14px;">暂无保存的预设<br><span style="font-size:12px; color:#ccc;">在输入框填写内容后点击「保存为预设」</span></div>';
+    } else {
+        for (let i = 0; i < presets.length; i++) {
+            const p = presets[i];
+            const timeStr = new Date(p.time).toLocaleDateString('zh-CN') + ' ' + new Date(p.time).toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
+            const preview = p.content.length > 60 ? p.content.substring(0, 60) + '...' : p.content;
+            html += '<div style="background:#fafafa; border:1px solid #eee; border-radius:12px; padding:12px 14px; margin-bottom:10px;">';
+            html += '<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">';
+            html += '<div style="font-size:14px; font-weight:600; color:#333; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + p.name.replace(/</g, '&lt;') + '</div>';
+            html += '<div style="font-size:11px; color:#bbb; flex-shrink:0; margin-left:8px;">' + timeStr + '</div>';
+            html += '</div>';
+            html += '<div style="font-size:12px; color:#888; line-height:1.4; margin-bottom:10px; word-break:break-all; white-space:pre-wrap; max-height:60px; overflow:hidden;">' + preview.replace(/</g, '&lt;') + '</div>';
+            html += '<div style="display:flex; gap:8px;">';
+            html += '<button onclick="loadOfflinePreset(\'' + type + '\',' + i + ')" style="flex:1; padding:7px; background:#e8f5e9; color:#43a047; border:none; border-radius:8px; font-size:12px; cursor:pointer; font-weight:500;">✓ 应用</button>';
+            html += '<button onclick="deleteOfflinePreset(\'' + type + '\',' + i + ')" style="padding:7px 12px; background:#fff0f0; color:#e57373; border:none; border-radius:8px; font-size:12px; cursor:pointer; font-weight:500;">删除</button>';
+            html += '</div>';
+            html += '</div>';
+        }
+    }
+
+    html += '</div></div>';
+    modal.innerHTML = html;
+    document.body.appendChild(modal);
+}
+
+/**
+ * 加载指定预设到输入框
+ */
+function loadOfflinePreset(type, index) {
+    const presets = getOfflinePresets(type);
+    const p = presets[index];
+    if (!p) return;
+
+    const textareaId = type === 'preset' ? 'offline-custom-preset' : 'offline-custom-bubble-css';
+    document.getElementById(textareaId).value = p.content;
+
+    // 关闭弹窗
+    const modal = document.getElementById('offline-preset-modal');
+    if (modal) modal.remove();
+
+    showToast('已加载预设：' + p.name);
+}
+
+/**
+ * 删除指定预设
+ */
+function deleteOfflinePreset(type, index) {
+    const presets = getOfflinePresets(type);
+    const p = presets[index];
+    if (!p) return;
+
+    if (!confirm('确定删除预设「' + p.name + '」吗？')) return;
+
+    presets.splice(index, 1);
+    setOfflinePresets(type, presets);
+
+    // 刷新弹窗
+    showOfflinePresetList(type);
+    showToast('已删除预设');
 }
 
 function clearOfflineChatHistory() {
@@ -57203,22 +59051,31 @@ function xianyuShowMyWallet() { alert('我的钱包功能待开发'); }
 function xianyuShowDataManagement() { xianyuShowSettingsDialog(); }
 
 async function xianyuExportData() {
-    const allData = {
-        goods: await xianyuDb.goods.toArray(),
-        collections: await xianyuDb.collections.toArray(),
-        messages: await xianyuDb.messages.toArray(),
-        users: await xianyuDb.users.toArray(),
-        orders: await xianyuDb.orders.toArray(),
-        exportDate: new Date().toISOString()
-    };
-    const dataStr = JSON.stringify(allData, null, 2);
-    const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-    const exportFileDefaultName = 'xianyu_data.json';
-    const linkElement = document.createElement('a');
-    linkElement.setAttribute('href', dataUri);
-    linkElement.setAttribute('download', exportFileDefaultName);
-    linkElement.click();
-    xianyuShowDataStatus('数据已导出');
+    try {
+        const allData = {
+            goods: await xianyuDb.goods.toArray(),
+            collections: await xianyuDb.collections.toArray(),
+            messages: await xianyuDb.messages.toArray(),
+            users: await xianyuDb.users.toArray(),
+            orders: await xianyuDb.orders.toArray(),
+            exportDate: new Date().toISOString()
+        };
+        const dataStr = JSON.stringify(allData, null, 2);
+        // 使用 Blob + URL.createObjectURL 替代 data URI，避免大数据量导致浏览器崩溃
+        const blob = new Blob([dataStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const linkElement = document.createElement('a');
+        linkElement.href = url;
+        linkElement.download = 'xianyu_data.json';
+        document.body.appendChild(linkElement);
+        linkElement.click();
+        document.body.removeChild(linkElement);
+        URL.revokeObjectURL(url);
+        xianyuShowDataStatus('数据已导出');
+    } catch (error) {
+        console.error('闲鱼数据导出失败:', error);
+        alert('数据导出失败: ' + error.message);
+    }
 }
 
 function xianyuImportData() {
@@ -58655,7 +60512,8 @@ ${rolePersona}
 - 内容要有细节和画面感，比如具体吃了什么、看到了什么、和谁说了什么话
 - 可以有前后跳跃、想到哪写到哪的感觉，不需要严格的逻辑结构
 - 可以夹杂一些内心独白、自问自答
-- 字数在800-2000字左右，不要太短也不要刻意凑字数`;
+- 字数在800-2000字左右，不要太短也不要刻意凑字数
+- 【重要】不要在日记正文开头或任何位置写日期、时间、标题（如"2025年1月1日"、"周一"、"Day X"等），系统会自动添加日期，你只需要写日记内容本身`;
 
         // 构建 user prompt
         let userPromptParts = [];
@@ -59450,26 +61308,29 @@ async function saveChatTheme() {
 
         const accountId = getCurrentAccountId() || 'offline';
 
+        // URL字段优先从导入保护数据中获取真实值
+        const isEditingImported = !!(window._editingImportedTheme && window._editingImportedTheme._isImported);
+
         const themeData = {
             name: themeName,
             accountId: accountId,
             time: Date.now(),
-            // 背景
-            chatBackground: document.getElementById('chat-theme-bg').value.trim(),
-            headerBg: document.getElementById('chat-theme-header-bg').value.trim(),
+            // 背景（导入主题使用保护的真实URL）
+            chatBackground: _getThemeUrlValue('chat-theme-bg'),
+            headerBg: _getThemeUrlValue('chat-theme-header-bg'),
             headerColor: document.getElementById('chat-theme-header-color').value,
             titleColor: document.getElementById('chat-theme-title-color').value,
-            footerBg: document.getElementById('chat-theme-footer-bg').value.trim(),
+            footerBg: _getThemeUrlValue('chat-theme-footer-bg'),
             footerColor: document.getElementById('chat-theme-footer-color').value,
-            // 顶栏按钮图标
-            iconBack: document.getElementById('chat-theme-icon-back').value.trim(),
-            iconOffline: document.getElementById('chat-theme-icon-offline').value.trim(),
-            iconDetail: document.getElementById('chat-theme-icon-detail').value.trim(),
-            // 底栏按钮图标
-            iconAi: document.getElementById('chat-theme-icon-ai').value.trim(),
-            iconEmoji: document.getElementById('chat-theme-icon-emoji').value.trim(),
-            iconMore: document.getElementById('chat-theme-icon-more').value.trim(),
-            iconSend: document.getElementById('chat-theme-icon-send').value.trim(),
+            // 顶栏按钮图标（导入主题使用保护的真实URL）
+            iconBack: _getThemeUrlValue('chat-theme-icon-back'),
+            iconOffline: _getThemeUrlValue('chat-theme-icon-offline'),
+            iconDetail: _getThemeUrlValue('chat-theme-icon-detail'),
+            // 底栏按钮图标（导入主题使用保护的真实URL）
+            iconAi: _getThemeUrlValue('chat-theme-icon-ai'),
+            iconEmoji: _getThemeUrlValue('chat-theme-icon-emoji'),
+            iconMore: _getThemeUrlValue('chat-theme-icon-more'),
+            iconSend: _getThemeUrlValue('chat-theme-icon-send'),
             // 图标大小
             iconBackSize: parseInt(document.getElementById('chat-theme-icon-back-size')?.value) || 24,
             iconOfflineSize: parseInt(document.getElementById('chat-theme-icon-offline-size')?.value) || 20,
@@ -59480,10 +61341,18 @@ async function saveChatTheme() {
             iconSendSize: parseInt(document.getElementById('chat-theme-icon-send-size')?.value) || 18
         };
 
+        // 如果编辑的是导入主题，保留isImported标记
+        if (isEditingImported) {
+            themeData.isImported = true;
+        }
+
         const themeId = await db.chat_themes.add(themeData);
         console.log('[ChatTheme] ✓ 主题已保存:', themeData);
 
         showToast('✅ 主题保存成功');
+
+        // 清除导入主题编辑保护状态（恢复URL输入框为可编辑）
+        _clearImportedThemeEditState();
 
         // 清空表单
         document.getElementById('chat-theme-name').value = '';
@@ -59545,7 +61414,7 @@ async function loadChatThemeList() {
             return `
             <div style="padding:12px; background:#f8f8f8; border-radius:8px; border:1px solid #e8e8e8;">
                 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                    <div style="font-size:15px; font-weight:600; color:#333;">${theme.name}</div>
+                    <div style="font-size:15px; font-weight:600; color:#333;">${theme.name}${theme.isImported ? ' <span style="font-size:10px; color:#fff; background:#ff9500; padding:1px 5px; border-radius:3px; margin-left:4px; vertical-align:middle;">导入</span>' : ''}</div>
                     <div style="display:flex; gap:6px;">
                         <div onclick="exportSingleChatTheme(${theme.id})" style="padding:4px 10px; background:#fff; border:1px solid #ddd; border-radius:6px; font-size:12px; color:#007aff; cursor:pointer;">导出</div>
                         <div onclick="editChatTheme(${theme.id})" style="padding:4px 10px; background:#fff; border:1px solid #ddd; border-radius:6px; font-size:12px; color:#666; cursor:pointer;">编辑</div>
@@ -59576,6 +61445,9 @@ async function editChatTheme(themeId) {
             showToast('❌ 主题不存在');
             return;
         }
+
+        // 先清除之前可能存在的导入保护状态
+        _clearImportedThemeEditState();
 
         // 填充表单 - 背景
         document.getElementById('chat-theme-name').value = theme.name;
@@ -59610,6 +61482,25 @@ async function editChatTheme(themeId) {
             if (label) label.textContent = f.v + 'px';
         });
 
+        // 如果是导入的主题，保护URL字段不可见但保留功能
+        if (theme.isImported) {
+            window._editingImportedTheme = { _isImported: true };
+            Object.entries(_IMPORTED_URL_FIELDS).forEach(([inputId, propName]) => {
+                const val = theme[propName] || '';
+                if (val) {
+                    // 存储真实URL到保护数据中
+                    window._editingImportedTheme[inputId] = val;
+                    const input = document.getElementById(inputId);
+                    if (input) {
+                        input.value = '🔒 已导入图片（受保护）';
+                        input.readOnly = true;
+                        input.style.color = '#999';
+                        input.style.background = '#f5f5f5';
+                    }
+                }
+            });
+        }
+
         // 更新预览
         previewChatTheme();
 
@@ -59621,7 +61512,9 @@ async function editChatTheme(themeId) {
         await db.chat_themes.delete(themeId);
         await loadChatThemeList();
 
-        showToast('📝 主题已加载到编辑器，修改后点击保存');
+        showToast(theme.isImported
+            ? '📝 导入主题已加载（图片链接受保护，可调整大小和颜色）'
+            : '📝 主题已加载到编辑器，修改后点击保存');
     } catch (error) {
         console.error('[ChatTheme] ✗ 编辑主题失败:', error);
         showToast('❌ 编辑失败: ' + error.message);
@@ -59644,21 +61537,22 @@ async function deleteChatTheme(themeId) {
 
 // 预览聊天主题 - 完全按照实际聊天页面结构
 function previewChatTheme() {
-    const chatBg = document.getElementById('chat-theme-bg')?.value?.trim() || '';
-    const headerBg = document.getElementById('chat-theme-header-bg')?.value?.trim() || '';
+    // URL字段优先从导入保护数据中获取真实值
+    const chatBg = _getThemeUrlValue('chat-theme-bg');
+    const headerBg = _getThemeUrlValue('chat-theme-header-bg');
     const headerColor = document.getElementById('chat-theme-header-color')?.value || '#ededed';
     const titleColor = document.getElementById('chat-theme-title-color')?.value || '#333333';
-    const footerBg = document.getElementById('chat-theme-footer-bg')?.value?.trim() || '';
+    const footerBg = _getThemeUrlValue('chat-theme-footer-bg');
     const footerColor = document.getElementById('chat-theme-footer-color')?.value || '#ffffff';
     
-    // 按钮图标URL
-    const iconBack = document.getElementById('chat-theme-icon-back')?.value?.trim() || '';
-    const iconOffline = document.getElementById('chat-theme-icon-offline')?.value?.trim() || '';
-    const iconDetail = document.getElementById('chat-theme-icon-detail')?.value?.trim() || '';
-    const iconAi = document.getElementById('chat-theme-icon-ai')?.value?.trim() || '';
-    const iconEmoji = document.getElementById('chat-theme-icon-emoji')?.value?.trim() || '';
-    const iconMore = document.getElementById('chat-theme-icon-more')?.value?.trim() || '';
-    const iconSend = document.getElementById('chat-theme-icon-send')?.value?.trim() || '';
+    // 按钮图标URL（优先从导入保护数据获取）
+    const iconBack = _getThemeUrlValue('chat-theme-icon-back');
+    const iconOffline = _getThemeUrlValue('chat-theme-icon-offline');
+    const iconDetail = _getThemeUrlValue('chat-theme-icon-detail');
+    const iconAi = _getThemeUrlValue('chat-theme-icon-ai');
+    const iconEmoji = _getThemeUrlValue('chat-theme-icon-emoji');
+    const iconMore = _getThemeUrlValue('chat-theme-icon-more');
+    const iconSend = _getThemeUrlValue('chat-theme-icon-send');
     
     // 按钮图标大小
     const sizeBack = parseInt(document.getElementById('chat-theme-icon-back-size')?.value) || 24;
@@ -60225,6 +62119,87 @@ window.updateGroupChatDetailThemeDisplay = updateGroupChatDetailThemeDisplay;
 
 // ========== 主题导出/导入 ==========
 
+// ===== 导入主题URL保护机制 =====
+// 导入主题URL字段映射（input ID → theme属性名）
+const _IMPORTED_URL_FIELDS = {
+    'chat-theme-bg': 'chatBackground',
+    'chat-theme-header-bg': 'headerBg',
+    'chat-theme-footer-bg': 'footerBg',
+    'chat-theme-icon-back': 'iconBack',
+    'chat-theme-icon-offline': 'iconOffline',
+    'chat-theme-icon-detail': 'iconDetail',
+    'chat-theme-icon-ai': 'iconAi',
+    'chat-theme-icon-emoji': 'iconEmoji',
+    'chat-theme-icon-more': 'iconMore',
+    'chat-theme-icon-send': 'iconSend'
+};
+
+/**
+ * 获取主题URL字段的真实值（优先从导入保护数据中获取）
+ * @param {string} inputId - 输入框的DOM ID
+ * @returns {string} 真实的URL值
+ */
+function _getThemeUrlValue(inputId) {
+    if (window._editingImportedTheme && window._editingImportedTheme[inputId]) {
+        return window._editingImportedTheme[inputId];
+    }
+    return document.getElementById(inputId)?.value?.trim() || '';
+}
+
+/**
+ * 清除导入主题编辑保护状态，恢复所有URL输入框的可编辑状态
+ */
+function _clearImportedThemeEditState() {
+    if (window._editingImportedTheme) {
+        Object.keys(_IMPORTED_URL_FIELDS).forEach(inputId => {
+            const input = document.getElementById(inputId);
+            if (input) {
+                input.readOnly = false;
+                input.style.color = '';
+                input.style.background = '';
+            }
+        });
+        window._editingImportedTheme = null;
+    }
+}
+
+// ===== 导出加密选择弹窗 =====
+/**
+ * 显示导出方式选择弹窗，让用户选择加密或明文导出
+ * @returns {Promise<'encrypted'|'plain'|null>} 用户选择结果，null表示取消
+ */
+function _showExportEncryptDialog() {
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.45);z-index:99999;display:flex;align-items:center;justify-content:center;';
+
+        const dialog = document.createElement('div');
+        dialog.style.cssText = 'background:#fff;border-radius:14px;padding:24px 20px 16px;width:300px;max-width:85vw;box-shadow:0 8px 32px rgba(0,0,0,0.2);text-align:center;';
+        dialog.innerHTML = `
+            <div style="font-size:16px;font-weight:600;color:#333;margin-bottom:8px;">选择导出方式</div>
+            <div style="font-size:13px;color:#888;margin-bottom:20px;line-height:1.5;">
+                加密导出：图片链接等数据将被加密保护，导入后编辑时不可查看链接<br>
+                明文导出：数据不加密，导入后可以查看和编辑所有内容
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:8px;">
+                <div id="_export-encrypted-btn" style="flex:1;padding:12px 0;background:#007aff;color:#fff;border-radius:10px;font-size:15px;font-weight:500;cursor:pointer;">🔒 加密导出</div>
+                <div id="_export-plain-btn" style="flex:1;padding:12px 0;background:#34c759;color:#fff;border-radius:10px;font-size:15px;font-weight:500;cursor:pointer;">📄 明文导出</div>
+            </div>
+            <div id="_export-cancel-btn" style="padding:10px 0;color:#999;font-size:14px;cursor:pointer;">取消</div>
+        `;
+
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+
+        const cleanup = () => document.body.removeChild(overlay);
+
+        dialog.querySelector('#_export-encrypted-btn').onclick = () => { cleanup(); resolve('encrypted'); };
+        dialog.querySelector('#_export-plain-btn').onclick = () => { cleanup(); resolve('plain'); };
+        dialog.querySelector('#_export-cancel-btn').onclick = () => { cleanup(); resolve(null); };
+        overlay.onclick = (e) => { if (e.target === overlay) { cleanup(); resolve(null); } };
+    });
+}
+
 // ===== 主题加密/解密工具 =====
 const _THEME_KEY = 'MxTheme@2026!Enc';
 
@@ -60265,7 +62240,7 @@ function _themeDecrypt(cipherBase64) {
     return decoder.decode(decrypted);
 }
 
-// 导出单个主题为加密文件
+// 导出单个主题（用户选择加密或明文，加密导入的主题强制加密）
 async function exportSingleChatTheme(themeId) {
     try {
         const theme = await db.chat_themes.get(themeId);
@@ -60274,43 +62249,69 @@ async function exportSingleChatTheme(themeId) {
             return;
         }
 
-        // 移除数据库自增ID和accountId
-        const { id, accountId: _aid, ...rest } = theme;
+        let choice;
+        if (theme.isImported) {
+            // 加密导入的主题只允许加密导出，防止通过明文导出泄露链接
+            choice = 'encrypted';
+            showToast('🔒 该主题为加密导入，将自动加密导出');
+        } else {
+            // 自建主题让用户选择导出方式
+            choice = await _showExportEncryptDialog();
+            if (!choice) return; // 取消
+        }
 
-        // 加密
-        const themesJson = JSON.stringify([rest]);
-        const encryptedPayload = _themeEncrypt(themesJson);
+        // 移除数据库自增ID和accountId及isImported标记
+        const { id, accountId: _aid, isImported: _imp, ...rest } = theme;
 
-        const jsonData = {
-            type: 'chat_themes_export',
-            version: 2,
-            exportTime: new Date().toISOString(),
-            count: 1,
-            payload: encryptedPayload
-        };
+        let jsonData;
+
+        if (choice === 'encrypted') {
+            // 加密导出
+            const themesJson = JSON.stringify([rest]);
+            const encryptedPayload = _themeEncrypt(themesJson);
+            jsonData = {
+                type: 'chat_themes_export',
+                version: 2,
+                encrypted: true,
+                exportTime: new Date().toISOString(),
+                count: 1,
+                payload: encryptedPayload
+            };
+        } else {
+            // 明文导出
+            jsonData = {
+                type: 'chat_themes_export',
+                version: 2,
+                encrypted: false,
+                exportTime: new Date().toISOString(),
+                count: 1,
+                themes: [rest]
+            };
+        }
 
         const jsonStr = JSON.stringify(jsonData);
         const blob = new Blob([jsonStr], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
 
+        const isEnc = choice === 'encrypted';
         const safeName = (theme.name || 'theme').replace(/[^a-zA-Z0-9\u4e00-\u9fff_-]/g, '_');
         const a = document.createElement('a');
         a.href = url;
-        a.download = `theme_${safeName}_${new Date().toISOString().slice(0,10)}.json`;
+        a.download = `theme_${safeName}_${isEnc ? 'enc_' : ''}${new Date().toISOString().slice(0,10)}.json`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
 
-        showToast(`✅ 已导出主题「${theme.name}」（已加密）`);
-        console.log('[ChatTheme] ✓ 单个主题导出成功(加密):', theme.name);
+        showToast(`✅ 已导出主题「${theme.name}」${isEnc ? '（已加密）' : '（明文）'}`);
+        console.log(`[ChatTheme] ✓ 单个主题导出成功(${isEnc ? '加密' : '明文'}):`, theme.name);
     } catch (error) {
         console.error('[ChatTheme] ✗ 导出失败:', error);
         showToast('❌ 导出失败: ' + error.message);
     }
 }
 
-// 导出全部主题为加密文件
+// 导出全部主题（用户选择加密或明文，含加密导入主题时强制加密）
 async function exportChatThemes() {
     try {
         const accountId = getCurrentAccountId() || 'offline';
@@ -60321,38 +62322,67 @@ async function exportChatThemes() {
             return;
         }
 
+        // 检查是否包含加密导入的主题
+        const hasImportedTheme = themes.some(t => t.isImported);
+
+        let choice;
+        if (hasImportedTheme) {
+            // 包含加密导入的主题，强制加密导出
+            choice = 'encrypted';
+            showToast('🔒 包含加密导入的主题，将自动加密导出');
+        } else {
+            // 全部是自建主题，让用户选择
+            choice = await _showExportEncryptDialog();
+            if (!choice) return; // 取消
+        }
+
         // 移除数据库自增ID和accountId，导入时重新生成
         const exportData = themes.map(theme => {
-            const { id, accountId: _aid, ...rest } = theme;
+            const { id, accountId: _aid, isImported: _imp, ...rest } = theme;
             return rest;
         });
 
-        // 将主题数据加密
-        const themesJson = JSON.stringify(exportData);
-        const encryptedPayload = _themeEncrypt(themesJson);
+        let jsonData;
 
-        const jsonData = {
-            type: 'chat_themes_export',
-            version: 2,
-            exportTime: new Date().toISOString(),
-            count: exportData.length,
-            payload: encryptedPayload
-        };
+        if (choice === 'encrypted') {
+            // 加密导出
+            const themesJson = JSON.stringify(exportData);
+            const encryptedPayload = _themeEncrypt(themesJson);
+            jsonData = {
+                type: 'chat_themes_export',
+                version: 2,
+                encrypted: true,
+                exportTime: new Date().toISOString(),
+                count: exportData.length,
+                payload: encryptedPayload
+            };
+        } else {
+            // 明文导出
+            jsonData = {
+                type: 'chat_themes_export',
+                version: 2,
+                encrypted: false,
+                exportTime: new Date().toISOString(),
+                count: exportData.length,
+                themes: exportData
+            };
+        }
 
         const jsonStr = JSON.stringify(jsonData);
         const blob = new Blob([jsonStr], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
 
+        const isEnc = choice === 'encrypted';
         const a = document.createElement('a');
         a.href = url;
-        a.download = `chat_themes_${new Date().toISOString().slice(0,10)}.json`;
+        a.download = `chat_themes_${isEnc ? 'enc_' : ''}${new Date().toISOString().slice(0,10)}.json`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
 
-        showToast(`✅ 已导出 ${themes.length} 个主题（已加密）`);
-        console.log('[ChatTheme] ✓ 主题导出成功(加密):', themes.length, '个');
+        showToast(`✅ 已导出 ${themes.length} 个主题${isEnc ? '（已加密）' : '（明文）'}`);
+        console.log(`[ChatTheme] ✓ 主题导出成功(${isEnc ? '加密' : '明文'}):`, themes.length, '个');
     } catch (error) {
         console.error('[ChatTheme] ✗ 导出失败:', error);
         showToast('❌ 导出失败: ' + error.message);
@@ -60378,9 +62408,11 @@ async function importChatThemes(event) {
         }
 
         let themesArr;
+        let isEncryptedSource = false; // 标记来源是否为加密文件
 
         if (jsonData.version >= 2 && jsonData.payload) {
             // v2加密格式：解密payload
+            isEncryptedSource = true;
             try {
                 const decryptedJson = _themeDecrypt(jsonData.payload);
                 themesArr = JSON.parse(decryptedJson);
@@ -60390,7 +62422,8 @@ async function importChatThemes(event) {
                 return;
             }
         } else if (Array.isArray(jsonData.themes)) {
-            // v1旧版明文格式：直接读取
+            // v2明文格式 或 v1旧版明文格式：直接读取
+            isEncryptedSource = false;
             themesArr = jsonData.themes;
         } else {
             showToast('❌ 文件格式不正确');
@@ -60411,14 +62444,21 @@ async function importChatThemes(event) {
                 ...theme,
                 accountId: accountId
             };
+            // 仅加密来源的主题标记为导入（保护URL不可见）
+            if (isEncryptedSource) {
+                themeData.isImported = true;
+            } else {
+                delete themeData.isImported;
+            }
             // 移除可能携带的旧id
             delete themeData.id;
             await db.chat_themes.add(themeData);
             importCount++;
         }
 
-        showToast(`✅ 成功导入 ${importCount} 个主题`);
-        console.log('[ChatTheme] ✓ 主题导入成功:', importCount, '个');
+        const modeText = isEncryptedSource ? '（加密主题，图片链接受保护）' : '（明文主题）';
+        showToast(`✅ 成功导入 ${importCount} 个主题${modeText}`);
+        console.log(`[ChatTheme] ✓ 主题导入成功(${isEncryptedSource ? '加密' : '明文'}):`, importCount, '个');
 
         // 刷新主题列表
         await loadChatThemeList();
