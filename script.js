@@ -1145,8 +1145,78 @@ async function safeDbPut(table, data, label, maxRetries = 3, delayMs = 500) {
     return false;
 }
 
-// 🔧 安全写入群聊数据
+// ==================== 🚀 内存缓存层（性能优化） ====================
+// 模仿参考项目 EPhone 的 state.chats 方案：数据常驻内存，DB 仅做持久化
+// 减少 IndexedDB 读写频率，从根本上解决"群聊卡顿 / 页面崩溃"问题
+
+/** 群聊对象缓存 groupId → group */
+const _groupChatCache = new Map();
+/** 角色/人物缓存 charId → character */
+const _characterCache = new Map();
+
+/**
+ * 获取群聊对象（优先内存缓存，缓存未命中才读DB）
+ */
+async function getCachedGroupChat(id) {
+    if (!id) return null;
+    if (_groupChatCache.has(id)) return _groupChatCache.get(id);
+    const group = await db.group_chats.get(id);
+    if (group) _groupChatCache.set(id, group);
+    return group;
+}
+
+/**
+ * 获取角色对象（优先内存缓存，缓存未命中才读DB）
+ */
+async function getCachedCharacter(id) {
+    if (!id) return null;
+    const numId = typeof id === 'string' ? parseInt(id) : id;
+    if (_characterCache.has(numId)) return _characterCache.get(numId);
+    const char = await db.characters.get(numId);
+    if (char) _characterCache.set(numId, char);
+    return char;
+}
+
+/**
+ * 批量预加载角色（减少循环内 N+1 查询）
+ */
+async function preloadCharacters(ids) {
+    const missing = ids.filter(id => !_characterCache.has(typeof id === 'string' ? parseInt(id) : id));
+    if (missing.length === 0) return;
+    const chars = await db.characters.bulkGet(missing);
+    chars.forEach(char => {
+        if (char) _characterCache.set(char.id, char);
+    });
+}
+
+/**
+ * 使角色缓存失效（角色数据被外部修改时调用）
+ */
+function invalidateCharacterCache(id) {
+    if (id) {
+        _characterCache.delete(typeof id === 'string' ? parseInt(id) : id);
+    }
+}
+
+/**
+ * 使群聊缓存失效
+ */
+function invalidateGroupChatCache(id) {
+    if (id) _groupChatCache.delete(id);
+}
+
+// 🚀 群聊 chat_history 最大条数（超出后自动裁剪最早的消息，保留内存和DB写入性能）
+const GROUP_CHAT_HISTORY_MAX = 2000;
+
+// 🔧 安全写入群聊数据（同时更新内存缓存 + 自动裁剪超长历史）
 async function safeGroupChatPut(group, label) {
+    // 🚀 自动裁剪：超出上限时移除最早的消息，保留最近的
+    if (group && group.chat_history && group.chat_history.length > GROUP_CHAT_HISTORY_MAX) {
+        const excess = group.chat_history.length - GROUP_CHAT_HISTORY_MAX;
+        group.chat_history = group.chat_history.slice(excess);
+        console.log(`[safeGroupChatPut] 群聊 "${group.name}" 历史消息超出${GROUP_CHAT_HISTORY_MAX}条上限，已自动裁剪${excess}条最早消息`);
+    }
+    if (group && group.id) _groupChatCache.set(group.id, group);
     return await safeDbPut(db.group_chats, group, label || `群聊[${group.name || group.id}]`);
 }
 
@@ -1719,6 +1789,14 @@ async function saveFinanceData(key, value) {
                     }
                 } catch (e) {
                     console.warn('[副API缓存] 预加载失败:', e.message);
+                }
+                
+                // 预加载 NovelAI 配置到 DOM 输入框（防止保存按钮覆盖空值）
+                try {
+                    await loadNovelAIConfig();
+                    console.log('[NovelAI] ✅ 已预加载 NovelAI 配置到输入框');
+                } catch (e) {
+                    console.warn('[NovelAI] 预加载配置失败:', e.message);
                 }
             } catch (initErr) {
                 console.error('[Init] 核心数据加载出错:', initErr);
@@ -3412,12 +3490,6 @@ async function saveFinanceData(key, value) {
                 #summary-detail-content-edit {
                     font-family: "${fontName}", 'Courier New', 'Consolas', 'Monaco', monospace !important;
                 }
-                /* 日历特殊字体保持 */
-                .current-date-btn,
-                .sel-year-item,
-                .time-input {
-                    font-family: "${fontName}", 'Playfair Display', serif !important;
-                }
             `;
             document.head.appendChild(customFontStyleElement);
         }
@@ -4356,23 +4428,31 @@ ${loreContext}
             const allChars = await db.characters.toArray();
             const chatContacts = [];
             
-            // 1. 添加该NPC关联的用户（即选中的用户账号，始终显示）
+            // ★ 获取已删除和已拉黑的联系人列表（用于过滤）
+            const deletedContacts = roleChar.fp_deleted_contacts_by_user?.[accountId] || [];
+            const blockedContacts = roleChar.fp_blocked_contacts_by_user?.[accountId] || [];
+            
+            // 1. 添加该NPC关联的用户（即选中的用户账号，始终显示，除非被删除/拉黑）
             if (accountId) {
-                const userChar = await db.characters.get(parseInt(accountId));
-                if (userChar) {
-                    // 获取该NPC和用户的聊天记录
-                    const chatHistory = roleChar?.chat_history_by_user?.[accountId] || roleChar?.chat_history || [];
-                    const lastMsg = chatHistory.length > 0 ? chatHistory[chatHistory.length - 1] : null;
-                    chatContacts.push({
-                        char: userChar,
-                        lastMsg: lastMsg,
-                        lastTime: lastMsg ? (lastMsg.time || lastMsg.timestamp || '') : ''
-                    });
+                const userCharId = parseInt(accountId);
+                if (!deletedContacts.includes(userCharId) && !blockedContacts.includes(userCharId)) {
+                    const userChar = await db.characters.get(userCharId);
+                    if (userChar) {
+                        // 获取该NPC和用户的聊天记录
+                        const chatHistory = roleChar?.chat_history_by_user?.[accountId] || roleChar?.chat_history || [];
+                        const lastMsg = chatHistory.length > 0 ? chatHistory[chatHistory.length - 1] : null;
+                        chatContacts.push({
+                            char: userChar,
+                            lastMsg: lastMsg,
+                            lastTime: lastMsg ? (lastMsg.time || lastMsg.timestamp || '') : ''
+                        });
+                    }
                 }
             }
             
-            // 2. 只显示该角色通讯录中的NPC联系人（读取fp_npc_聊天记录）
+            // 2. 只显示该角色通讯录中的NPC联系人（读取fp_npc_聊天记录，排除已删除/拉黑的）
             for (const cid of contactIds) {
+                if (deletedContacts.includes(cid) || blockedContacts.includes(cid)) continue;
                 const npc = allChars.find(ch => ch.id === cid);
                 if (npc && String(npc.id) !== String(roleId) && npc.type !== 'user') {
                     const fpNpcKey = 'fp_npc_' + cid;
@@ -4380,11 +4460,78 @@ ${loreContext}
                     const npcLastMsg = npcHistory.length > 0 ? npcHistory[npcHistory.length - 1] : null;
                     chatContacts.push({
                         char: npc,
+                        _isGroup: false,
                         lastMsg: npcLastMsg,
                         lastTime: npcLastMsg ? (npcLastMsg.time || '') : ''
                     });
                 }
             }
+            
+            // 3. ★ 添加角色所在的群聊（复用用户已有的群聊数据，角色视角翻转）
+            try {
+                const allGroups = await db.group_chats.where('ownerAccountId').equals(accountId).toArray();
+                for (const group of allGroups) {
+                    // 只显示该角色是成员的群聊
+                    if (group.memberIds && group.memberIds.includes(parseInt(roleId))) {
+                        const history = group.chat_history || [];
+                        let lastMsg = null;
+                        for (let li = history.length - 1; li >= 0; li--) {
+                            if (history[li].content) { lastMsg = history[li]; break; }
+                        }
+                        let lastMsgText = '';
+                        if (lastMsg) {
+                            lastMsgText = lastMsg.content || '';
+                            if (lastMsgText.startsWith('[img:')) lastMsgText = '[图片]';
+                            if (lastMsgText.startsWith('[voice:')) lastMsgText = '[语音]';
+                            if (lastMsgText.startsWith('[imgcard:')) lastMsgText = '[卡片]';
+                            if (lastMsgText.startsWith('[sticker:')) lastMsgText = '[表情]';
+                            if (lastMsg.role === 'system') lastMsgText = '[系统消息]';
+                            if (lastMsg.type === 'transfer') lastMsgText = '[转账]';
+                            if (lastMsg.type === 'redpacket') lastMsgText = '[红包]';
+                        }
+                        chatContacts.push({
+                            char: null,
+                            group: group,
+                            _isGroup: true,
+                            lastMsg: lastMsg,
+                            lastMsgText: lastMsgText.substring(0, 20),
+                            lastTime: lastMsg ? (lastMsg.time || group.updated_at || group.created_at || '') : (group.updated_at || group.created_at || '')
+                        });
+                    }
+                }
+            } catch (e) {
+                console.log('[查手机] 获取群聊列表失败:', e);
+            }
+            
+            // 4. ★ 添加角色自己的NPC群聊（AI生成的、用户不在的群聊）
+            try {
+                const roleCharForGroups = await db.characters.get(parseInt(roleId));
+                const npcGroupChats = roleCharForGroups?.fp_npc_group_chats_by_user?.[accountId] || [];
+                for (const npcGroup of npcGroupChats) {
+                    const history = npcGroup.chat_history || [];
+                    const lastMsg = history.length > 0 ? history[history.length - 1] : null;
+                    const lastMsgText = lastMsg ? `${lastMsg.sender}: ${(lastMsg.content || '').substring(0, 15)}` : '';
+                    chatContacts.push({
+                        char: null,
+                        group: null,
+                        npcGroup: npcGroup,
+                        _isGroup: true,
+                        _isNpcGroup: true,
+                        lastMsg: lastMsg,
+                        lastMsgText: lastMsgText,
+                        lastTime: lastMsg ? (lastMsg.time || npcGroup.created_at || '') : (npcGroup.created_at || '')
+                    });
+                }
+            } catch (e) {
+                console.log('[查手机] 获取NPC群聊列表失败:', e);
+            }
+            
+            // ★ 按最后消息时间排序（时间最新的在前面）
+            chatContacts.sort((a, b) => {
+                const timeA = a.lastTime ? (typeof a.lastTime === 'number' ? a.lastTime : new Date(a.lastTime).getTime()) : 0;
+                const timeB = b.lastTime ? (typeof b.lastTime === 'number' ? b.lastTime : new Date(b.lastTime).getTime()) : 0;
+                return timeB - timeA;
+            });
             
             if (chatContacts.length === 0) {
                 container.innerHTML = `<div class="wechat-empty-state"><svg class="svg-icon" style="width:48px; height:48px; stroke:#ccc;" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="8" y1="15" x2="16" y2="15"></line><line x1="9" y1="9" x2="9.01" y2="9"></line><line x1="15" y1="9" x2="15.01" y2="9"></line></svg><div>暂无消息</div></div>`;
@@ -4395,30 +4542,86 @@ ${loreContext}
             // 获取角色对用户的备注名
             const fpRemark = roleChar?.fp_remark_by_user?.[accountId] || '';
             for (const contact of chatContacts) {
-                const c = contact.char;
-                const cAvatar = getCharAvatar(c, accountId);
-                const avatarStyle = cAvatar ? `background-image:url(${cAvatar})` : 'background-color:#e8e8e8';
-                const displayName = c.type === 'user' ? (fpRemark || c.nick || c.name) : getCharDisplayName(c, accountId);
-                const lastMsgText = contact.lastMsg ? (contact.lastMsg.text || contact.lastMsg.content || '').substring(0, 20) : '';
-                
-                html += `
-                    <div class="fp-chat-list-item" data-contact-id="${c.id}" style="display:flex; padding:12px 16px; border-bottom:0.5px solid #f0f0f0; align-items:center; gap:12px; cursor:pointer; transition:background 0.15s;" onmousedown="this.style.background='#f0f0f0'" onmouseup="this.style.background=''" onmouseleave="this.style.background=''">
-                        <div style="width:48px; height:48px; border-radius:6px; ${avatarStyle}; background-size:cover; background-position:center; flex-shrink:0;"></div>
-                        <div style="flex:1; min-width:0;">
-                            <div style="font-size:16px; font-weight:500; color:#1a1a1a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${displayName}</div>
-                            <div style="font-size:13px; color:#999; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${lastMsgText || '暂无消息'}</div>
+                if (contact._isNpcGroup) {
+                    // ★ NPC群聊项渲染（角色自己的群聊，用户不在其中）
+                    const ng = contact.npcGroup;
+                    html += `
+                        <div class="fp-chat-list-item fp-npc-group-item" data-npc-group-id="${ng.id}" style="display:flex; padding:12px 16px; border-bottom:0.5px solid #f0f0f0; align-items:center; gap:12px; cursor:pointer; transition:background 0.15s;" onmousedown="this.style.background='#f0f0f0'" onmouseup="this.style.background=''" onmouseleave="this.style.background=''">
+                            <div style="width:48px; height:48px; border-radius:6px; background-color:#eee; background-size:cover; background-position:center; flex-shrink:0; position:relative; display:flex; align-items:center; justify-content:center;">
+                                <svg viewBox="0 0 24 24" style="width:24px; height:24px; stroke:#999; fill:none; stroke-width:1.5;"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+                                <span style="position:absolute; bottom:-2px; right:-2px; background:#07c160; color:#fff; font-size:8px; padding:1px 3px; border-radius:2px; line-height:1;">群</span>
+                            </div>
+                            <div style="flex:1; min-width:0;">
+                                <div style="font-size:16px; font-weight:500; color:#1a1a1a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${ng.name || '群聊'}</div>
+                                <div style="font-size:13px; color:#999; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${contact.lastMsgText || '暂无消息'}</div>
+                            </div>
                         </div>
-                    </div>
-                `;
+                    `;
+                } else if (contact._isGroup) {
+                    // ★ 用户创建的群聊项渲染
+                    const g = contact.group;
+                    const groupAvatar = g.avatar || '';
+                    const gAvatarStyle = groupAvatar ? `background-image:url(${groupAvatar})` : 'background-color:#eee';
+                    html += `
+                        <div class="fp-chat-list-item fp-group-item" data-group-id="${g.id}" style="display:flex; padding:12px 16px; border-bottom:0.5px solid #f0f0f0; align-items:center; gap:12px; cursor:pointer; transition:background 0.15s;" onmousedown="this.style.background='#f0f0f0'" onmouseup="this.style.background=''" onmouseleave="this.style.background=''">
+                            <div style="width:48px; height:48px; border-radius:6px; ${gAvatarStyle}; background-size:cover; background-position:center; flex-shrink:0; position:relative;">
+                                <span style="position:absolute; bottom:-2px; right:-2px; background:#07c160; color:#fff; font-size:8px; padding:1px 3px; border-radius:2px; line-height:1;">群</span>
+                            </div>
+                            <div style="flex:1; min-width:0;">
+                                <div style="font-size:16px; font-weight:500; color:#1a1a1a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${g.name || '群聊'}</div>
+                                <div style="font-size:13px; color:#999; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${contact.lastMsgText || '暂无消息'}</div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    // 私聊项渲染（原逻辑）
+                    const c = contact.char;
+                    const cAvatar = getCharAvatar(c, accountId);
+                    const avatarStyle = cAvatar ? `background-image:url(${cAvatar})` : 'background-color:#e8e8e8';
+                    // ★ NPC联系人优先使用fp_contact_remarks中的备注
+                    let displayName;
+                    if (c.type === 'user') {
+                        displayName = fpRemark || c.nick || c.name;
+                    } else {
+                        displayName = roleChar?.fp_contact_remarks?.[c.id] || getCharDisplayName(c, accountId);
+                    }
+                    const lastMsgText = contact.lastMsg ? (contact.lastMsg.text || contact.lastMsg.content || '').substring(0, 20) : '';
+                    
+                    html += `
+                        <div class="fp-chat-list-item" data-contact-id="${c.id}" style="display:flex; padding:12px 16px; border-bottom:0.5px solid #f0f0f0; align-items:center; gap:12px; cursor:pointer; transition:background 0.15s;" onmousedown="this.style.background='#f0f0f0'" onmouseup="this.style.background=''" onmouseleave="this.style.background=''">
+                            <div style="width:48px; height:48px; border-radius:6px; ${avatarStyle}; background-size:cover; background-position:center; flex-shrink:0;"></div>
+                            <div style="flex:1; min-width:0;">
+                                <div style="font-size:16px; font-weight:500; color:#1a1a1a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${displayName}</div>
+                                <div style="font-size:13px; color:#999; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${lastMsgText || '暂无消息'}</div>
+                            </div>
+                        </div>
+                    `;
+                }
             }
             html += '</div>';
             container.innerHTML = html;
             
-            // 绑定点击事件：点击聊天列表项进入聊天详情（视角转换）
-            container.querySelectorAll('.fp-chat-list-item').forEach(item => {
+            // 绑定点击事件：私聊项进入聊天详情（视角转换）
+            container.querySelectorAll('.fp-chat-list-item:not(.fp-group-item):not(.fp-npc-group-item)').forEach(item => {
                 item.addEventListener('click', () => {
                     const contactId = parseInt(item.dataset.contactId);
                     openFpChatDetail(contactId);
+                });
+            });
+            
+            // ★ 绑定点击事件：群聊项进入群聊详情（角色视角）
+            container.querySelectorAll('.fp-group-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const groupId = parseInt(item.dataset.groupId);
+                    openFpGroupChatDetail(groupId);
+                });
+            });
+            
+            // ★ 绑定点击事件：NPC群聊项进入NPC群聊详情
+            container.querySelectorAll('.fp-npc-group-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const npcGroupId = parseInt(item.dataset.npcGroupId);
+                    openFpNpcGroupChatDetail(npcGroupId);
                 });
             });
         }
@@ -4506,16 +4709,24 @@ ${loreContext}
             
             let contacts = [];
             
-            // 1. 添加用户好友（该角色关联的用户账号，始终显示）
+            // ★ 获取已删除和已拉黑的联系人列表（用于过滤）
+            const deletedContacts = roleChar.fp_deleted_contacts_by_user?.[accountId] || [];
+            const blockedContacts = roleChar.fp_blocked_contacts_by_user?.[accountId] || [];
+            
+            // 1. 添加用户好友（该角色关联的用户账号，除非被删除/拉黑）
             if (accountId) {
-                const userChar = await db.characters.get(parseInt(accountId));
-                if (userChar) {
-                    contacts.push({ char: userChar, isUser: true });
+                const userCharId = parseInt(accountId);
+                if (!deletedContacts.includes(userCharId) && !blockedContacts.includes(userCharId)) {
+                    const userChar = await db.characters.get(userCharId);
+                    if (userChar) {
+                        contacts.push({ char: userChar, isUser: true });
+                    }
                 }
             }
             
-            // 2. 只添加该角色通讯录中明确存在的NPC联系人
+            // 2. 只添加该角色通讯录中明确存在的NPC联系人（排除已删除/拉黑的）
             for (const cid of contactIds) {
+                if (deletedContacts.includes(cid) || blockedContacts.includes(cid)) continue;
                 const c = allChars.find(ch => ch.id === cid);
                 if (c && String(c.id) !== String(roleId) && c.type !== 'user') {
                     contacts.push({ char: c, isUser: false });
@@ -4599,7 +4810,7 @@ ${loreContext}
                     listDiv.appendChild(sectionTitle);
                     
                     for (const contact of npcFriendsArr) {
-                        const item = createFpContactItem(contact.char, accountId, roleId, container);
+                        const item = createFpContactItem(contact.char, accountId, roleId, container, roleChar);
                         listDiv.appendChild(item);
                     }
                 }
@@ -4609,7 +4820,7 @@ ${loreContext}
         }
         
         // 创建联系人行（带点击查看聊天 + 长按删除功能）
-        function createFpContactItem(c, accountId, roleId, container) {
+        function createFpContactItem(c, accountId, roleId, container, roleChar) {
             const item = document.createElement('div');
             item.style.cssText = 'display:flex; padding:10px 16px; border-bottom:0.5px solid #f0f0f0; align-items:center; gap:12px; position:relative; cursor:pointer; transition:background 0.15s;';
             item.onmousedown = function() { this.style.background = '#f5f5f5'; };
@@ -4618,7 +4829,8 @@ ${loreContext}
             
             const cAvatar = getCharAvatar(c, accountId);
             const avatarStyle = cAvatar ? `background-image:url(${cAvatar})` : 'background-color:#e8e8e8';
-            const displayName = getCharDisplayName(c, accountId);
+            // ★ 优先使用fp_contact_remarks中的备注
+            const displayName = roleChar?.fp_contact_remarks?.[c.id] || getCharDisplayName(c, accountId);
             
             item.innerHTML = `
                 <div style="width:40px; height:40px; border-radius:4px; ${avatarStyle}; background-size:cover; background-position:center;"></div>
@@ -4922,17 +5134,22 @@ ${loreContext}
                 const hasComments = m.comments && m.comments.length > 0;
                 if (hasComments) {
                     commentsHtml = m.comments.map(c => {
+                        // 🔧 安全过滤：去除可能泄露的 ||| 分隔符
+                        const commentText = (c.text || c.content || '').replace(/\|\|\|/g, ' ');
                         return `<div class="comment-item">
-                            <span class="comment-user">${escapeHtml(c.name || '好友')}</span>：<span class="comment-content">${escapeHtml(c.text || c.content || '')}</span>
+                            <span class="comment-user">${escapeHtml(c.name || '好友')}</span>：<span class="comment-content">${escapeHtml(commentText)}</span>
                         </div>`;
                     }).join('');
                 }
 
+                // 🔧 安全过滤：去除朋友圈正文中可能泄露的 ||| 分隔符
+                const momentContent = (m.content || '').replace(/\|\|\|/g, ' ');
+                
                 div.innerHTML = `
                     <div class="moment-avatar" style="${authorAvatar ? `background-image:url(${authorAvatar});background-size:cover;background-position:center;` : 'background-color:#e8e8e8;'}"></div>
                     <div class="moment-content">
                         <div class="moment-name">${escapeHtml(authorName)}</div>
-                        <div class="moment-text">${escapeHtml(m.content || '')}</div>
+                        <div class="moment-text">${escapeHtml(momentContent)}</div>
                         ${imagesHtml}
                         <div class="moment-meta">
                             <div style="display:flex; align-items:center; gap:8px;">
@@ -5005,6 +5222,18 @@ ${loreContext}
 
                 console.log(`[FP朋友圈NPC] 开始批量生成NPC互动，NPC数量: ${npcChars.length}`);
 
+                // 获取角色人设和世界书上下文
+                const roleDesc = roleChar.description || roleChar.personality || '';
+                let fpNpcLoreContext = '';
+                try {
+                    const lorebookIds = roleChar.lorebookIds || (roleChar.lorebookId ? [roleChar.lorebookId] : []);
+                    if (lorebookIds.length > 0 && typeof getLorebookContext === 'function') {
+                        fpNpcLoreContext = await getLorebookContext(lorebookIds, roleName);
+                    }
+                } catch (e) {
+                    console.warn('[FP朋友圈NPC] 获取世界书失败:', e);
+                }
+
                 // 随机选取NPC来评论（1~3个）
                 const shuffled = [...npcChars].sort(() => Math.random() - 0.5);
                 const commentCount = Math.min(shuffled.length, 1 + Math.floor(Math.random() * 3));
@@ -5013,27 +5242,42 @@ ${loreContext}
                 // 随机NPC点赞（50%概率）
                 const likers = npcChars.filter(() => Math.random() < 0.5);
 
-                // 构建评论者信息
+                // 构建评论者信息（包含详细人设）
                 const commenterInfos = selectedNPCs.map(c => {
                     const npcName = c.nick || c.name || 'NPC';
                     const npcDesc = c.description || c.personality || '普通朋友';
-                    return `- ${npcName}：${npcDesc}`;
+                    // 尝试获取与发布者的关系
+                    const relationships = roleChar.relationships || [];
+                    const rel = relationships.find(r => r.targetId === c.id);
+                    const relInfo = rel ? `（与${roleName}的关系：${rel.relation}）` : '';
+                    return `- ${npcName}${relInfo}：${npcDesc}`;
                 }).join('\n');
 
                 // 一次AI调用批量生成所有评论
                 let aiComments = [];
                 if (selectedNPCs.length > 0) {
                     try {
+                        // 构建包含人设上下文的 system prompt
+                        const fpNpcSystemPrompt = `你正在进行角色扮演世界中的社交模拟。请严格基于以下角色设定和世界观来生成评论，确保每条评论都符合角色人设。
+
+【朋友圈发布者信息】
+名字：${roleName}
+${roleChar.wx_nickname ? `微信网名：${roleChar.wx_nickname}` : ''}
+${roleDesc ? `人设：\n${roleDesc}` : ''}
+${fpNpcLoreContext ? `\n【世界观】\n${fpNpcLoreContext}` : ''}
+
+只返回JSON数组，不要任何其他文字。`;
+
                         const batchPrompt = `${roleName} 发了一条朋友圈："${targetMoment.content}"
 ${targetMoment.images?.length > 0 ? `（附带${targetMoment.images.length}张图片）` : ''}
 
-以下好友看到了这条朋友圈，请为每个人生成一条符合其性格的评论：
+以下好友看到了这条朋友圈，请为每个人生成一条符合其性格和人设的评论：
 ${commenterInfos}
 
 要求：
 1. 每条评论简短自然（2-25字）
 2. 可以用表情、语气词、调侃、夸赞、吐槽等
-3. 符合每个角色的性格特点和与 ${roleName} 的关系
+3. **必须符合每个角色的人设、性格特点和与 ${roleName} 的关系**
 4. 像真人在朋友圈下评论一样随意
 5. 好友之间可以互相回复（使用 replyTo 字段指定回复的人名），但不是每个人都要回复别人
 
@@ -5041,7 +5285,7 @@ ${commenterInfos}
 [{"name": "角色名", "content": "评论内容"}, {"name": "角色名", "replyTo": "被回复的角色名", "content": "回复内容"}, ...]`;
 
                         const result = await callAI([
-                            { role: 'system', content: '你是一个社交媒体评论生成助手，只返回JSON数组，不要任何其他文字。' },
+                            { role: 'system', content: fpNpcSystemPrompt },
                             { role: 'user', content: batchPrompt }
                         ], { _useSecondary: true });
 
@@ -5532,6 +5776,18 @@ ${commenterInfos}
                 }
             }
             
+            // ★ 收集被删除/拉黑的NPC联系人信息（锁定模式下AI可能自己把他们加回来）
+            const deletedContactIds = roleChar.fp_deleted_contacts_by_user?.[accountId] || [];
+            const blockedContactIds = roleChar.fp_blocked_contacts_by_user?.[accountId] || [];
+            let deletedNpcs = [];
+            for (const dId of deletedContactIds) {
+                const dChar = allChars.find(ch => ch.id === dId);
+                if (dChar && dChar.type !== 'user' && String(dChar.id) !== String(roleId)) {
+                    const isBlocked = blockedContactIds.includes(dId);
+                    deletedNpcs.push({ char: dChar, isBlocked });
+                }
+            }
+            
             // ★ 构建关联NPC的关系描述（用于AI生成更准确的聊天记录）
             let relationshipContext = '';
             if (roleChar.relationships && roleChar.relationships.length > 0) {
@@ -5592,6 +5848,37 @@ ${commenterInfos}
                         return `${m.author}: ${(m.content || '').substring(0, 20)}`;
                     }).join('、');
 
+                    // 获取现有NPC群聊摘要
+                    const existingGroupChats = roleCharSnap?.fp_npc_group_chats_by_user?.[accountId] || [];
+                    let groupChatSummaries = '';
+                    if (existingGroupChats.length > 0) {
+                        groupChatSummaries = existingGroupChats.map(g => {
+                            const lastMsgs = (g.chat_history || []).slice(-2).map(m => {
+                                return `${m.sender}: ${(m.content || '').substring(0, 20)}`;
+                            }).join(' / ');
+                            return `- "${g.name}" 成员:[${(g.members || []).join(',')}] 最近: [${lastMsgs}]`;
+                        }).join('\n');
+                    }
+
+                    // ★ 收集被删除/拉黑的NPC信息，让AI决定是否加回来
+                    let deletedNpcContext = '';
+                    if (deletedNpcs.length > 0) {
+                        const deletedList = deletedNpcs.map(d => {
+                            const rel = roleChar.relationships?.find(r => r.targetId === d.char.id);
+                            const relInfo = rel ? `[${rel.relation}] ` : '';
+                            const status = d.isBlocked ? '被拉黑' : '被删除';
+                            return `- ${d.char.nick || d.char.name}（${status}）: ${relInfo}${d.char.description || '好友'}`;
+                        }).join('\n');
+                        deletedNpcContext = `
+★ 以下好友曾被${roleName}删除或拉黑：
+${deletedList}
+你可以让${roleName}主动把他们重新加回来（比如后悔了、想和好了、有事找对方等）。
+如果要加回来，请在JSON中添加 "re_add_contacts" 字段，值为要加回来的好友nick数组。
+被加回来的好友也要在chats中生成新的聊天记录（比如"我想了想还是加回你了"之类的）。
+不加回来也可以，根据${roleName}的性格和与对方的关系来判断。
+`;
+                    }
+
                     lockedContextSection = `
 ★★★ 重要：这是一次追加生成（数据已锁定），请在已有数据的时间线之后继续生成新内容 ★★★
 不要重复已有内容，要生成发生在"现在"的新消息和新动态。
@@ -5601,8 +5888,9 @@ ${commenterInfos}
 ${chatSummaries.length > 0 ? '- 各好友最近聊天：\n' + chatSummaries.join('\n') : ''}
 ${recentTx ? '- 最近交易记录：' + recentTx : ''}
 ${recentMoments ? '- 最近朋友圈：' + recentMoments : ''}
-
-请基于以上已有情况，生成后续的新消息、新交易、新朋友圈。
+${groupChatSummaries ? '- 已有NPC群聊：\n' + groupChatSummaries : ''}
+${deletedNpcContext}
+请基于以上已有情况，生成后续的新消息、新交易、新朋友圈、新群聊消息。
 钱包的wallet.balance字段请填写在当前余额¥${existingWalletBalance}的基础上，加减新交易后的最终余额。
 新生成的transactions只包含新交易（不要重复旧交易）。
 `;
@@ -5653,6 +5941,25 @@ ${npcSection}${needNpcs ? '二' : '一'}、为主角色与每个NPC好友之间�
 ${needNpcs ? '好友列表将在npcs中生成，chats的key要用NPC的nick' : '好友列表：\n' + existingNpcList + '\nchats的key要用NPC的nick（即：' + existingNpcNames + '）'}
 每条消息role: "user"(NPC发的) 或 "char"(主角色发的)
 
+⚠️ 聊天记录气泡分割规则（极其重要！必须遵守！仅限chats聊天记录！）：
+- 真人发微信不会把话堆在一条里，而是一句话一个气泡
+- 仅在chats聊天记录的content字段内，用 ||| 分隔多个短句，每个短句会显示为独立的气泡
+- 同一个人可以连续发多条消息（连续多个相同role的消息是允许的！）
+- 每个气泡不超过15个字，短促、碎片化、口语化
+- 少用标点，不要在句尾加句号
+- content内禁止使用逗号（但 {{}} 标签内的逗号例外），想表达停顿就用|||分割
+- ⚠️ ||| 只能出现在chats中！朋友圈content、评论text、likes中绝对禁止使用|||
+
+示例（正确）：
+{"role":"user","content":"在干嘛|||刚下课好无聊"}
+{"role":"char","content":"在打游戏|||等下就好"}
+{"role":"user","content":"又打游戏|||天天打"}
+{"role":"char","content":"哈哈哈|||最后一把了|||马上来找你"}
+
+错误示例（禁止）：
+{"role":"user","content":"在干嘛？刚下课好无聊啊"} ← 多句话挤一个气泡
+{"role":"char","content":"我在打游戏，等下就好了"} ← 用逗号连接，没分割
+
 ${needNpcs ? '三' : '二'}、生成钱包数据
 ${isLocked ? `当前余额为¥${existingWalletBalance}，在此基础上生成2~4笔新交易(收入/支出)，balance字段填加减新交易后的最终余额` : '余额要符合角色经济状况，生成3~6笔交易(收入/支出)，贴合日常生活'}
 
@@ -5663,23 +5970,40 @@ ${isLocked ? '' : `${needNpcs ? '四' : '三'}、生成角色对用户"${userNam
 总共生成${isLocked ? '3~5' : '5~8'}条朋友圈动态，分散在不同的NPC好友身上。${isLocked ? '（这是新动态，与之前不重复）' : ''}
 每条动态的author字段填NPC好友的nick。
 内容要符合对应NPC的人设和性格，包含日常生活、心情、分享等。
-每条动态可以有文字图片描述（用方括号包裹图片描述，如"[自拍照]"、"[咖啡拉花]"）。
+⚠️ 大多数朋友圈应该是纯文字的（不带images字段），只有少数（约1/3）可以带图片。
+带图片时用images字段，方括号包裹图片描述，如"[自拍照]"、"[咖啡拉花]"。不带图片时不要写images字段。
 部分动态可以有其他好友的点赞（用nick）和评论。主角色"${roleName}"也可能会点赞或评论好友的动态。
+
+${needNpcs ? (isLocked ? '四' : '六') : (isLocked ? '四' : '五')}、生成角色自己的群聊（用户"${userName}"不在群里的NPC群聊）
+${roleName}和一些NPC好友可能有自己的小群（比如闺蜜群、同事群、高中同学群、游戏开黑群等）。
+${isLocked ? '为已有的群聊生成新的聊天消息（接续之前的对话）。如果没有已有群聊，则生成1~2个新群聊。' : '生成1~2个群聊，每个群聊由2~4个NPC好友组成（加上主角色${roleName}自己）。'}
+每个群聊需要：
+- name: 群名（像真人取的群名，如"闺蜜群🌸"、"高中三傻"、"干饭小分队"等）
+- members: 群成员的nick数组（必须包含主角色"${roleName}"和至少2个NPC好友的nick）
+- chat_history: ${isLocked ? '2~4' : '4~8'}条群聊消息
+  - 每条消息：{"sender":"发送者nick","content":"消息内容"}
+  - sender 必须是 members 中的某个nick
+  - 群聊中多个人会交叉发言，不要只有两个人在聊
+
+⚠️ 群聊的聊天记录也要遵守 ||| 气泡分割规则（和chats一样）！
 
 请严格按照以下JSON格式返回，不要有任何其他文字：
 {
   ${needNpcs ? '"npcs": [{"name":"李婷","nick":"小婷子🌸","relation":"大学室友","desc":"活泼开朗的90后设计师"}],' : ''}
   "chats": {
-    "${needNpcs ? '小婷子🌸' : (npcContacts[0]?.nick || npcContacts[0]?.name || 'NPC昵称')}": [{"role":"user","content":"消息内容"},{"role":"char","content":"回复内容"}]
+    "${needNpcs ? '小婷子🌸' : (npcContacts[0]?.nick || npcContacts[0]?.name || 'NPC昵称')}": [{"role":"user","content":"在干嘛|||好无聊"},{"role":"char","content":"在看剧|||你呢"},{"role":"user","content":"出来玩吧"},{"role":"char","content":"好啊|||去哪"}]
   },
   "wallet": {
     "balance": "${isLocked ? existingWalletBalance : '1234.56'}",
     "transactions": [{"type":"expense","amount":"25.00","title":"外卖","desc":"美团外卖"},{"type":"income","amount":"5000.00","title":"工资","desc":"XX公司"}]
   },
-  ${isLocked ? '' : '"remark": "备注名",'}
-  "moments": [
-    {"author":"${needNpcs ? '小婷子🌸' : (npcContacts[0]?.nick || npcContacts[0]?.name || 'NPC昵称')}","content":"今天天气真好～出去走走","images":["[蓝天白云的照片]"],"likes":["${roleName}","其他好友nick"],"comments":[{"name":"${roleName}","text":"好美啊"}]},
-    {"author":"另一个好友nick","content":"加班到现在...","images":[],"likes":[],"comments":[]}
+  ${isLocked ? '' : '"remark": "备注名",'}${isLocked && deletedNpcs.length > 0 ? '\n  "re_add_contacts": ["被加回的好友nick"],\n' : ''}  "moments": [
+    {"author":"${needNpcs ? '小婷子🌸' : (npcContacts[0]?.nick || npcContacts[0]?.name || 'NPC昵称')}","content":"今天天气真好～出去走走","likes":["${roleName}","其他好友nick"],"comments":[{"name":"${roleName}","text":"好美啊"}]},
+    {"author":"另一个好友nick","content":"加班到现在...","likes":[],"comments":[]},
+    {"author":"好友nick","content":"周末出去玩","images":["[出游的照片]"],"likes":["${roleName}"],"comments":[]}
+  ],
+  "group_chats": [
+    {"name":"闺蜜群🌸","members":["${roleName}","小婷子🌸","雪雪"],"chat_history":[{"sender":"小婷子🌸","content":"今晚谁有空|||出来吃饭"},{"sender":"${roleName}","content":"我可以|||去哪吃"},{"sender":"雪雪","content":"我也要去|||等我化个妆"}]}
   ]
 }`;
 
@@ -5721,6 +6045,56 @@ ${isLocked ? '' : `${needNpcs ? '四' : '三'}、生成角色对用户"${userNam
                     }
                 }
 
+                // ===== 处理被加回来的好友（re_add_contacts） =====
+                if (isLocked && parsedData.re_add_contacts && Array.isArray(parsedData.re_add_contacts) && parsedData.re_add_contacts.length > 0) {
+                    const reAddNicks = parsedData.re_add_contacts;
+                    console.log('[FP生成] AI决定加回好友:', reAddNicks);
+                    
+                    const roleCharForReAdd = await db.characters.get(parseInt(roleId));
+                    let reAddCount = 0;
+                    
+                    for (const nick of reAddNicks) {
+                        // 在已删除的NPC中查找匹配的
+                        const matched = deletedNpcs.find(d => {
+                            const dNick = d.char.nick || d.char.name;
+                            return dNick === nick || d.char.name === nick;
+                        });
+                        if (!matched) continue;
+                        
+                        const reAddId = matched.char.id;
+                        
+                        // 从删除名单中移除
+                        if (roleCharForReAdd.fp_deleted_contacts_by_user?.[accountId]) {
+                            roleCharForReAdd.fp_deleted_contacts_by_user[accountId] = 
+                                roleCharForReAdd.fp_deleted_contacts_by_user[accountId].filter(id => id !== reAddId);
+                        }
+                        // 从黑名单中移除
+                        if (roleCharForReAdd.fp_blocked_contacts_by_user?.[accountId]) {
+                            roleCharForReAdd.fp_blocked_contacts_by_user[accountId] = 
+                                roleCharForReAdd.fp_blocked_contacts_by_user[accountId].filter(id => id !== reAddId);
+                        }
+                        // 加回通讯录
+                        if (!roleCharForReAdd.phone_contacts_by_user) roleCharForReAdd.phone_contacts_by_user = {};
+                        if (!roleCharForReAdd.phone_contacts_by_user[accountId]) roleCharForReAdd.phone_contacts_by_user[accountId] = [];
+                        if (!roleCharForReAdd.phone_contacts_by_user[accountId].includes(reAddId)) {
+                            roleCharForReAdd.phone_contacts_by_user[accountId].push(reAddId);
+                        }
+                        
+                        // 加入当前npcContacts以便后续生成聊天记录
+                        if (!npcContacts.find(n => n.id === reAddId)) {
+                            npcContacts.push(matched.char);
+                        }
+                        
+                        reAddCount++;
+                        console.log(`[FP生成] ✅ 角色自己加回了好友: ${nick} (id=${reAddId})`);
+                    }
+                    
+                    if (reAddCount > 0) {
+                        await safeCharacterPut(roleCharForReAdd);
+                        showToast(`角色自己加回了 ${reAddCount} 个好友`);
+                    }
+                }
+
                 // ===== 处理聊天记录 =====
                 const chatsData = parsedData.chats || {};
                 const roleCharForChat = await db.characters.get(parseInt(roleId));
@@ -5733,25 +6107,62 @@ ${isLocked ? '' : `${needNpcs ? '四' : '三'}、生成角色对用户"${userNam
 
                     const fpNpcKey = 'fp_npc_' + npc.id;
 
+                    // 🚀 拆分含 ||| 的消息为多条独立消息（让聊天记录更像真人）
+                    const expandedMessages = [];
+                    for (const m of messages) {
+                        const content = (m.content || '').trim();
+                        if (!content) continue;
+                        if (content.includes('|||')) {
+                            const segments = content.split('|||').map(s => s.trim()).filter(s => s.length > 0);
+                            for (const seg of segments) {
+                                expandedMessages.push({ role: m.role || 'user', content: seg });
+                            }
+                        } else {
+                            expandedMessages.push({ role: m.role || 'user', content: content });
+                        }
+                    }
+
                     if (isLocked) {
                         // ★ 锁定模式：追加到已有记录之后
                         const existingHist = roleCharForChat.chat_history_by_user[fpNpcKey] || [];
                         // 新消息的时间从已有最后一条之后开始
                         const lastTime = existingHist.length > 0 ? (existingHist[existingHist.length - 1].time || Date.now()) : Date.now();
-                        const newMsgs = messages.map((m, idx) => ({
-                            role: m.role || 'user',
-                            content: m.content || '',
-                            time: lastTime + (idx + 1) * 600000 // 每条间隔10分钟
-                        }));
+                        // 🚀 同一角色连续消息间隔短（3-8秒），不同角色间隔长（1-5分钟）
+                        let currentTime = lastTime;
+                        const newMsgs = expandedMessages.map((m, idx) => {
+                            if (idx > 0) {
+                                const prevRole = expandedMessages[idx - 1].role;
+                                if (m.role === prevRole) {
+                                    // 同一个人连续发消息，间隔3-8秒（模拟打字速度）
+                                    currentTime += (3000 + Math.random() * 5000);
+                                } else {
+                                    // 不同人回复，间隔1-5分钟
+                                    currentTime += (60000 + Math.random() * 240000);
+                                }
+                            } else {
+                                currentTime += 600000; // 第一条消息间隔10分钟
+                            }
+                            return { role: m.role, content: m.content, time: currentTime };
+                        });
                         roleCharForChat.chat_history_by_user[fpNpcKey] = [...existingHist, ...newMsgs];
                     } else {
                         // ★ 未锁定：替换（原始行为）
                         const baseTime = Date.now() - 3600000 * 24;
-                        const hist = messages.map((m, idx) => ({
-                            role: m.role || 'user',
-                            content: m.content || '',
-                            time: baseTime + idx * 600000
-                        }));
+                        // 🚀 同一角色连续消息间隔短（3-8秒），不同角色间隔长（5-15分钟）
+                        let currentTime = baseTime;
+                        const hist = expandedMessages.map((m, idx) => {
+                            if (idx > 0) {
+                                const prevRole = expandedMessages[idx - 1].role;
+                                if (m.role === prevRole) {
+                                    // 同一个人连续发消息，间隔3-8秒
+                                    currentTime += (3000 + Math.random() * 5000);
+                                } else {
+                                    // 不同人回复，间隔5-15分钟
+                                    currentTime += (300000 + Math.random() * 600000);
+                                }
+                            }
+                            return { role: m.role, content: m.content, time: currentTime };
+                        });
                         roleCharForChat.chat_history_by_user[fpNpcKey] = hist;
                     }
                 }
@@ -5814,7 +6225,8 @@ ${isLocked ? '' : `${needNpcs ? '四' : '三'}、生成角色对用户"${userNam
                     const momentBaseTime = isLocked ? Date.now() : (Date.now() - 3600000 * 48);
                     const processedMoments = momentsArr.map((m, idx) => ({
                         author: m.author || '好友',
-                        content: m.content || '',
+                        // 🔧 安全过滤：去除可能泄露的 ||| 分隔符
+                        content: (m.content || '').replace(/\|\|\|/g, ' '),
                         images: (m.images || []).map(img => {
                             // 如果图片描述没有方括号，加上
                             if (typeof img === 'string' && !img.startsWith('[')) return '[' + img + ']';
@@ -5823,7 +6235,8 @@ ${isLocked ? '' : `${needNpcs ? '四' : '三'}、生成角色对用户"${userNam
                         likes: m.likes || [],
                         comments: (m.comments || []).map(c => ({
                             name: c.name || '好友',
-                            text: c.text || ''
+                            // 🔧 安全过滤：去除可能泄露的 ||| 分隔符
+                            text: (c.text || '').replace(/\|\|\|/g, ' ')
                         })),
                         time: momentBaseTime + idx * 3600000 * 2 // 锁定模式间隔2小时，非锁定间隔6小时
                     }));
@@ -5834,6 +6247,87 @@ ${isLocked ? '' : `${needNpcs ? '四' : '三'}、生成角色对用户"${userNam
                     charForMoments.fp_moments_by_user[accountId] = allMoments;
                     await safeCharacterPut(charForMoments);
                     console.log(`[FP生成] 朋友圈${isLocked ? '追加' : '生成'}:`, processedMoments.length, '条，总计:', allMoments.length, '条');
+                }
+
+                // ===== 处理NPC群聊数据 =====
+                const groupChatsArr = parsedData.group_chats || [];
+                if (groupChatsArr.length > 0) {
+                    const charForGroups = await db.characters.get(parseInt(roleId));
+                    if (!charForGroups.fp_npc_group_chats_by_user) charForGroups.fp_npc_group_chats_by_user = {};
+                    
+                    const existingGroups = isLocked ? (charForGroups.fp_npc_group_chats_by_user[accountId] || []) : [];
+                    const groupBaseTime = isLocked ? Date.now() : (Date.now() - 3600000 * 24);
+                    
+                    for (const gData of groupChatsArr) {
+                        if (!gData.name || !gData.members || !gData.chat_history) continue;
+                        
+                        // 拆分 ||| 并生成时间戳
+                        const expandedHistory = [];
+                        for (const msg of gData.chat_history) {
+                            const content = (msg.content || '').trim();
+                            if (!content) continue;
+                            const sender = msg.sender || '未知';
+                            if (content.includes('|||')) {
+                                const segments = content.split('|||').map(s => s.trim()).filter(s => s.length > 0);
+                                for (const seg of segments) {
+                                    expandedHistory.push({ sender, content: seg });
+                                }
+                            } else {
+                                expandedHistory.push({ sender, content });
+                            }
+                        }
+                        
+                        if (isLocked) {
+                            // 锁定模式：尝试匹配已有群聊并追加消息
+                            const existingGroup = existingGroups.find(eg => eg.name === gData.name);
+                            if (existingGroup) {
+                                const lastTime = existingGroup.chat_history.length > 0 
+                                    ? (existingGroup.chat_history[existingGroup.chat_history.length - 1].time || Date.now()) 
+                                    : Date.now();
+                                let currentTime = lastTime;
+                                const newMsgs = expandedHistory.map((m, idx) => {
+                                    if (idx > 0) {
+                                        const prevSender = expandedHistory[idx - 1].sender;
+                                        currentTime += (m.sender === prevSender) ? (3000 + Math.random() * 5000) : (60000 + Math.random() * 240000);
+                                    } else {
+                                        currentTime += 600000;
+                                    }
+                                    return { sender: m.sender, content: m.content, time: currentTime };
+                                });
+                                existingGroup.chat_history = [...existingGroup.chat_history, ...newMsgs];
+                                // 更新成员列表（可能有新成员加入）
+                                for (const member of gData.members) {
+                                    if (!existingGroup.members.includes(member)) {
+                                        existingGroup.members.push(member);
+                                    }
+                                }
+                                console.log(`[FP生成] 群聊"${gData.name}"追加 ${newMsgs.length} 条消息`);
+                                continue;
+                            }
+                        }
+                        
+                        // 新建群聊
+                        let currentTime = groupBaseTime;
+                        const processedHistory = expandedHistory.map((m, idx) => {
+                            if (idx > 0) {
+                                const prevSender = expandedHistory[idx - 1].sender;
+                                currentTime += (m.sender === prevSender) ? (3000 + Math.random() * 5000) : (300000 + Math.random() * 600000);
+                            }
+                            return { sender: m.sender, content: m.content, time: currentTime };
+                        });
+                        
+                        existingGroups.push({
+                            id: Date.now() + Math.floor(Math.random() * 10000),
+                            name: gData.name,
+                            members: gData.members,
+                            chat_history: processedHistory,
+                            created_at: groupBaseTime
+                        });
+                    }
+                    
+                    charForGroups.fp_npc_group_chats_by_user[accountId] = existingGroups;
+                    await safeCharacterPut(charForGroups);
+                    console.log(`[FP生成] NPC群聊${isLocked ? '追加' : '生成'}完成，共 ${existingGroups.length} 个群聊`);
                 }
 
                 if (isLocked) {
@@ -6073,22 +6567,24 @@ ${existingChatsContext.join('\n\n')}
             window._fpContactAvatar = contactChar.type === 'user' 
                 ? (contactChar.avatar || '') 
                 : (getCharAvatar(contactChar, accountId) || contactChar.avatar || '');
-            // 联系人名称：如果是用户，优先用角色设置的备注
+            // 联系人名称：如果是用户，优先用角色设置的备注；NPC优先用fp_contact_remarks
             const fpRemarkForUser = roleChar?.fp_remark_by_user?.[accountId] || '';
-            window._fpContactName = contactChar.type === 'user' 
-                ? (fpRemarkForUser || contactChar.nick || contactChar.name || '未知') 
-                : getCharDisplayName(contactChar, accountId);
+            if (contactChar.type === 'user') {
+                window._fpContactName = fpRemarkForUser || contactChar.nick || contactChar.name || '未知';
+            } else {
+                window._fpContactName = roleChar?.fp_contact_remarks?.[contactCharId] || getCharDisplayName(contactChar, accountId);
+            }
             
             // 设置 currentChatCharId 为角色ID（聊天记录存储在角色身上）
             currentChatCharId = parseInt(roleId);
             window._currentChatCharId = currentChatCharId;
             window.currentGroupChatId = null;
             
-            // 设置标题为联系人名称
+            // 设置标题为联系人名称（点击可打开fp聊天详情）
             const titleEl = document.getElementById('chat-title');
             titleEl.innerText = window._fpContactName;
-            titleEl.style.cursor = 'default';
-            titleEl.onclick = null; // fp模式下不显示聊天详情
+            titleEl.style.cursor = 'pointer';
+            titleEl.onclick = () => showFpChatDetailPage();
             
             // 显示真实的 chat-window（z-index 需要高于 fp-wechat-page 的 320）
             const chatWin = document.getElementById('chat-window');
@@ -6125,6 +6621,481 @@ ${existingChatsContext.join('\n\n')}
                 const body = document.getElementById('chat-body');
                 if (body) body.scrollTop = body.scrollHeight;
             }, 100);
+        }
+
+        // ===== 查手机WeChat - FP聊天详情页（修改备注、删除好友、拉黑好友） =====
+        
+        /**
+         * 显示FP模式下的聊天详情页
+         * 支持：查看联系人资料、修改备注、删除好友、拉黑好友
+         */
+        async function showFpChatDetailPage() {
+            const roleId = window._fpRoleCharId;
+            const contactId = window._fpContactCharId;
+            const accountId = findPhoneTargetAccountId;
+            
+            if (!roleId || !contactId) { showToast('无法打开详情'); return; }
+            
+            const roleChar = await db.characters.get(roleId);
+            const contactChar = await db.characters.get(contactId);
+            if (!roleChar || !contactChar) { showToast('角色或联系人不存在'); return; }
+            
+            // 判断联系人类型
+            const isUserContact = contactChar.type === 'user';
+            
+            // 获取联系人的显示信息
+            const contactAvatar = isUserContact
+                ? (contactChar.avatar || '')
+                : (getCharAvatar(contactChar, accountId) || contactChar.avatar || '');
+            const contactNickname = isUserContact
+                ? (contactChar.nick || contactChar.name || '未知')
+                : (getCharWxNickname(contactChar, accountId) || contactChar.nick || contactChar.name || '未知');
+            const contactSignature = contactChar.wx_signature || '这个人什么也没有留下';
+            
+            // 获取当前备注：用户联系人用 fp_remark_by_user，NPC联系人用 fp_contact_remarks
+            let currentRemark = '';
+            if (isUserContact) {
+                currentRemark = roleChar.fp_remark_by_user?.[accountId] || '';
+            } else {
+                currentRemark = roleChar.fp_contact_remarks?.[contactId] || getCharRemark(contactChar, accountId) || '';
+            }
+            
+            // 移除已有的fp详情页
+            const existingPage = document.getElementById('fp-chat-detail-overlay');
+            if (existingPage) existingPage.remove();
+            
+            // 创建详情页
+            const overlay = document.createElement('div');
+            overlay.id = 'fp-chat-detail-overlay';
+            overlay.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; z-index:400; background:#f5f5f5; display:flex; flex-direction:column; animation:slideInRight 0.25s ease;';
+            
+            const avatarStyle = contactAvatar ? `background-image:url(${contactAvatar}); background-size:cover; background-position:center;` : 'background:#e8e8e8;';
+            
+            overlay.innerHTML = `
+                <style>
+                    @keyframes slideInRight { from { transform: translateX(100%); } to { transform: translateX(0); } }
+                    @keyframes slideOutRight { from { transform: translateX(0); } to { transform: translateX(100%); } }
+                </style>
+                <!-- 顶部标题栏 -->
+                <div style="display:flex; align-items:center; padding:12px 16px; background:#fff; border-bottom:0.5px solid #e5e5e5; flex-shrink:0;">
+                    <div id="fp-detail-back-btn" style="cursor:pointer; padding:4px; margin-right:8px;">
+                        <svg viewBox="0 0 24 24" style="width:24px; height:24px; fill:none; stroke:#333; stroke-width:2; stroke-linecap:round; stroke-linejoin:round;"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                    </div>
+                    <div style="flex:1; font-size:17px; font-weight:600; color:#1a1a1a; text-align:center;">聊天详情</div>
+                    <div style="width:32px;"></div>
+                </div>
+                
+                <!-- 联系人资料卡 -->
+                <div style="flex:1; overflow-y:auto;">
+                    <div style="display:flex; align-items:center; padding:20px 16px; background:#fff; gap:14px;">
+                        <div style="width:64px; height:64px; border-radius:8px; flex-shrink:0; ${avatarStyle}"></div>
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-size:18px; font-weight:600; color:#1a1a1a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${contactNickname}</div>
+                            <div style="font-size:13px; color:#999; margin-top:4px; line-height:1.4; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;">${contactSignature}</div>
+                        </div>
+                    </div>
+                    
+                    <!-- 备注设置 -->
+                    <div style="margin-top:8px; background:#fff;">
+                        <div style="display:flex; align-items:center; padding:14px 16px; border-bottom:0.5px solid #f0f0f0;">
+                            <div style="font-size:15px; color:#333; min-width:60px;">备注</div>
+                            <input type="text" id="fp-detail-remark-input" value="${currentRemark.replace(/"/g, '&quot;')}" placeholder="设置备注名" style="flex:1; border:none; background:transparent; text-align:right; font-size:15px; color:#333; outline:none;">
+                        </div>
+                        <div style="display:flex; align-items:center; padding:14px 16px;">
+                            <div style="font-size:15px; color:#333; min-width:60px;">原名</div>
+                            <div style="flex:1; text-align:right; font-size:15px; color:#999;">${contactChar.name || '未知'}</div>
+                        </div>
+                    </div>
+                    
+                    <!-- 保存备注按钮 -->
+                    <div style="margin-top:8px; background:#fff; padding:14px 16px;">
+                        <button id="fp-detail-save-remark-btn" style="width:100%; padding:12px; background:linear-gradient(135deg, #07c160, #06ad56); color:#fff; border:none; border-radius:8px; font-size:15px; font-weight:500; cursor:pointer;">保存备注</button>
+                    </div>
+                    
+                    <!-- 危险操作区 -->
+                    <div style="margin-top:24px; background:#fff;">
+                        <div id="fp-detail-delete-btn" style="display:flex; align-items:center; justify-content:center; padding:14px 16px; cursor:pointer; border-bottom:0.5px solid #f0f0f0; transition:background 0.15s;" onmousedown="this.style.background='#f5f5f5'" onmouseup="this.style.background=''" onmouseleave="this.style.background=''">
+                            <span style="font-size:16px; color:#ff3b30;">删除好友</span>
+                        </div>
+                        <div id="fp-detail-block-btn" style="display:flex; align-items:center; justify-content:center; padding:14px 16px; cursor:pointer; transition:background 0.15s;" onmousedown="this.style.background='#f5f5f5'" onmouseup="this.style.background=''" onmouseleave="this.style.background=''">
+                            <span style="font-size:16px; color:#ff3b30; font-weight:600;">拉黑好友</span>
+                        </div>
+                    </div>
+                    
+                    <div style="height:40px;"></div>
+                </div>
+            `;
+            
+            document.body.appendChild(overlay);
+            
+            // 绑定返回按钮
+            document.getElementById('fp-detail-back-btn').addEventListener('click', () => {
+                overlay.style.animation = 'slideOutRight 0.25s ease forwards';
+                setTimeout(() => overlay.remove(), 250);
+            });
+            
+            // 绑定保存备注
+            document.getElementById('fp-detail-save-remark-btn').addEventListener('click', async () => {
+                const newRemark = document.getElementById('fp-detail-remark-input').value.trim();
+                const freshRoleChar = await db.characters.get(roleId);
+                if (!freshRoleChar) { showToast('角色不存在'); return; }
+                
+                if (isUserContact) {
+                    // 用户联系人：保存到 fp_remark_by_user
+                    if (!freshRoleChar.fp_remark_by_user) freshRoleChar.fp_remark_by_user = {};
+                    freshRoleChar.fp_remark_by_user[accountId] = newRemark;
+                } else {
+                    // NPC联系人：保存到 fp_contact_remarks
+                    if (!freshRoleChar.fp_contact_remarks) freshRoleChar.fp_contact_remarks = {};
+                    freshRoleChar.fp_contact_remarks[contactId] = newRemark;
+                }
+                
+                await safeCharacterPut(freshRoleChar);
+                
+                // 更新聊天窗口标题
+                const displayName = newRemark || contactNickname;
+                window._fpContactName = displayName;
+                const titleEl = document.getElementById('chat-title');
+                if (titleEl) titleEl.innerText = displayName;
+                
+                showToast('备注已保存');
+            });
+            
+            // 绑定删除好友
+            document.getElementById('fp-detail-delete-btn').addEventListener('click', async () => {
+                const displayName = currentRemark || contactNickname;
+                if (!confirm(`确定要删除好友"${displayName}"吗？\n\n删除后将从角色的通讯录和聊天列表中移除。\n聊天记录会保留，角色之后可能会自己把好友加回来。`)) return;
+                
+                await fpDeleteFriend(roleId, contactId, accountId, isUserContact);
+                
+                // 关闭详情页
+                overlay.remove();
+                // 关闭聊天窗口，返回查手机微信页面
+                hideChatWindow();
+                // 刷新查手机聊天列表（切回聊天tab）
+                await switchFpWechatTab(0);
+                showToast('已删除好友');
+            });
+            
+            // 绑定拉黑好友
+            document.getElementById('fp-detail-block-btn').addEventListener('click', async () => {
+                const displayName = currentRemark || contactNickname;
+                if (!confirm(`确定要拉黑"${displayName}"吗？\n\n拉黑后将从角色的通讯录中移除。`)) return;
+                
+                await fpBlockFriend(roleId, contactId, accountId, isUserContact);
+                
+                // 关闭详情页
+                overlay.remove();
+                // 关闭聊天窗口，返回查手机微信页面
+                hideChatWindow();
+                // 刷新查手机聊天列表（切回聊天tab）
+                await switchFpWechatTab(0);
+                showToast('已拉黑好友');
+            });
+        }
+        
+        /**
+         * FP模式下删除好友
+         * 从角色的通讯录中移除联系人，清空聊天记录
+         */
+        async function fpDeleteFriend(roleId, contactId, accountId, isUserContact) {
+            const roleChar = await db.characters.get(roleId);
+            if (!roleChar) return;
+            
+            // 1. 从角色通讯录中移除（不清空聊天记录，保留历史）
+            if (roleChar.phone_contacts_by_user?.[accountId]) {
+                roleChar.phone_contacts_by_user[accountId] = roleChar.phone_contacts_by_user[accountId].filter(id => id !== contactId);
+            }
+            
+            // 2. 记录删除操作（锁定后AI生成新数据时，角色可能自己把好友加回来）
+            if (!roleChar.fp_deleted_contacts_by_user) roleChar.fp_deleted_contacts_by_user = {};
+            if (!roleChar.fp_deleted_contacts_by_user[accountId]) roleChar.fp_deleted_contacts_by_user[accountId] = [];
+            if (!roleChar.fp_deleted_contacts_by_user[accountId].includes(contactId)) {
+                roleChar.fp_deleted_contacts_by_user[accountId].push(contactId);
+            }
+            
+            await safeCharacterPut(roleChar);
+            console.log(`[FP删除好友] 角色${roleId}删除了联系人${contactId}（聊天记录已保留）`);
+        }
+        
+        /**
+         * FP模式下拉黑好友
+         * 从角色的通讯录中移除联系人，添加到黑名单
+         */
+        async function fpBlockFriend(roleId, contactId, accountId, isUserContact) {
+            const roleChar = await db.characters.get(roleId);
+            if (!roleChar) return;
+            
+            // 1. 从角色通讯录中移除
+            if (roleChar.phone_contacts_by_user?.[accountId]) {
+                roleChar.phone_contacts_by_user[accountId] = roleChar.phone_contacts_by_user[accountId].filter(id => id !== contactId);
+            }
+            
+            // 2. 添加到黑名单
+            if (!roleChar.fp_blocked_contacts_by_user) roleChar.fp_blocked_contacts_by_user = {};
+            if (!roleChar.fp_blocked_contacts_by_user[accountId]) roleChar.fp_blocked_contacts_by_user[accountId] = [];
+            if (!roleChar.fp_blocked_contacts_by_user[accountId].includes(contactId)) {
+                roleChar.fp_blocked_contacts_by_user[accountId].push(contactId);
+            }
+            
+            // 3. 同时记录到删除名单
+            if (!roleChar.fp_deleted_contacts_by_user) roleChar.fp_deleted_contacts_by_user = {};
+            if (!roleChar.fp_deleted_contacts_by_user[accountId]) roleChar.fp_deleted_contacts_by_user[accountId] = [];
+            if (!roleChar.fp_deleted_contacts_by_user[accountId].includes(contactId)) {
+                roleChar.fp_deleted_contacts_by_user[accountId].push(contactId);
+            }
+            
+            await safeCharacterPut(roleChar);
+            console.log(`[FP拉黑好友] 角色${roleId}拉黑了联系人${contactId}`);
+        }
+
+        // ===== 查手机WeChat - 群聊详情（以角色视角查看群聊，复用真实chat-window） =====
+        
+        /**
+         * 以角色视角打开群聊详情
+         * 群聊数据完全复用用户已有数据，只是翻转视角：角色的消息显示在右侧，其他人在左侧
+         * @param {number} groupId - 群聊ID
+         */
+        async function openFpGroupChatDetail(groupId) {
+            const roleId = window._fpWechatRoleId;
+            const accountId = findPhoneTargetAccountId;
+            
+            console.log('[openFpGroupChatDetail] groupId=', groupId, 'roleId=', roleId, 'accountId=', accountId);
+            
+            const group = await getCachedGroupChat(groupId);
+            if (!group) { console.error('[openFpGroupChatDetail] 群聊不存在'); return; }
+            
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) { console.error('[openFpGroupChatDetail] 角色不存在'); return; }
+            
+            // ★ 设置 fp 群聊模式标记 ★
+            window._fpChatMode = true;
+            window._fpGroupChatMode = true;
+            window._fpRoleCharId = parseInt(roleId); // 群聊中"自己"的角色ID
+            window.currentGroupChatId = groupId;
+            currentChatCharId = null;
+            
+            // 缓存角色头像信息
+            window._fpRoleAvatar = getCharAvatar(roleChar, accountId) || roleChar.avatar || '';
+            
+            // 设置标题为群聊名称
+            const titleEl = document.getElementById('chat-title');
+            titleEl.innerText = group.name || '群聊';
+            titleEl.style.cursor = 'default';
+            titleEl.onclick = null; // fp模式下不显示群聊详情
+            
+            // 显示真实的 chat-window（z-index 需要高于 fp-wechat-page 的 320）
+            const chatWin = document.getElementById('chat-window');
+            chatWin.style.display = 'flex';
+            chatWin.style.zIndex = '350';
+            
+            // 显示输入框
+            const chatFooter = document.getElementById('chat-footer');
+            chatFooter.style.display = 'flex';
+            
+            // 显示所有按钮
+            const aiMagicBtn = document.querySelector('.chat-input-bar .chat-icon-btn');
+            if (aiMagicBtn) aiMagicBtn.style.display = '';
+            const actionPanel = document.getElementById('action-panel');
+            if (actionPanel) {
+                const actionItems = actionPanel.querySelectorAll('.action-item');
+                actionItems.forEach(item => { item.style.display = ''; });
+            }
+            
+            // 重置输入框
+            const chatInputBox = document.getElementById('chat-input-box');
+            if (chatInputBox) {
+                chatInputBox.placeholder = '发送消息...';
+                chatInputBox.value = '';
+                chatInputBox.readOnly = false;
+                chatInputBox.style.opacity = '';
+            }
+            
+            // 重置渲染缓存
+            lastRenderedCharId = null;
+            lastRenderedAccountId = null;
+            lastRenderedHistoryLength = -1;
+            lastRenderedAvatar = null;
+            
+            // ★ 渲染群聊内容（renderGroupChatBody 会检测 _fpGroupChatMode 并翻转视角）
+            await renderGroupChatBody(group);
+            
+            // 滚动到底部
+            setTimeout(() => {
+                const body = document.getElementById('chat-body');
+                if (body) body.scrollTop = body.scrollHeight;
+            }, 100);
+        }
+        
+        /**
+         * 以角色视角打开NPC群聊详情（角色自己的群聊，用户不在其中）
+         * 数据存储在角色的 fp_npc_group_chats_by_user 中
+         * 使用独立的轻量级聊天展示（只读，不复用 chat-window）
+         * @param {number} npcGroupId - NPC群聊ID
+         */
+        async function openFpNpcGroupChatDetail(npcGroupId) {
+            const roleId = window._fpWechatRoleId;
+            const accountId = findPhoneTargetAccountId;
+            
+            const roleChar = await db.characters.get(parseInt(roleId));
+            if (!roleChar) return;
+            
+            const npcGroupChats = roleChar.fp_npc_group_chats_by_user?.[accountId] || [];
+            const npcGroup = npcGroupChats.find(g => g.id === npcGroupId);
+            if (!npcGroup) { showToast('群聊不存在'); return; }
+            
+            const roleName = roleChar.nick || roleChar.name || '角色';
+            const roleAvatar = getCharAvatar(roleChar, accountId) || roleChar.avatar || '';
+            
+            // 构建成员头像映射（尝试从通讯录NPC中匹配）
+            const allChars = await db.characters.toArray();
+            const contactIds = getRolePhoneContacts(roleChar, accountId);
+            const memberAvatars = {};
+            for (const memberNick of npcGroup.members) {
+                if (memberNick === roleName) {
+                    memberAvatars[memberNick] = roleAvatar;
+                    continue;
+                }
+                // 尝试从通讯录中匹配
+                for (const cid of contactIds) {
+                    const npc = allChars.find(ch => ch.id === cid);
+                    if (npc && (npc.nick === memberNick || npc.name === memberNick)) {
+                        memberAvatars[memberNick] = getCharAvatar(npc, accountId) || npc.avatar || '';
+                        break;
+                    }
+                }
+            }
+            
+            // 生成聊天气泡HTML
+            let chatHtml = '';
+            for (const msg of npcGroup.chat_history) {
+                const isRole = (msg.sender === roleName);
+                const avatar = memberAvatars[msg.sender] || '';
+                const avatarStyle = avatar ? `background-image:url(${avatar}); background-size:cover; background-position:center;` : 'background-color:#e0e0e0;';
+                const timeStr = msg.time ? new Date(msg.time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
+                
+                if (isRole) {
+                    // 角色自己的消息 - 右侧
+                    chatHtml += `
+                        <div style="display:flex; justify-content:flex-end; align-items:flex-start; gap:8px; margin-bottom:12px; padding:0 12px;">
+                            <div style="max-width:70%; display:flex; flex-direction:column; align-items:flex-end;">
+                                <div style="font-size:11px; color:#999; margin-bottom:3px;">${msg.sender}</div>
+                                <div style="background:#95ec69; padding:8px 12px; border-radius:12px 4px 12px 12px; font-size:14px; line-height:1.5; word-break:break-word; color:#000;">${msg.content}</div>
+                                ${timeStr ? `<div style="font-size:10px; color:#bbb; margin-top:2px;">${timeStr}</div>` : ''}
+                            </div>
+                            <div style="width:36px; height:36px; border-radius:6px; flex-shrink:0; ${avatarStyle}"></div>
+                        </div>
+                    `;
+                } else {
+                    // 其他成员的消息 - 左侧
+                    chatHtml += `
+                        <div style="display:flex; justify-content:flex-start; align-items:flex-start; gap:8px; margin-bottom:12px; padding:0 12px;">
+                            <div style="width:36px; height:36px; border-radius:6px; flex-shrink:0; ${avatarStyle}"></div>
+                            <div style="max-width:70%; display:flex; flex-direction:column; align-items:flex-start;">
+                                <div style="font-size:11px; color:#999; margin-bottom:3px;">${msg.sender}</div>
+                                <div style="background:#fff; padding:8px 12px; border-radius:4px 12px 12px 12px; font-size:14px; line-height:1.5; word-break:break-word; color:#333; border:0.5px solid #e8e8e8;">${msg.content}</div>
+                                ${timeStr ? `<div style="font-size:10px; color:#bbb; margin-top:2px;">${timeStr}</div>` : ''}
+                            </div>
+                        </div>
+                    `;
+                }
+            }
+            
+            // 成员列表
+            const memberListHtml = npcGroup.members.map(m => {
+                const av = memberAvatars[m] || '';
+                const avStyle = av ? `background-image:url(${av}); background-size:cover; background-position:center;` : 'background-color:#e0e0e0;';
+                return `<div style="display:flex; flex-direction:column; align-items:center; gap:4px; width:50px;">
+                    <div style="width:36px; height:36px; border-radius:6px; ${avStyle}"></div>
+                    <div style="font-size:11px; color:#666; text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; width:100%;">${m}</div>
+                </div>`;
+            }).join('');
+            
+            // 创建弹出层（覆盖在fp-wechat-page之上）
+            let overlay = document.getElementById('fp-npc-group-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'fp-npc-group-overlay';
+                document.body.appendChild(overlay);
+            }
+            
+            overlay.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; z-index:400; display:flex; flex-direction:column; background:#f5f5f5;';
+            overlay.innerHTML = `
+                <div style="background:#fff; padding:12px 16px; display:flex; align-items:center; gap:12px; border-bottom:0.5px solid #e8e8e8; flex-shrink:0;">
+                    <div onclick="document.getElementById('fp-npc-group-overlay').style.display='none'" style="cursor:pointer; display:flex; align-items:center;">
+                        <svg viewBox="0 0 24 24" style="width:24px; height:24px; stroke:#333; fill:none; stroke-width:2;"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                    </div>
+                    <div style="flex:1; font-size:17px; font-weight:600; color:#1a1a1a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${npcGroup.name || '群聊'}(${npcGroup.members.length})</div>
+                </div>
+                
+                <div style="flex:1; overflow-y:auto; padding:16px 0;" id="fp-npc-group-chat-body">
+                    <!-- 群成员头像条 -->
+                    <div style="display:flex; gap:8px; padding:0 16px 16px; overflow-x:auto; flex-wrap:nowrap; border-bottom:0.5px solid #eee; margin-bottom:16px;">
+                        ${memberListHtml}
+                    </div>
+                    ${chatHtml || '<div style="text-align:center; color:#ccc; padding:40px; font-size:14px;">暂无消息</div>'}
+                </div>
+            `;
+            
+            // 滚动到底部
+            setTimeout(() => {
+                const chatBody = document.getElementById('fp-npc-group-chat-body');
+                if (chatBody) chatBody.scrollTop = chatBody.scrollHeight;
+            }, 100);
+        }
+        
+        /**
+         * 查手机fp群聊模式 - 以角色身份发送群聊消息
+         * 消息保存为 role:'char', senderId 为角色ID
+         */
+        async function sendFpGroupMessage(text) {
+            if (!text || !window.currentGroupChatId || !window._fpRoleCharId) return;
+            
+            const group = await getCachedGroupChat(window.currentGroupChatId);
+            if (!group) return;
+            
+            const roleCharId = window._fpRoleCharId;
+            const roleChar = await db.characters.get(roleCharId);
+            if (!roleChar) { showToast('角色不存在'); return; }
+            
+            const input = document.getElementById('chat-input-box');
+            input.value = '';
+            handleChatInputChange(input);
+            closeChatPanel();
+            
+            // ★ 以角色身份添加消息到群聊历史
+            if (!group.chat_history) group.chat_history = [];
+            const msg = {
+                role: 'char',
+                senderId: roleCharId,
+                senderName: roleChar.remark || roleChar.wx_nickname || roleChar.nick || roleChar.name || '角色',
+                content: text,
+                time: Date.now(),
+                fpSent: true // 标记为查手机模式发送
+            };
+            
+            // 如果有引用
+            if (currentQuote) {
+                msg.quote = {
+                    name: currentQuote.name,
+                    content: currentQuote.content
+                };
+                cancelQuote();
+            }
+            
+            group.chat_history.push(msg);
+            group.updated_at = Date.now();
+            
+            await safeGroupChatPut(group);
+            
+            // 重新渲染群聊
+            await renderGroupChatBody(group);
+            
+            // 滚动到底部
+            setTimeout(() => {
+                const body = document.getElementById('chat-body');
+                if (body) body.scrollTop = body.scrollHeight;
+            }, 50);
         }
 
         // ★ fp模式发送消息：以角色身份发送（role:'char'），消息存到角色的聊天记录中
@@ -6263,6 +7234,9 @@ ${existingChatsContext.join('\n\n')}
                 const now = new Date();
                 const timeStr = `${now.getFullYear()}年${now.getMonth()+1}月${now.getDate()}日 ${now.getHours()}:${String(now.getMinutes()).padStart(2,'0')}`;
                 
+                // 🔧 检查 NovelAI 自动生图是否开启，决定 imgcard 是否需要附带英文 tag
+                const _novelaiAutoGenEnabledFp = await isNovelAIAutoGenerateEnabled();
+                
                 let systemPrompt = `# 角色扮演任务
 
 【当前时间】
@@ -6303,10 +7277,13 @@ ${timeStr}
 你在用微信聊天，可以用：
 - **文字**：直接说话
 - **语音**：\`[voice:内容]\`
-- **图片/卡片**：\`[imgcard:图片描述]\`
+- **图片/卡片**：${_novelaiAutoGenEnabledFp ? `\`[imgcard:中文图片描述{{english, novelai, tags}}]\`（发图片时必须在 {{ }} 内写英文 NovelAI/Danbooru 风格 tag。根据角色性别用1boy或1girl，包含外貌特征、服装、表情、动作、场景，不加质量词，不超过25个tag）` : `\`[imgcard:图片描述]\``}
 - **转账**：\`((TRANSFER: 金额, 备注))\`
 - **购物送礼**：\`((SHOP_GIFT: 金额, 商品名))\`（给对方买礼物，可选分期）
 - **表情包**：\`[sticker:描述]\`（如果有的话）
+
+**图片使用规则**：发图片时，必须同时发送文字消息，用 \`|||\` 和文字组合。禁止只发一条图片卡片不说话。
+${_novelaiAutoGenEnabledFp ? `例：\`嘿 刚洗完澡~|||[imgcard:洗完澡的自拍{{1girl, wet hair, towel, bathroom, mirror, smile, looking at viewer}}]|||好看吗\`` : `例：\`嘿 刚洗完澡~|||[imgcard:洗完澡的自拍]|||好看吗\``}
 
 ---
 
@@ -6330,7 +7307,7 @@ ${timeStr}
 \`\`\`
 
 **重要**：
-- reply 文本内禁止使用逗号，但 JSON 字段之间的逗号必须保留
+- reply 文本内禁止使用逗号（但 \`{{}}\` 标签内的逗号例外），JSON 字段之间的逗号必须保留
 - **thought 字段是必填项！必须写出你此刻的真实心理活动（至少10个字）**
 - thought 必须是真实情绪和内心想法，不要写系统分析
 
@@ -6654,7 +7631,7 @@ ${timeStr}
                         <span>粘贴图片链接</span>
                     </div>
                     <div class="image-picker-url-area" id="image-picker-url-area" style="display:none;">
-                        <input type="text" class="image-picker-url-input" id="image-picker-url-input" placeholder="粘贴图片链接地址" oninput="imagePickerPreviewUrl(this.value)">
+                        <input type="text" class="image-picker-url-input" id="image-picker-url-input" placeholder="粘贴图片链接地址" oninput="imagePickerPreviewUrl(this.value)" onfocus="setTimeout(()=>this.scrollIntoView({behavior:'smooth',block:'center'}),300)" style="font-size:16px;">
                         <div class="image-picker-preview-box" id="image-picker-preview-box">图片预览</div>
                         <div class="image-picker-confirm" onclick="imagePickerConfirmUrl()">确认使用</div>
                     </div>
@@ -6691,7 +7668,17 @@ ${timeStr}
         }
         function imagePickerShowUrlInput() {
             const area = document.getElementById('image-picker-url-area');
-            if (area) area.style.display = 'flex';
+            if (area) {
+                area.style.display = 'flex';
+                // 🔧 键盘适配：输入框显示后自动聚焦，并在键盘弹起后滚动到可见区域
+                setTimeout(() => {
+                    const urlInput = document.getElementById('image-picker-url-input');
+                    if (urlInput) {
+                        urlInput.focus();
+                        urlInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                }, 300);
+            }
         }
         function imagePickerPreviewUrl(url) {
             url = url.trim();
@@ -7298,6 +8285,10 @@ ${timeStr}
                 if (systemPromptItem) document.getElementById('novelai-system-prompt').value = systemPromptItem.value;
                 if (negativePromptItem) document.getElementById('novelai-negative-prompt').value = negativePromptItem.value;
                 
+                // 加载画师串
+                const artistTagsItem = await db.dexiData.get('novelaiArtistTags');
+                if (artistTagsItem) document.getElementById('novelai-artist-tags').value = artistTagsItem.value;
+                
                 // 加载自动生图开关状态
                 const autoGenItem = await db.dexiData.get('novelaiAutoGenerate');
                 const autoGenSwitch = document.getElementById('novelai-auto-generate-switch');
@@ -7321,6 +8312,12 @@ ${timeStr}
             const systemPrompt = document.getElementById('novelai-system-prompt').value.trim();
             const negativePrompt = document.getElementById('novelai-negative-prompt').value.trim();
 
+            // 🔧 防御：如果API Key为空，可能是面板未展开导致DOM未加载数据，不要覆盖数据库
+            if (!apiKey && !proxyUrl) {
+                console.warn('[autoSaveNovelAI] API Key和代理地址均为空，跳过保存（防止覆盖有效配置）');
+                return;
+            }
+
             await db.dexiData.put({ key: 'novelaiApiKey', value: apiKey });
             await db.dexiData.put({ key: 'novelaiProxyUrl', value: proxyUrl });
             await db.dexiData.put({ key: 'novelaiModel', value: model });
@@ -7330,6 +8327,10 @@ ${timeStr}
             await db.dexiData.put({ key: 'novelaiSize', value: size });
             await db.dexiData.put({ key: 'novelaiSystemPrompt', value: systemPrompt });
             await db.dexiData.put({ key: 'novelaiNegativePrompt', value: negativePrompt });
+            
+            // 保存画师串
+            const artistTags = document.getElementById('novelai-artist-tags').value.trim();
+            await db.dexiData.put({ key: 'novelaiArtistTags', value: artistTags });
         }
 
         // 测试 NovelAI 连接
@@ -7458,8 +8459,17 @@ ${timeStr}
         }
         
         // 调用 NovelAI API 生成图片，返回 DataURL 或 null
-        async function generateNovelAIImage(description) {
+        /**
+         * 调用 NovelAI API 生成图片
+         * @param {string} description - 图片描述/tag
+         * @param {object} [options] - 可选参数
+         * @param {boolean} [options.skipSystemPrompt=false] - 是否跳过系统基础 Prompt（视频通话等场景使用，避免性别冲突）
+         * @returns {Promise<string|null>} - 生成的图片 DataURL，失败返回 null
+         */
+        async function generateNovelAIImage(description, options = {}) {
             try {
+                const { skipSystemPrompt = false } = options;
+                
                 const apiKeyItem = await db.dexiData.get('novelaiApiKey');
                 const proxyUrlItem = await db.dexiData.get('novelaiProxyUrl');
                 const modelItem = await db.dexiData.get('novelaiModel');
@@ -7469,6 +8479,7 @@ ${timeStr}
                 const sizeItem = await db.dexiData.get('novelaiSize');
                 const systemPromptItem = await db.dexiData.get('novelaiSystemPrompt');
                 const negativePromptItem = await db.dexiData.get('novelaiNegativePrompt');
+                const artistTagsItem = await db.dexiData.get('novelaiArtistTags');
                 
                 const rawApiKey = apiKeyItem ? apiKeyItem.value : '';
                 if (!rawApiKey) {
@@ -7484,8 +8495,9 @@ ${timeStr}
                 const scale = scaleItem ? parseFloat(scaleItem.value) : 5;
                 const sampler = samplerItem ? samplerItem.value : 'k_euler';
                 const sizeStr = sizeItem ? sizeItem.value : '832x1216';
-                const systemPrompt = systemPromptItem ? systemPromptItem.value : 'masterpiece, best quality, highres, 1girl, solo, anime style, detailed, beautiful, cute';
+                const systemPrompt = systemPromptItem ? systemPromptItem.value : '';
                 const negativePrompt = negativePromptItem ? negativePromptItem.value : 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry';
+                const artistTags = artistTagsItem ? artistTagsItem.value.trim() : '';
                 
                 // inpainting 模型不能直接生成，回退到同版本的普通模型
                 if (model === 'nai-diffusion-3-inpainting') model = 'nai-diffusion-3';
@@ -7493,8 +8505,17 @@ ${timeStr}
                 const isV4 = model.includes('nai-diffusion-4');
                 const [width, height] = sizeStr.split('x').map(Number);
                 
-                // 拼接最终 prompt
-                const fullPrompt = [systemPrompt, description].filter(Boolean).join(', ');
+                // 拼接最终 prompt：视频通话等场景跳过系统 Prompt，避免 1girl 等性别/风格冲突
+                // 画师串始终添加（如果有配置的话）
+                const promptParts = [];
+                if (!skipSystemPrompt && systemPrompt) {
+                    promptParts.push(systemPrompt);
+                }
+                if (artistTags) {
+                    promptParts.push(artistTags);
+                }
+                promptParts.push(description);
+                const fullPrompt = promptParts.filter(Boolean).join(', ');
                 
                 console.log(`[NovelAI-AutoGen] 🎨 开始生成 | model=${model} (V4=${isV4}) | "${description}"`);
                 
@@ -7739,6 +8760,146 @@ ${timeStr}
             return chineseDesc;
         }
         
+        /**
+         * 视频通话 NovelAI 生图：将视频通话中角色的回复翻译成 NovelAI tag 并生成图片
+         * @param {string} videoReplyText - 角色在视频通话中的回复文本
+         * @param {number} charId - 角色ID
+         * @returns {Promise<string|null>} - 生成的图片 DataURL，失败返回 null
+         */
+        async function generateVideoCallNovelAIImage(videoReplyText, charId) {
+            try {
+                // 1. 检查 NovelAI API Key 是否配置
+                const apiKeyItem = await db.dexiData.get('novelaiApiKey');
+                if (!apiKeyItem || !apiKeyItem.value) {
+                    console.log('[VideoCall-NovelAI] 未配置 API Key，跳过生图');
+                    return null;
+                }
+
+                // 2. 获取角色信息用于更精准的 tag 生成
+                let charHint = '';
+                if (charId) {
+                    const char = await db.characters.get(charId);
+                    if (char) {
+                        const desc = (char.description || '').substring(0, 400);
+                        charHint = `角色名: ${char.name}\n角色设定摘要: ${desc}`;
+                    }
+                }
+
+                // 3. 用 LLM 将视频通话回复文本翻译为英文 NovelAI tag
+                const sysPrompt = `你是一个 NovelAI 图像生成的 prompt 翻译专家。
+用户会给你一段视频通话中角色的回复文本（包含动作描写和对话），你需要从中提取视觉信息并转换为 NovelAI 风格的英文 tag。
+
+规则：
+1. 输出纯英文 tag，用逗号分隔，不要输出任何解释
+2. 根据角色信息**严格判断性别**：男性角色必须用 1boy，女性角色必须用 1girl，这是最重要的规则，绝对不能搞错！
+3. 重点提取：表情（smile, blush, wink等）、动作（waving, peace sign, leaning forward等）、姿态、环境/背景
+4. 包含人物外貌特征（发色、发型、瞳色、体型等）、服装
+5. 场景标签：只加 looking at viewer, upper body 即可，表示面对镜头的半身像
+6. **禁止**加入以下标签：smartphone, phone, screen, video call, pov, UI, button, icon, interface, device, frame —— 这些会导致画出手机界面
+7. 使用 NovelAI/Danbooru 常用的 tag 风格
+8. 不要加质量词（如 masterpiece, best quality），系统会自动添加
+9. 只输出 tag，不要有其他内容
+10. 总共不超过 30 个 tag`;
+
+                const userMsg = charHint
+                    ? `${charHint}\n\n视频通话回复内容: ${videoReplyText}`
+                    : `视频通话回复内容: ${videoReplyText}`;
+
+                let englishTags = videoReplyText;
+                try {
+                    const result = await callAI([
+                        { role: 'system', content: sysPrompt },
+                        { role: 'user', content: userMsg }
+                    ], { max_tokens: 250 });
+
+                    if (result && result.trim()) {
+                        englishTags = result.trim().replace(/^["']|["']$/g, '').replace(/\n/g, ', ');
+                        console.log(`[VideoCall-NovelAI] 🔄 Tag翻译: "${videoReplyText.substring(0, 50)}..." → "${englishTags}"`);
+                    }
+                } catch (translateErr) {
+                    console.warn('[VideoCall-NovelAI] Tag翻译失败，使用原文:', translateErr.message);
+                }
+
+                // 4. 调用 NovelAI 生成图片（跳过系统 Prompt，避免默认的 1girl 等覆盖角色实际性别）
+                const imageDataUrl = await generateNovelAIImage(englishTags, { skipSystemPrompt: true });
+                if (imageDataUrl) {
+                    console.log('[VideoCall-NovelAI] ✅ 视频通话图片生成成功');
+                }
+                return imageDataUrl;
+
+            } catch (err) {
+                console.error('[VideoCall-NovelAI] 生成异常:', err);
+                return null;
+            }
+        }
+
+        /**
+         * 在视频通话中更新角色背景图片（NovelAI 生图后调用）
+         * @param {string} imageDataUrl - 生成的图片 DataURL
+         */
+        function updateVideoCallBackground(imageDataUrl) {
+            const bgDiv = document.getElementById('video-call-bg');
+            if (bgDiv && imageDataUrl) {
+                // 使用渐变过渡效果更新背景
+                bgDiv.style.transition = 'opacity 0.5s ease';
+                bgDiv.style.opacity = '0.3';
+                setTimeout(() => {
+                    bgDiv.style.backgroundImage = `url(${imageDataUrl})`;
+                    bgDiv.style.opacity = '1';
+                }, 300);
+                console.log('[VideoCall-NovelAI] 🖼️ 角色背景已更新');
+            }
+        }
+
+        /**
+         * 视频通话中处理 NovelAI 生图（在 AI 回复后调用）
+         * 返回生成的图片 dataUrl，由调用方决定何时展示
+         * @param {string} replyText - AI 回复的文本
+         * @param {number} charId - 角色ID
+         * @param {string} [preGeneratedTags] - 预生成的英文 NovelAI tags（如果有，跳过翻译步骤）
+         * @returns {Promise<string|null>} 图片 dataUrl 或 null
+         */
+        async function processVideoCallNovelAI(replyText, charId, preGeneratedTags) {
+            try {
+                // 检查角色是否开启了视频通话 NovelAI 生图
+                const char = await db.characters.get(charId);
+                if (!char || !char.video_novelai_enabled) {
+                    return null;
+                }
+
+                // 检查 NovelAI API Key 是否配置
+                const apiKeyItem = await db.dexiData.get('novelaiApiKey');
+                if (!apiKeyItem || !apiKeyItem.value) {
+                    console.log('[VideoCall-NovelAI] 未配置 API Key，跳过');
+                    return null;
+                }
+
+                console.log('[VideoCall-NovelAI] 🎬 开始为视频通话回复生成图片...');
+
+                let imageDataUrl = null;
+                
+                if (preGeneratedTags && preGeneratedTags.trim()) {
+                    // ✅ 使用 AI 主回复中一并生成的 tags，不再单独调用翻译 API
+                    console.log(`[VideoCall-NovelAI] 🚀 使用预生成 tags: "${preGeneratedTags.substring(0, 80)}..."`);
+                    imageDataUrl = await generateNovelAIImage(preGeneratedTags.trim(), { skipSystemPrompt: true });
+                } else {
+                    console.error('[VideoCall-NovelAI] ❌ 无预生成 tags，跳过生图');
+                    return null;
+                }
+
+                if (imageDataUrl) {
+                    console.log('[VideoCall-NovelAI] ✅ 视频通话图片生成成功');
+                    return imageDataUrl;
+                } else {
+                    console.log('[VideoCall-NovelAI] 生图失败或返回空');
+                    return null;
+                }
+            } catch (err) {
+                console.error('[VideoCall-NovelAI] 处理异常:', err);
+                return null;
+            }
+        }
+
         // 检查是否启用了 NovelAI 自动生图
         async function isNovelAIAutoGenerateEnabled() {
             try {
@@ -7789,15 +8950,35 @@ ${timeStr}
             console.log(`[NovelAI-AutoGen] 检测到 ${imgcardMessages.length} 条 imgcard 消息，开始生成...`);
             
             for (const { index, msg } of imgcardMessages) {
-                const cardText = msg.content.substring(9, msg.content.length - 1).trim();
-                console.log(`[NovelAI-AutoGen] 正在为 "${cardText}" 生成图片...`);
+                const rawCardText = msg.content.substring(9, msg.content.length - 1).trim();
                 
-                // 🔄 用 LLM 将中文描述翻译为英文 NovelAI tag（带角色性别/外貌信息）
-                let englishTags = cardText;
-                try {
-                    englishTags = await translateImgcardToEnglishTags(cardText, charId);
-                } catch (translateErr) {
-                    console.warn('[NovelAI-AutoGen] 翻译失败，使用原始描述:', translateErr.message);
+                // 🔧 从 imgcard 内容中提取 AI 直接输出的英文 tags（格式：中文描述{{english,tags}}）
+                let cardText = rawCardText;
+                let englishTags = rawCardText;
+                const tagsMatch = rawCardText.match(/\{\{(.+?)\}\}/);
+                if (tagsMatch) {
+                    // 提取 {{}} 内的英文 tags
+                    englishTags = tagsMatch[1].trim();
+                    // 剥离 {{}} 部分，保留纯中文描述用于UI显示
+                    cardText = rawCardText.replace(/\s*\{\{.+?\}\}/, '').trim();
+                    console.log(`[NovelAI-AutoGen] ✅ 使用 AI 内联 tags: "${cardText}" → "${englishTags}"`);
+                } else {
+                    // 🔧 兜底：检查历史记录中下一条消息是否是泄漏的 {{tags}}（AI有时把tags放在imgcard外面）
+                    let foundNeighborTags = false;
+                    if (index + 1 < history.length) {
+                        const nextMsg = history[index + 1];
+                        if (nextMsg && nextMsg.role === 'char' && nextMsg.content) {
+                            const neighborTagsMatch = nextMsg.content.match(/^\s*\{\{([\s\S]+?)\}\}\s*$/);
+                            if (neighborTagsMatch) {
+                                englishTags = neighborTagsMatch[1].trim();
+                                foundNeighborTags = true;
+                                console.log(`[NovelAI-AutoGen] ✅ 从下一条消息获取泄漏的 tags: "${englishTags.substring(0, 60)}..."`);
+                            }
+                        }
+                    }
+                    if (!foundNeighborTags) {
+                        console.log(`[NovelAI-AutoGen] ⚠️ 未找到内联 tags，直接使用原始描述: "${cardText}"`);
+                    }
                 }
                 
                 // 更新 UI 显示加载状态（如果当前正在查看该聊天）
@@ -7831,87 +9012,172 @@ ${timeStr}
                     let freshHistory = getChatHistory(freshChar, accountId);
                     
                     if (freshHistory[index] && freshHistory[index].content === msg.content) {
-                        // 保留原始 imgcard 内容，添加生成的图片
+                        // 保留原始 imgcard 内容（剥离{{tags}}），添加生成的图片
+                        freshHistory[index].content = `[imgcard:${cardText}]`; // 清理掉 {{tags}}，只保留中文描述
                         freshHistory[index].novelai_generated = true;
                         freshHistory[index].novelai_image = imageDataUrl;
                         freshHistory[index].novelai_description = cardText;
+                        
+                        // 🔧 清理泄漏的 {{tags}} 消息（如果下一条消息是纯 {{...}} 标签则删除）
+                        if (index + 1 < freshHistory.length) {
+                            const nextMsg = freshHistory[index + 1];
+                            if (nextMsg && nextMsg.role === 'char' && nextMsg.content && /^\s*\{\{[\s\S]+?\}\}\s*$/.test(nextMsg.content)) {
+                                freshHistory.splice(index + 1, 1);
+                                console.log(`[NovelAI-AutoGen] 🧹 已清理泄漏的 {{tags}} 消息 (index: ${index + 1})`);
+                            }
+                        }
+                        
                         await setChatHistory(freshChar, accountId, freshHistory);
                         
                         console.log(`[NovelAI-AutoGen] ✅ 图片已保存到历史记录 (index: ${index})`);
                     }
-                    
-                    // 更新 UI（如果当前正在查看该聊天）
-                    if (currentChatCharId === charId) {
-                        const chatBody = document.getElementById('chat-body');
-                        if (chatBody) {
-                            const messageRows = chatBody.querySelectorAll('.message-row');
-                            if (messageRows[index]) {
-                                const imgBubble = messageRows[index].querySelector('.img-card-bubble');
-                                if (imgBubble) {
-                                    imgBubble.innerHTML = `
-                                        <img src="${imageDataUrl}" class="chat-image" 
-                                             style="width:200px; max-height:300px; object-fit:cover; border-radius:8px; cursor:pointer;" 
-                                             onclick="showFullImage(this.src)" />
-                                        <div style="font-size:10px; color:#bbb; text-align:center; margin-top:4px; padding:0 4px;">${escapeHtml(cardText)}</div>
-                                    `;
-                                    imgBubble.onclick = null;
-                                    imgBubble.style.cursor = 'default';
-                                }
-                            }
-                        }
-                    }
                 } else {
-                    // 生成失败：恢复原始状态
+                    // 生成失败
                     console.warn(`[NovelAI-AutoGen] ❌ 图片生成失败: "${cardText}"`);
-                    
-                    if (currentChatCharId === charId) {
-                        const chatBody = document.getElementById('chat-body');
-                        if (chatBody) {
-                            const messageRows = chatBody.querySelectorAll('.message-row');
-                            if (messageRows[index]) {
-                                const imgBubble = messageRows[index].querySelector('.img-card-bubble');
-                                if (imgBubble) {
-                                    imgBubble.dataset.text = cardText;
-                                    imgBubble.dataset.expanded = 'false';
-                                    imgBubble.innerHTML = `
-                                        <div class="img-card-placeholder">
-                                            <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                                                <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                                                <polyline points="21 15 16 10 5 21"></polyline>
-                                            </svg>
-                                            <div class="img-card-hint" style="color:#ff6b6b;">生成失败，点击查看文字</div>
-                                        </div>
-                                    `;
-                                    // 恢复点击展开文字功能
-                                    imgBubble.onclick = (e) => {
-                                        e.stopPropagation();
-                                        const isExpanded = imgBubble.dataset.expanded === 'true';
-                                        if (isExpanded) {
-                                            imgBubble.innerHTML = `
-                                                <div class="img-card-placeholder">
-                                                    <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                                                        <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                                                        <polyline points="21 15 16 10 5 21"></polyline>
-                                                    </svg>
-                                                    <div class="img-card-hint">点击查看文字</div>
-                                                </div>
-                                            `;
-                                            imgBubble.dataset.expanded = 'false';
-                                        } else {
-                                            imgBubble.innerHTML = `<div class="img-card-text">${cardText}</div>`;
-                                            imgBubble.dataset.expanded = 'true';
-                                        }
-                                    };
-                                }
-                            }
-                        }
-                    }
+                }
+            }
+            
+            // 🔧 所有 imgcard 处理完成后，统一刷新 UI（比逐个 DOM 操作更可靠）
+            if (currentChatCharId === charId) {
+                const freshCharFinal = await db.characters.get(charId);
+                if (freshCharFinal) {
+                    renderChatBody(freshCharFinal);
                 }
             }
             
             console.log(`[NovelAI-AutoGen] 🎉 所有 imgcard 处理完成`);
+        }
+
+        // 🔧 群聊版 NovelAI 自动生图：扫描群聊历史中的 imgcard 消息并生成图片
+        async function processGroupImgCardsWithNovelAI(groupId) {
+            // 检查开关是否开启
+            const enabled = await isNovelAIAutoGenerateEnabled();
+            if (!enabled) {
+                console.log('[NovelAI-GroupGen] 自动生图未开启，跳过');
+                return;
+            }
+            
+            // 检查 API Key 是否配置
+            const apiKeyItem = await db.dexiData.get('novelaiApiKey');
+            if (!apiKeyItem || !apiKeyItem.value) {
+                console.log('[NovelAI-GroupGen] 未配置 API Key，跳过');
+                return;
+            }
+            
+            const group = await getCachedGroupChat(groupId);
+            if (!group || !group.chat_history || group.chat_history.length === 0) return;
+            
+            const history = group.chat_history;
+            
+            // 从最后往前找最近的 imgcard 消息（只检查最近一批角色消息，到遇到 user 消息为止）
+            const imgcardMessages = [];
+            for (let i = history.length - 1; i >= 0; i--) {
+                const msg = history[i];
+                if (msg.role === 'user') break; // 遇到用户消息就停止
+                if (msg.role === 'char' && msg.content && msg.content.startsWith('[imgcard:') && !msg.novelai_generated) {
+                    imgcardMessages.push({ index: i, msg: msg });
+                }
+            }
+            
+            if (imgcardMessages.length === 0) {
+                console.log('[NovelAI-GroupGen] 未检测到需要生成的 imgcard 消息');
+                return;
+            }
+            
+            console.log(`[NovelAI-GroupGen] 检测到 ${imgcardMessages.length} 条群聊 imgcard 消息，开始生成...`);
+            
+            for (const { index, msg } of imgcardMessages) {
+                const rawCardText = msg.content.substring(9, msg.content.length - 1).trim();
+                
+                // 从 imgcard 内容中提取 AI 直接输出的英文 tags（格式：中文描述{{english,tags}}）
+                let cardText = rawCardText;
+                let englishTags = rawCardText;
+                const tagsMatch = rawCardText.match(/\{\{(.+?)\}\}/);
+                if (tagsMatch) {
+                    englishTags = tagsMatch[1].trim();
+                    cardText = rawCardText.replace(/\s*\{\{.+?\}\}/, '').trim();
+                    console.log(`[NovelAI-GroupGen] ✅ 使用 AI 内联 tags: "${cardText}" → "${englishTags}"`);
+                } else {
+                    // 兜底：检查历史记录中下一条消息是否是泄漏的 {{tags}}
+                    let foundNeighborTags = false;
+                    if (index + 1 < history.length) {
+                        const nextMsg = history[index + 1];
+                        if (nextMsg && nextMsg.role === 'char' && nextMsg.content) {
+                            const neighborTagsMatch = nextMsg.content.match(/^\s*\{\{([\s\S]+?)\}\}\s*$/);
+                            if (neighborTagsMatch) {
+                                englishTags = neighborTagsMatch[1].trim();
+                                foundNeighborTags = true;
+                                console.log(`[NovelAI-GroupGen] ✅ 从下一条消息获取泄漏的 tags: "${englishTags.substring(0, 60)}..."`);
+                            }
+                        }
+                    }
+                    if (!foundNeighborTags) {
+                        console.log(`[NovelAI-GroupGen] ⚠️ 未找到内联 tags，直接使用原始描述: "${cardText}"`);
+                    }
+                }
+                
+                // 更新 UI 显示加载状态（如果当前正在查看该群聊）
+                if (window.currentGroupChatId === groupId) {
+                    const chatBody = document.getElementById('chat-body');
+                    if (chatBody) {
+                        // 找到对应的 imgcard 气泡并显示加载状态
+                        const allMsgRows = chatBody.querySelectorAll('.group-message-row');
+                        for (const row of allMsgRows) {
+                            const imgBubble = row.querySelector('.img-card-bubble');
+                            if (imgBubble && imgBubble.dataset.text === cardText) {
+                                imgBubble.innerHTML = `
+                                    <div class="img-card-placeholder" style="position:relative;">
+                                        <div style="display:flex; flex-direction:column; align-items:center; gap:6px;">
+                                            <div class="novelai-loading-spinner" style="width:24px; height:24px; border:3px solid #e0e0e0; border-top-color:var(--deep-pink, #ff4081); border-radius:50%; animation:spin 0.8s linear infinite;"></div>
+                                            <div class="img-card-hint" style="font-size:11px; color:#999;">NovelAI 生成中...</div>
+                                        </div>
+                                    </div>
+                                `;
+                                imgBubble.onclick = null;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // 调用 NovelAI 生成图片
+                const imageDataUrl = await generateNovelAIImage(englishTags);
+                
+                if (imageDataUrl) {
+                    // 生成成功：更新群聊历史记录中的消息
+                    const freshGroup = await getCachedGroupChat(groupId);
+                    if (freshGroup && freshGroup.chat_history && freshGroup.chat_history[index]) {
+                        freshGroup.chat_history[index].content = `[imgcard:${cardText}]`; // 清理掉 {{tags}}
+                        freshGroup.chat_history[index].novelai_generated = true;
+                        freshGroup.chat_history[index].novelai_image = imageDataUrl;
+                        freshGroup.chat_history[index].novelai_description = cardText;
+                        
+                        // 清理泄漏的 {{tags}} 消息
+                        if (index + 1 < freshGroup.chat_history.length) {
+                            const nextMsg = freshGroup.chat_history[index + 1];
+                            if (nextMsg && nextMsg.role === 'char' && nextMsg.content && /^\s*\{\{[\s\S]+?\}\}\s*$/.test(nextMsg.content)) {
+                                freshGroup.chat_history.splice(index + 1, 1);
+                                console.log(`[NovelAI-GroupGen] 🧹 已清理泄漏的 {{tags}} 消息 (index: ${index + 1})`);
+                            }
+                        }
+                        
+                        await safeGroupChatPut(freshGroup);
+                        console.log(`[NovelAI-GroupGen] ✅ 图片已保存到群聊历史记录 (index: ${index})`);
+                    }
+                } else {
+                    console.warn(`[NovelAI-GroupGen] ❌ 图片生成失败: "${cardText}"`);
+                }
+            }
+            
+            // 所有 imgcard 处理完成后，统一刷新 UI
+            if (window.currentGroupChatId === groupId) {
+                const freshGroupFinal = await getCachedGroupChat(groupId);
+                if (freshGroupFinal) {
+                    await renderGroupChatBody(freshGroupFinal);
+                }
+            }
+            
+            console.log(`[NovelAI-GroupGen] 🎉 所有群聊 imgcard 处理完成`);
         }
 
         // 构造智能 URL (自动补全 /v1)
@@ -8368,271 +9634,6 @@ ${timeStr}
             }
         }
 
-// --- 日历时间设定逻辑 (Premium Pink Pro) ---
-
-const calendar = {
-    date: new Date(),        // 当前浏览的日期（用于翻页）
-    selectedDate: new Date(), // 用户选中的日期
-    isSelectorOpen: false,   // 状态标识
-    isInitialized: false,    // 是否已初始化
-
-    elements: {},
-
-    months: ["1月 · January", "2月 · February", "3月 · March", "4月 · April", "5月 · May", "6月 · June", "7月 · July", "8月 · August", "9月 · September", "10月 · October", "11月 · November", "12月 · December"],
-    monthsShort: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
-
-    init() {
-        if (this.isInitialized) return;
-        
-        this.elements = {
-            // Containers
-            calendarLayer: document.getElementById('cal-calendarLayer'),
-            selectorLayer: document.getElementById('cal-selectorLayer'),
-            
-            // Display/Inputs
-            headerBtn: document.getElementById('cal-headerTitleBtn'),
-            headerText: document.getElementById('cal-monthYearText'),
-            daysContainer: document.getElementById('cal-daysContainer'),
-            monthGrid: document.getElementById('cal-monthGrid'),
-            yearList: document.getElementById('cal-yearList'),
-            
-            // Buttons
-            prevBtn: document.getElementById('cal-prevBtn'),
-            nextBtn: document.getElementById('cal-nextBtn'),
-            
-            // Time
-            hourInput: document.getElementById('cal-hourInput'),
-            minuteInput: document.getElementById('cal-minuteInput'),
-            confirmBtn: document.getElementById('cal-confirmBtn'),
-            timeModeToggle: document.getElementById('cal-time-mode-toggle'),
-            timePicker: document.querySelector('#calendar-page .time-picker')
-        };
-
-        this.bindEvents();
-        this.renderSelectorItems();
-        this.isInitialized = true;
-    },
-
-    // 渲染日历网格
-    render() {
-        // 设置标题
-        this.elements.headerText.innerHTML = `${this.months[this.date.getMonth()].split(' · ')[0]} <span style="font-weight:300; opacity:0.6; font-size:0.9em">${this.date.getFullYear()}</span>`;
-
-        this.date.setDate(1);
-        const lastDay = new Date(this.date.getFullYear(), this.date.getMonth() + 1, 0).getDate();
-        const firstDayIndex = this.date.getDay(); // 0 is Sunday
-        
-        let daysHTML = "";
-
-        // 空白占位
-        for (let x = 0; x < firstDayIndex; x++) {
-            daysHTML += `<div class="day fade"></div>`;
-        }
-
-        // 日期
-        for (let i = 1; i <= lastDay; i++) {
-            const isToday = i === new Date().getDate() && 
-                          this.date.getMonth() === new Date().getMonth() && 
-                          this.date.getFullYear() === new Date().getFullYear();
-            
-            const isSelected = i === this.selectedDate.getDate() &&
-                             this.date.getMonth() === this.selectedDate.getMonth() &&
-                             this.date.getFullYear() === this.selectedDate.getFullYear();
-
-            let classes = "day";
-            if (isToday) classes += " today";
-            if (isSelected) classes += " selected";
-
-            // 使用 onclick 字符串绑定可能会有问题，这里改用事件委托或直接生成HTML后绑定
-            // 为了简单，我们使用全局函数 calendarSelectDay
-            daysHTML += `<div class="${classes}" onclick="calendarSelectDay(${i})">${i}</div>`;
-        }
-
-        this.elements.daysContainer.innerHTML = daysHTML;
-        
-        // 更新选择器的高亮状态
-        this.updateSelectorHighlights();
-    },
-
-    // 渲染选择器的内容（月份和年份列表）
-    renderSelectorItems() {
-        // 1. 渲染月份
-        let mHtml = '';
-        this.months.forEach((m, index) => {
-            const ch = m.split(' · ')[0];
-            const en = this.monthsShort[index];
-            mHtml += `<div class="sel-month-item" onclick="calendarSetMonth(${index})">
-                <span style="font-weight:700">${ch}</span> 
-                <span style="font-size:0.8em; opacity:0.7">${en}</span>
-            </div>`;
-        });
-        this.elements.monthGrid.innerHTML = mHtml;
-
-        // 2. 渲染年份 (前后50年)
-        const currentYear = new Date().getFullYear();
-        let yHtml = '';
-        for(let y = currentYear - 50; y <= currentYear + 50; y++) {
-            yHtml += `<div class="sel-year-item" id="year-${y}" onclick="calendarSetYear(${y})">${y}</div>`;
-        }
-        this.elements.yearList.innerHTML = yHtml;
-    },
-
-    updateSelectorHighlights() {
-        // 高亮月份
-        const monthItems = this.elements.monthGrid.children;
-        for(let item of monthItems) item.classList.remove('selected');
-        if(monthItems[this.date.getMonth()]) monthItems[this.date.getMonth()].classList.add('selected');
-
-        // 高亮年份并滚动
-        const yearItems = this.elements.yearList.children;
-        for(let item of yearItems) item.classList.remove('selected');
-        
-        const activeYearEl = document.getElementById(`year-${this.date.getFullYear()}`);
-        if(activeYearEl) {
-            activeYearEl.classList.add('selected');
-            // 如果面板开着，才滚动，否则会在后台乱滚
-            if(this.isSelectorOpen) {
-                activeYearEl.scrollIntoView({block: "center", behavior: "smooth"});
-            }
-        }
-    },
-
-    toggleSelector() {
-        this.isSelectorOpen = !this.isSelectorOpen;
-        
-        if(this.isSelectorOpen) {
-            this.elements.calendarLayer.classList.remove('active');
-            this.elements.selectorLayer.classList.add('active');
-            this.elements.headerBtn.classList.add('active');
-            
-            this.elements.prevBtn.style.opacity = '0';
-            this.elements.prevBtn.style.pointerEvents = 'none';
-            this.elements.nextBtn.style.opacity = '0';
-            this.elements.nextBtn.style.pointerEvents = 'none';
-
-            setTimeout(() => {
-                const activeYear = document.getElementById(`year-${this.date.getFullYear()}`);
-                if(activeYear) activeYear.scrollIntoView({block: "center"});
-            }, 100);
-
-        } else {
-            this.elements.selectorLayer.classList.remove('active');
-            this.elements.calendarLayer.classList.add('active');
-            this.elements.headerBtn.classList.remove('active');
-
-            this.elements.prevBtn.style.opacity = '1';
-            this.elements.prevBtn.style.pointerEvents = 'auto';
-            this.elements.nextBtn.style.opacity = '1';
-            this.elements.nextBtn.style.pointerEvents = 'auto';
-        }
-    },
-
-    setMonth(index) {
-        this.date.setMonth(index);
-        this.render();
-    },
-
-    setYear(year) {
-        this.date.setFullYear(year);
-        this.render();
-    },
-    
-    selectDay(day) {
-        this.selectedDate = new Date(this.date.getFullYear(), this.date.getMonth(), day);
-        // 保留当前的小时分钟
-        const h = parseInt(this.elements.hourInput.value) || 0;
-        const m = parseInt(this.elements.minuteInput.value) || 0;
-        this.selectedDate.setHours(h);
-        this.selectedDate.setMinutes(m);
-        
-        this.render();
-    },
-
-    updateTimeInputs() {
-        const h = this.selectedDate.getHours().toString().padStart(2, '0');
-        const m = this.selectedDate.getMinutes().toString().padStart(2, '0');
-        this.elements.hourInput.value = h;
-        this.elements.minuteInput.value = m;
-    },
-    
-    applyTimeMode(isVirtual, offsetMs = 0) {
-        const now = Date.now();
-        const baseTime = isVirtual ? new Date(now + (offsetMs || 0)) : new Date(now);
-        
-        this.selectedDate = new Date(baseTime);
-        this.date = new Date(baseTime);
-        this.updateTimeInputs();
-        this.render();
-        
-        const disabled = !isVirtual;
-        if (this.elements.hourInput) this.elements.hourInput.disabled = disabled;
-        if (this.elements.minuteInput) this.elements.minuteInput.disabled = disabled;
-        if (this.elements.timePicker) this.elements.timePicker.classList.toggle('disabled', disabled);
-    },
-
-    bindEvents() {
-        // 头部点击 -> 打开选择器
-        this.elements.headerBtn.addEventListener('click', () => this.toggleSelector());
-
-        // 左右导航
-        this.elements.prevBtn.addEventListener('click', () => {
-            this.date.setMonth(this.date.getMonth() - 1);
-            this.render();
-        });
-        this.elements.nextBtn.addEventListener('click', () => {
-            this.date.setMonth(this.date.getMonth() + 1);
-            this.render();
-        });
-
-        // 时间输入及确认
-        const formatTime = (e) => {
-            let val = parseInt(e.target.value);
-            const max = e.target.id === 'cal-hourInput' ? 23 : 59;
-            if(isNaN(val) || val < 0) val = 0; if(val > max) val = max;
-            e.target.value = val.toString().padStart(2, '0');
-            
-            // 更新 selectedDate
-            if (e.target.id === 'cal-hourInput') this.selectedDate.setHours(val);
-            else this.selectedDate.setMinutes(val);
-        };
-
-        this.elements.hourInput.addEventListener('change', formatTime);
-        this.elements.minuteInput.addEventListener('change', formatTime);
-        
-        // 确认按钮逻辑
-        this.elements.confirmBtn.addEventListener('click', () => {
-            if (this.isSelectorOpen) {
-                this.toggleSelector(); // 关闭选择器，回到日历视图
-            } else {
-                saveCalendarTime(); // 调用全局保存函数
-            }
-        });
-        
-        // 时间模式开关
-        if (this.elements.timeModeToggle) {
-            this.elements.timeModeToggle.addEventListener('change', async (e) => {
-                const useVirtual = !!e.target.checked;
-                if (!currentChatCharId) return;
-                const char = await db.characters.get(currentChatCharId);
-                const offset = char ? (char.timeOffset || 0) : 0;
-                this.applyTimeMode(useVirtual, offset);
-            });
-        }
-    }
-};
-
-// 全局辅助函数供 onclick 调用
-function calendarSelectDay(day) {
-    calendar.selectDay(day);
-}
-function calendarSetMonth(index) {
-    calendar.setMonth(index);
-}
-function calendarSetYear(year) {
-    calendar.setYear(year);
-}
-
-// 主入口
 // 显示衣柜页面
 function showWardrobePage() {
     closeChatPanel();
@@ -9315,99 +10316,62 @@ function addWardrobeClothesItem(category, imageUrl, name) {
     list.appendChild(item);
 }
 
-async function showCalendarPage() {
-    if (!currentChatCharId) {
-        alert("请先选择一个聊天对象");
-        return;
-    }
-    
-    closeChatPanel();
-    document.getElementById('calendar-page').style.display = 'flex';
-    
-    // 初始化日历 DOM 绑定
-    calendar.init();
-    
-    // 获取角色时间
-    const char = await db.characters.get(currentChatCharId);
-    const isVirtual = isVirtualTimeEnabled(char);
-    if (calendar.elements.timeModeToggle) {
-        calendar.elements.timeModeToggle.checked = isVirtual;
-    }
-    
-    calendar.applyTimeMode(isVirtual, char?.timeOffset || 0);
-}
-
-function hideCalendarPage() {
-    document.getElementById('calendar-page').style.display = 'none';
-}
-
-async function saveCalendarTime() {
-    if (!currentChatCharId) return;
-    
-    // 从 calendar 对象获取最终时间
-    const char = await db.characters.get(currentChatCharId);
-    if (!char) return;
-    
-    const useVirtual = calendar.elements.timeModeToggle ? calendar.elements.timeModeToggle.checked : false;
-    
-    // 🔧 修复：使用 update() 只更新时间相关字段，避免 put() 覆盖并发写入的聊天记录
-    if (useVirtual) {
-        const targetTime = calendar.selectedDate.getTime();
-        const now = Date.now();
-        const offset = targetTime - now;
-        await db.characters.update(currentChatCharId, {
-            timeOffset: offset,
-            timeOffsetEnabled: true
-        });
-    } else {
-        await db.characters.update(currentChatCharId, {
-            timeOffsetEnabled: false
-        });
-    }
-    
-    hideCalendarPage();
-    alert(useVirtual ? "时间设定已更新" : "已切换为现实时间");
-}
-
+// 日历功能已移除，虚拟时间始终关闭，使用现实时间
 function isVirtualTimeEnabled(char) {
-    // 🔧 默认关闭虚拟时间（使用现实时间），用户手动开启后才生效
-    return char ? char.timeOffsetEnabled === true : false;
+    return false;
 }
 
 function getEffectiveTimeOffset(char) {
-    if (!char) return 0;
-    return isVirtualTimeEnabled(char) ? (char.timeOffset || 0) : 0;
+    return 0;
 }
 
-function markUserAvatarChanged(userChar) {
+/**
+ * 用户更换头像后，向所有角色的聊天记录中插入系统消息（类似拍一拍）
+ * 同时附带新头像的图片数据，让AI能识别头像内容
+ * @param {object} userChar - 用户角色对象
+ */
+async function notifyAvatarChanged(userChar) {
     if (!userChar) return;
-    userChar.avatarUpdatedAt = Date.now();
-    console.log(`[AvatarChange] ✅ 标记用户头像已更换, avatarUpdatedAt=${userChar.avatarUpdatedAt}, charId=${userChar.id}`);
-}
-
-function getUserAvatarChangeNotice(char, accountId, userChar) {
-    if (!char || !userChar) return '';
-    const changedAt = userChar.avatarUpdatedAt || 0;
-    if (!changedAt) {
-        console.log(`[AvatarChange] ℹ️ 用户未换过头像 (avatarUpdatedAt为空), charId=${char.id}`);
-        return '';
+    const userName = userChar.nick || userChar.name || '用户';
+    const noticeText = `"${userName}" 更换了头像`;
+    const accountId = getCurrentAccountId();
+    // 获取用户当前新头像（已经更新后的）
+    const newAvatarUrl = userChar.avatar || '';
+    
+    try {
+        // 获取所有非用户角色（即聊天对象）
+        const allChars = await db.characters.toArray();
+        const chatChars = allChars.filter(c => c.type !== 'user' && c.id !== userChar.id);
+        
+        for (const char of chatChars) {
+            try {
+                let history = getChatHistory(char, accountId);
+                // 只在有聊天记录的角色中插入通知（没聊过的不插入）
+                if (history.length === 0) continue;
+                
+                const msgData = {
+                    role: 'system',
+                    content: noticeText,
+                    time: Date.now(),
+                    type: 'avatar_change'
+                };
+                // 附带新头像的图片URL，供AI识图使用
+                if (newAvatarUrl) {
+                    msgData.avatarImage = newAvatarUrl;
+                }
+                
+                history.push(msgData);
+                await setChatHistory(char, accountId, history);
+                console.log(`[AvatarChange] ✅ 已向 ${char.name}(${char.id}) 的聊天中插入头像更换系统消息${newAvatarUrl ? '（含头像图片）' : ''}`);
+            } catch (e) {
+                console.error(`[AvatarChange] 向 ${char.name} 插入通知失败:`, e);
+            }
+        }
+        
+        console.log(`[AvatarChange] ✅ 头像更换通知已写入聊天记录（含头像图片，供AI识图）`);
+    } catch (e) {
+        console.error('[AvatarChange] 广播头像更换通知失败:', e);
     }
-    
-    const key = accountId ? String(accountId) : 'default';
-    if (!char.userAvatarNoticeMap) char.userAvatarNoticeMap = {};
-    const lastNotified = char.userAvatarNoticeMap[key] || 0;
-    
-    console.log(`[AvatarChange] 检查头像通知: charId=${char.id}, changedAt=${changedAt}, lastNotified=${lastNotified}, shouldNotify=${changedAt > lastNotified}`);
-    
-    if (changedAt > lastNotified) {
-        char.userAvatarNoticeMap[key] = changedAt;
-        const userName = userChar.nick || userChar.name || '对方';
-        console.log(`[AvatarChange] ✅ 生成头像更换通知给角色 ${char.name}(${char.id})`);
-        return `\n\n【头像更新】\n${userName}刚刚更换了头像。你已经注意到，可以自然地提一句或问问原因。`;
-    }
-    
-    console.log(`[AvatarChange] ⏭️ 角色 ${char.name}(${char.id}) 已通知过此次头像更换，跳过`);
-    return '';
 }
 
 // 辅助函数：获取格式化的虚拟时间字符串
@@ -11440,13 +12404,15 @@ async function openMessageChat(id) {
             name: displayName,
             avatar: displayAvatar,
             chatTimeLabel: formatMessageTime(firstMsg.time || firstMsg.timestamp || Date.now()),
-            messages: chatMessages.map(msg => {
+            messages: chatMessages.map((msg, idx) => {
                 const msgText = msg.content || msg.message || '';
                 console.log('[openMessageChat] 映射消息:', { type: msg.type, text: msgText });
                 return {
+                    id: msg.id || `msg_${idx}_${Date.now()}`,
                     type: msg.type || (msg.sender === displayName ? 'received' : 'sent'),
                     text: msgText,
-                    time: msg.time || msg.timestamp || 0
+                    time: msg.time || msg.timestamp || 0,
+                    originalMsg: msg // 保存原始消息数据以便后续操作
                 };
             })
         };
@@ -11526,13 +12492,20 @@ async function openMessageChat(id) {
         }
         if (msg.time) lastTimestamp = msg.time;
         
-        htmlContent += `<div class="message-wrapper"><div class="message-bubble ${msg.type === 'sent' ? 'message-sent' : 'message-received'}">${msg.text.replace(/\n/g, '<br>')}</div></div>`;
+        htmlContent += `<div class="message-wrapper" data-msg-id="${msg.id}" data-msg-index="${index}">
+            <div class="message-bubble ${msg.type === 'sent' ? 'message-sent' : 'message-received'}" 
+                 data-msg-text="${escapeHtml(msg.text)}"
+                 data-msg-type="${msg.type}">${msg.text.replace(/\n/g, '<br>')}</div>
+        </div>`;
         if (msg.type === 'sent' && index === chat.messages.length - 1) {
             htmlContent += `<div class="message-delivery-text" style="opacity:1">已送达</div>`;
         }
     });
     
     msgContainer.innerHTML = htmlContent;
+    
+    // 为所有消息气泡添加长按事件
+    attachMessageLongPressEvents();
     
     // 滚动到底部
     setTimeout(() => {
@@ -11550,6 +12523,365 @@ async function openMessageChat(id) {
     }
 }
 
+// ==================== 消息长按和多选功能 ====================
+let messageMultiSelectMode = false;
+let selectedMessageIds = new Set();
+let currentEditingMessageId = null;
+
+// HTML转义函数
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// 为消息气泡添加长按事件
+function attachMessageLongPressEvents() {
+    const messageBubbles = document.querySelectorAll('.message-bubble');
+    let longPressTimer = null;
+    let longPressTarget = null;
+    
+    messageBubbles.forEach(bubble => {
+        // 清除之前的事件监听器
+        const newBubble = bubble.cloneNode(true);
+        bubble.parentNode.replaceChild(newBubble, bubble);
+        
+        // 长按开始
+        newBubble.addEventListener('touchstart', function(e) {
+            if (messageMultiSelectMode) return;
+            longPressTarget = this;
+            longPressTimer = setTimeout(() => {
+                showMessageActionMenu(this, e);
+                longPressTimer = null;
+            }, 500); // 500ms长按
+        });
+        
+        // 长按结束
+        newBubble.addEventListener('touchend', function(e) {
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+        });
+        
+        // 移动时取消长按
+        newBubble.addEventListener('touchmove', function(e) {
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+        });
+        
+        // 鼠标事件（桌面端）
+        newBubble.addEventListener('contextmenu', function(e) {
+            if (messageMultiSelectMode) return;
+            e.preventDefault();
+            showMessageActionMenu(this, e);
+        });
+    });
+}
+
+// 显示消息操作菜单
+function showMessageActionMenu(bubble, event) {
+    // 移除之前的菜单
+    const existingMenu = document.getElementById('message-action-menu');
+    if (existingMenu) {
+        existingMenu.remove();
+    }
+    
+    const msgWrapper = bubble.closest('.message-wrapper');
+    const msgId = msgWrapper.getAttribute('data-msg-id');
+    const msgText = bubble.getAttribute('data-msg-text');
+    const msgType = bubble.getAttribute('data-msg-type');
+    
+    // 创建菜单
+    const menu = document.createElement('div');
+    menu.id = 'message-action-menu';
+    menu.className = 'message-action-menu';
+    menu.innerHTML = `
+        <div class="message-action-item" onclick="copyMessage('${msgId}')">
+            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" fill="none" stroke="currentColor" stroke-width="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" fill="none" stroke="currentColor" stroke-width="2"></path></svg>
+            <span>复制</span>
+        </div>
+        ${msgType === 'sent' ? `
+        <div class="message-action-item" onclick="editMessage('${msgId}')">
+            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" fill="none" stroke="currentColor" stroke-width="2"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" fill="none" stroke="currentColor" stroke-width="2"></path></svg>
+            <span>编辑</span>
+        </div>
+        ` : ''}
+        <div class="message-action-item" onclick="deleteMessage('${msgId}')">
+            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><polyline points="3 6 5 6 21 6" fill="none" stroke="currentColor" stroke-width="2"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" fill="none" stroke="currentColor" stroke-width="2"></path></svg>
+            <span>删除</span>
+        </div>
+        <div class="message-action-item" onclick="enterMultiSelectMode('${msgId}')">
+            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><polyline points="9 11 12 14 22 4" fill="none" stroke="currentColor" stroke-width="2"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" fill="none" stroke="currentColor" stroke-width="2"></path></svg>
+            <span>多选</span>
+        </div>
+    `;
+    
+    document.body.appendChild(menu);
+    
+    // 计算菜单位置
+    const rect = bubble.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    let left = rect.left + rect.width / 2 - menuRect.width / 2;
+    let top = rect.top - menuRect.height - 10;
+    
+    // 确保菜单不超出屏幕
+    if (left < 10) left = 10;
+    if (left + menuRect.width > window.innerWidth - 10) {
+        left = window.innerWidth - menuRect.width - 10;
+    }
+    if (top < 10) {
+        top = rect.bottom + 10;
+    }
+    
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
+    
+    // 点击外部关闭菜单
+    setTimeout(() => {
+        const closeMenu = (e) => {
+            if (!menu.contains(e.target)) {
+                menu.remove();
+                document.removeEventListener('click', closeMenu);
+                document.removeEventListener('touchstart', closeMenu);
+            }
+        };
+        document.addEventListener('click', closeMenu);
+        document.addEventListener('touchstart', closeMenu);
+    }, 100);
+}
+
+// 复制消息
+function copyMessage(msgId) {
+    const msgWrapper = document.querySelector(`.message-wrapper[data-msg-id="${msgId}"]`);
+    if (!msgWrapper) return;
+    
+    const bubble = msgWrapper.querySelector('.message-bubble');
+    const msgText = bubble.getAttribute('data-msg-text');
+    
+    // 解码HTML实体
+    const textarea = document.createElement('textarea');
+    textarea.value = msgText.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/<br>/g, '\n');
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+    
+    // 显示提示
+    showToast('已复制');
+    document.getElementById('message-action-menu')?.remove();
+}
+
+// 编辑消息
+async function editMessage(msgId) {
+    const msgWrapper = document.querySelector(`.message-wrapper[data-msg-id="${msgId}"]`);
+    if (!msgWrapper) return;
+    
+    const bubble = msgWrapper.querySelector('.message-bubble');
+    const msgText = bubble.getAttribute('data-msg-text');
+    const decodedText = msgText.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/<br>/g, '\n');
+    
+    // 显示编辑输入框
+    const input = document.getElementById('message-msg-input');
+    if (input) {
+        input.value = decodedText;
+        input.focus();
+        currentEditingMessageId = msgId;
+        handleMessageInputChange(input);
+    }
+    
+    document.getElementById('message-action-menu')?.remove();
+}
+
+// 删除单条消息
+async function deleteMessage(msgId) {
+    if (!confirm('确定要删除这条消息吗？')) {
+        document.getElementById('message-action-menu')?.remove();
+        return;
+    }
+    
+    const msgWrapper = document.querySelector(`.message-wrapper[data-msg-id="${msgId}"]`);
+    if (!msgWrapper) return;
+    
+    // 从数据库删除
+    try {
+        await db.sms_messages.delete(msgId);
+    } catch (e) {
+        console.error('删除消息失败:', e);
+    }
+    
+    // 从界面移除
+    msgWrapper.remove();
+    
+    // 重新渲染消息列表
+    if (currentMessageChatId) {
+        await openMessageChat(currentMessageChatId);
+    }
+    
+    document.getElementById('message-action-menu')?.remove();
+    showToast('已删除');
+}
+
+// 进入多选模式
+function enterMultiSelectMode(initialMsgId) {
+    messageMultiSelectMode = true;
+    selectedMessageIds.clear();
+    if (initialMsgId) {
+        selectedMessageIds.add(initialMsgId);
+    }
+    
+    // 更新UI
+    updateMessageSelectionUI();
+    showMultiSelectToolbar();
+    
+    document.getElementById('message-action-menu')?.remove();
+}
+
+// 退出多选模式
+function exitMultiSelectMode() {
+    messageMultiSelectMode = false;
+    selectedMessageIds.clear();
+    updateMessageSelectionUI();
+    hideMultiSelectToolbar();
+}
+
+// 切换消息选择状态
+function toggleMessageSelection(msgId) {
+    if (!messageMultiSelectMode) {
+        enterMultiSelectMode(msgId);
+        return;
+    }
+    
+    if (selectedMessageIds.has(msgId)) {
+        selectedMessageIds.delete(msgId);
+    } else {
+        selectedMessageIds.add(msgId);
+    }
+    
+    updateMessageSelectionUI();
+    updateMultiSelectToolbar();
+}
+
+// 更新消息选择UI
+function updateMessageSelectionUI() {
+    const msgWrappers = document.querySelectorAll('.message-wrapper');
+    msgWrappers.forEach(wrapper => {
+        const msgId = wrapper.getAttribute('data-msg-id');
+        const bubble = wrapper.querySelector('.message-bubble');
+        
+        if (messageMultiSelectMode) {
+            wrapper.classList.add('multi-select-mode');
+            if (selectedMessageIds.has(msgId)) {
+                wrapper.classList.add('selected');
+                bubble.classList.add('selected');
+            } else {
+                wrapper.classList.remove('selected');
+                bubble.classList.remove('selected');
+            }
+            
+            // 添加点击事件切换选择
+            bubble.onclick = (e) => {
+                e.stopPropagation();
+                toggleMessageSelection(msgId);
+            };
+        } else {
+            wrapper.classList.remove('multi-select-mode', 'selected');
+            bubble.classList.remove('selected');
+            bubble.onclick = null;
+        }
+    });
+}
+
+// 显示多选工具栏
+function showMultiSelectToolbar() {
+    let toolbar = document.getElementById('message-multi-select-toolbar');
+    if (!toolbar) {
+        toolbar = document.createElement('div');
+        toolbar.id = 'message-multi-select-toolbar';
+        toolbar.className = 'message-multi-select-toolbar';
+        toolbar.innerHTML = `
+            <div class="multi-select-toolbar-left">
+                <button class="multi-select-btn cancel-btn" onclick="exitMultiSelectMode()">取消</button>
+            </div>
+            <div class="multi-select-toolbar-center">
+                <span class="multi-select-count">已选择 <span id="selected-count">0</span> 条</span>
+            </div>
+            <div class="multi-select-toolbar-right">
+                <button class="multi-select-btn delete-btn" onclick="deleteSelectedMessages()" id="multi-delete-btn" disabled>删除</button>
+            </div>
+        `;
+        document.getElementById('message-detail-page').appendChild(toolbar);
+    }
+    toolbar.style.display = 'flex';
+    updateMultiSelectToolbar();
+}
+
+// 隐藏多选工具栏
+function hideMultiSelectToolbar() {
+    const toolbar = document.getElementById('message-multi-select-toolbar');
+    if (toolbar) {
+        toolbar.style.display = 'none';
+    }
+}
+
+// 更新多选工具栏
+function updateMultiSelectToolbar() {
+    const count = selectedMessageIds.size;
+    const countSpan = document.getElementById('selected-count');
+    if (countSpan) {
+        countSpan.textContent = count;
+    }
+    
+    const deleteBtn = document.getElementById('multi-delete-btn');
+    if (deleteBtn) {
+        deleteBtn.disabled = count === 0;
+    }
+}
+
+// 删除选中的消息
+async function deleteSelectedMessages() {
+    if (selectedMessageIds.size === 0) return;
+    
+    if (!confirm(`确定要删除选中的 ${selectedMessageIds.size} 条消息吗？`)) {
+        return;
+    }
+    
+    // 从数据库删除
+    for (const msgId of selectedMessageIds) {
+        try {
+            await db.sms_messages.delete(msgId);
+        } catch (e) {
+            console.error('删除消息失败:', e);
+        }
+    }
+    
+    // 重新渲染
+    if (currentMessageChatId) {
+        await openMessageChat(currentMessageChatId);
+    }
+    
+    exitMultiSelectMode();
+    showToast(`已删除 ${selectedMessageIds.size} 条消息`);
+}
+
+// 显示提示
+function showToast(message) {
+    let toast = document.getElementById('message-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'message-toast';
+        toast.className = 'message-toast';
+        document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.style.display = 'block';
+    setTimeout(() => {
+        toast.style.display = 'none';
+    }, 2000);
+}
+
 // 确保函数在全局作用域
 window.openMessageChat = openMessageChat;
 window.sendMessageDetail = sendMessageDetail;
@@ -11559,6 +12891,13 @@ window.toggleMessageEditMode = toggleMessageEditMode;
 window.toggleMessageChatSelection = toggleMessageChatSelection;
 window.deleteSelectedMessageChats = deleteSelectedMessageChats;
 window.showMessageSwitchAccount = showMessageSwitchAccount;
+window.copyMessage = copyMessage;
+window.editMessage = editMessage;
+window.deleteMessage = deleteMessage;
+window.enterMultiSelectMode = enterMultiSelectMode;
+window.exitMultiSelectMode = exitMultiSelectMode;
+window.toggleMessageSelection = toggleMessageSelection;
+window.deleteSelectedMessages = deleteSelectedMessages;
 
 function showMessagePage() {
     document.getElementById('message-page').classList.add('active');
@@ -11593,6 +12932,11 @@ function hideMessagePage() {
 }
 
 function goBackMessageList() {
+    // 退出多选模式
+    if (messageMultiSelectMode) {
+        exitMultiSelectMode();
+    }
+    
     const detailPage = document.getElementById('message-detail-page');
     if (detailPage) {
         detailPage.classList.remove('active');
@@ -11809,6 +13153,32 @@ async function sendMessageDetail() {
         return;
     }
     
+    // 如果是编辑模式
+    if (currentEditingMessageId) {
+        try {
+            // 更新消息内容
+            await db.sms_messages.update(currentEditingMessageId, {
+                content: text
+            });
+            
+            // 重新渲染消息
+            if (currentMessageChatId) {
+                await openMessageChat(currentMessageChatId);
+            }
+            
+            // 清空编辑状态
+            currentEditingMessageId = null;
+            input.value = '';
+            handleMessageInputChange(input);
+            showToast('消息已更新');
+            return;
+        } catch (e) {
+            console.error('更新消息失败:', e);
+            alert('更新消息失败');
+            return;
+        }
+    }
+    
     // 🎯 检查余额（每条短信0.1元）
     const SMS_COST = 0.1;
     const balance = getPhoneBalance();
@@ -11853,7 +13223,7 @@ async function sendMessageDetail() {
     // 🎯 关键修复：使用当前聊天的ID（接收者的ID）作为聊天标识
     // 这样消息会归入正确的聊天，而不是创建新的聊天
     // 同时存储接收者信息，确保分组和显示正确
-    await db.sms_messages.add({
+    const newMsgId = await db.sms_messages.add({
         accountId: accountId,
         charId: null, // 发送的消息不需要 charId
         sender: myChar.nick || myChar.name,
@@ -11875,8 +13245,15 @@ async function sendMessageDetail() {
         const scrollArea = document.getElementById('message-area-scroll');
         const wasAtBottom = scrollArea.scrollHeight - scrollArea.scrollTop <= scrollArea.clientHeight + 50;
         
-        const newMsgHtml = `<div class="message-wrapper"><div class="message-bubble message-sent">${text.replace(/\n/g, '<br>')}</div></div>`;
+        const newMsgHtml = `<div class="message-wrapper" data-msg-id="${newMsgId}" data-msg-index="${msgContainer.children.length}">
+            <div class="message-bubble message-sent" 
+                 data-msg-text="${escapeHtml(text)}"
+                 data-msg-type="sent">${text.replace(/\n/g, '<br>')}</div>
+        </div>`;
         msgContainer.innerHTML += newMsgHtml;
+        
+        // 为新消息添加长按事件
+        attachMessageLongPressEvents();
         
         // 如果之前在底部，滚动到底部
         if (wasAtBottom) {
@@ -12138,7 +13515,7 @@ async function acceptMessageReply() {
                             let desc = m.content || '';
                             if (desc.startsWith('[img:')) desc = '一张图片/表情包';
                             else if (desc.startsWith('[imgcard:')) {
-                                const imgContent = desc.match(/\[imgcard:(.*?)\]/)?.[1] || '一张图片';
+                                const imgContent = stripImgcardInlineTags(desc.match(/\[imgcard:(.*?)\]/)?.[1] || '一张图片');
                                 desc = `一张图片卡片（${imgContent}）`;
                             }
                             else if (desc.startsWith('[voice:')) {
@@ -12471,7 +13848,7 @@ ${(() => {
             }
             
             // 保存到 Dexie 数据库
-            await db.sms_messages.add({
+            const newMsgId = await db.sms_messages.add({
                 accountId: accountId,
                 charId: targetChar.id,
                 sender: targetChar.nick || targetChar.name,
@@ -12485,8 +13862,15 @@ ${(() => {
             // 在详情页显示新消息
             const msgContainer = document.getElementById('message-container');
             if (msgContainer) {
-                const newMsgHtml = `<div class="message-wrapper"><div class="message-bubble message-received">${segment.replace(/\n/g, '<br>')}</div></div>`;
+                const newMsgHtml = `<div class="message-wrapper" data-msg-id="${newMsgId}" data-msg-index="${msgContainer.children.length}">
+                    <div class="message-bubble message-received" 
+                         data-msg-text="${escapeHtml(segment)}"
+                         data-msg-type="received">${segment.replace(/\n/g, '<br>')}</div>
+                </div>`;
                 msgContainer.innerHTML += newMsgHtml;
+                
+                // 为新消息添加长按事件
+                attachMessageLongPressEvents();
             }
         }
         
@@ -13183,15 +14567,21 @@ async function showWechatRegisterPage() {
             
             // 只更新昵称（网名），不修改真名(name)
             myChar.nick = newNick;
+            let avatarChanged = false;
             if (newAvatar) {
                 const oldAvatar = myChar.avatar || '';
                 myChar.avatar = newAvatar;
                 if (newAvatar !== oldAvatar) {
-                    markUserAvatarChanged(myChar);
+                    avatarChanged = true;
                 }
             }
             
             await safeCharacterPut(myChar);
+            
+            // 头像更换时，向所有聊天插入系统消息通知
+            if (avatarChanged) {
+                await notifyAvatarChanged(myChar);
+            }
             
             // 刷新个人中心页面
             closeProfileSettings();
@@ -13488,6 +14878,14 @@ ${loreContext ? `【世界观背景】
 ${loreContext}
 ` : ''}
 
+⚠️ 聊天气泡分割规则（极其重要！必须严格遵守！仅限chatHistory！）：
+- 真人发微信不会把话堆在一条消息里，而是一句话一个气泡
+- 仅在chatHistory的content字段内，用 ||| 分隔多个短句，每个短句会显示为独立的气泡
+- 同一个人可以连续发多条消息（连续多个相同role是允许的！不必严格一来一回！）
+- 每个气泡不超过15个字，短促、碎片化、口语化
+- 少用标点，不要在句尾加句号，content内禁止使用逗号（但 {{}} 标签内的逗号例外），想表达停顿就用|||分割
+- ⚠️ ||| 只能出现在chatHistory中！朋友圈content、评论content、likes中绝对禁止使用|||
+
 请生成以下JSON数据（严格按照格式返回，不要包含markdown代码块）：
 {
     "friends": [
@@ -13501,8 +14899,12 @@ ${loreContext}
             "lastMessageTime": "刚刚/5分钟前/1小时前/昨天等",
             "unread": 0,
             "chatHistory": [
-                {"role": "friend", "content": "消息内容", "time": "10:30"},
-                {"role": "me", "content": "消息内容", "time": "10:32"}
+                {"role": "friend", "content": "在干嘛|||好久没联系了", "time": "10:30"},
+                {"role": "me", "content": "在忙呢|||怎么了", "time": "10:32"},
+                {"role": "friend", "content": "想约你吃饭", "time": "10:33"},
+                {"role": "friend", "content": "周末有空吗", "time": "10:33"},
+                {"role": "me", "content": "周末可以|||去哪吃", "time": "10:35"},
+                {"role": "me", "content": "你定吧", "time": "10:35"}
             ]
         }
     ],
@@ -13523,13 +14925,18 @@ ${loreContext}
    - 如果上面提供了【角色的关联NPC】列表，必须优先将这些NPC作为好友包含进来，并根据他们的关系和人设生成自然的聊天记录
    - 如果没有关联NPC，则根据角色人设和世界书自由生成合适的好友
    - 如果有与用户的聊天记录，用户（${myChar?.name || '用户'}）必须在好友列表中，且聊天记录要基于真实记录
-   - 每个好友要生成5-15条聊天记录（chatHistory），体现他们的关系
+   - 每个好友要生成8-15条chatHistory条目，允许同一个人连续发多条
    - chatHistory中 role为"friend"表示好友发的，"me"表示角色（${roleChar.name}）发的
+   - 每条content必须用|||分割成短句，每个短句不超过15字
 2. moments：生成3-6条朋友圈，可以是角色自己发的，也可以是好友发的
    - 要有点赞和评论，体现社交互动
 3. balance：生成一个合理的余额数字
 4. 所有内容要符合角色的性格、身份和世界观设定
-5. 聊天内容要自然、生动，体现人物关系`;
+5. 聊天内容要自然、生动，体现人物关系
+
+错误示例（禁止）：
+{"role":"friend","content":"在干嘛？好久没联系了，最近怎么样啊"} ← 多句话挤一个气泡，没用|||分割
+{"role":"friend","content":"想约你吃饭，周末有空吗"} ← 用逗号连接，应该分成两条或用|||`;
 
             // 调用AI
             const result = await callAI([
@@ -13558,6 +14965,44 @@ ${loreContext}
                 };
             }
             
+            // 🚀 后处理：拆分 chatHistory 中含 ||| 的消息为多条独立气泡
+            if (wechatData.friends && Array.isArray(wechatData.friends)) {
+                for (const friend of wechatData.friends) {
+                    if (!friend.chatHistory || !Array.isArray(friend.chatHistory)) continue;
+                    const expandedHistory = [];
+                    for (const msg of friend.chatHistory) {
+                        const content = (msg.content || '').trim();
+                        if (!content) continue;
+                        if (content.includes('|||')) {
+                            const segments = content.split('|||').map(s => s.trim()).filter(s => s.length > 0);
+                            for (const seg of segments) {
+                                expandedHistory.push({ ...msg, content: seg });
+                            }
+                        } else {
+                            expandedHistory.push(msg);
+                        }
+                    }
+                    friend.chatHistory = expandedHistory;
+                    // 更新 lastMessage 为最后一条消息
+                    if (expandedHistory.length > 0) {
+                        friend.lastMessage = expandedHistory[expandedHistory.length - 1].content;
+                    }
+                }
+            }
+            
+            // 🔧 后处理：清理朋友圈中误用的 ||| 分隔符
+            if (wechatData.moments && Array.isArray(wechatData.moments)) {
+                for (const m of wechatData.moments) {
+                    if (m.content) m.content = m.content.replace(/\|\|\|/g, ' ');
+                    if (m.comments && Array.isArray(m.comments)) {
+                        for (const c of m.comments) {
+                            if (c.content) c.content = c.content.replace(/\|\|\|/g, ' ');
+                            if (c.text) c.text = c.text.replace(/\|\|\|/g, ' ');
+                        }
+                    }
+                }
+            }
+
             // 保存到角色数据中
             roleChar.generated_wechat_data = {
                 ...wechatData,
@@ -14122,9 +15567,14 @@ ${loreContext}
                     let commentsHtml = '';
                     if (comments.length > 0) {
                         commentsHtml = comments.map(c => {
-                            return `<div style="font-size:13px; line-height:1.8;"><span style="color:#576B95; font-weight:500;">${c.name || '匿名'}</span>：${c.content || ''}</div>`;
+                            // 🔧 安全过滤：去除可能泄露的 ||| 分隔符
+                            const commentText = (c.content || c.text || '').replace(/\|\|\|/g, ' ');
+                            return `<div style="font-size:13px; line-height:1.8;"><span style="color:#576B95; font-weight:500;">${c.name || '匿名'}</span>：${commentText}</div>`;
                         }).join('');
                     }
+                    
+                    // 🔧 安全过滤：去除朋友圈正文中可能泄露的 ||| 分隔符
+                    const momentContent = (m.content || '').replace(/\|\|\|/g, ' ');
                     
                     html += `
                         <div class="moment-item" style="padding:16px; border-bottom:1px solid #f0f0f0;">
@@ -14132,7 +15582,7 @@ ${loreContext}
                                 <div style="width:44px; height:44px; border-radius:6px; flex-shrink:0; ${avatarStyle}">${(isRoleMoment && roleChar.avatar) ? '' : avatarChar}</div>
                                 <div style="margin-left:12px; flex:1; min-width:0;">
                                     <div style="font-weight:600; font-size:15px; color:#576B95; margin-bottom:6px;">${authorName}</div>
-                                    <div style="line-height:1.6; font-size:15px; color:#333; word-break:break-word;">${m.content || ''}</div>
+                                    <div style="line-height:1.6; font-size:15px; color:#333; word-break:break-word;">${momentContent}</div>
                                     <div style="font-size:12px; color:#999; margin-top:10px;">${m.timeAgo || '刚刚'}</div>
                                     ${(likesStr || commentsHtml) ? `
                                     <div style="background:#f5f5f5; padding:8px 10px; border-radius:4px; margin-top:10px;">
@@ -14372,7 +15822,7 @@ ${loreContext}
         // 设置角色的聊天记录（按账号隔离）
         // 🔧 修复数据丢失：始终从DB读取最新角色数据再保存，避免用旧 char 对象覆盖并发写入的新数据
         // 🛡️ 增强：带重试 + 错误提醒 + 脏数据标记，防止静默丢数据
-        async function setChatHistory(char, accountId, history) {
+        async function setChatHistory(char, accountId, history, options = {}) {
             // ✅ 如果用户正在查看这个聊天，自动标记新消息为已读
             if (currentChatCharId === char.id) {
                 history.forEach(m => {
@@ -14410,8 +15860,9 @@ ${loreContext}
                 
                 // 🔧 防竞态：如果DB中的历史比传入的更长，说明有并发写入（如AI正在保存回复）
                 // 此时用DB的历史作为基础，将传入history中的新消息追加上去，避免覆盖丢失
+                // ⚠️ 删除操作必须跳过此检查，否则删除的消息会被DB版本恢复
                 const dbHistory = freshChatHistoryByUser[accountId] || [];
-                if (dbHistory.length > 0 && history.length > 0 && dbHistory.length > history.length) {
+                if (!options.isDelete && dbHistory.length > 0 && history.length > 0 && dbHistory.length > history.length) {
                     // DB有更多消息 → 传入的history可能是用旧数据push了新消息
                     // 策略：取DB的完整历史 + 传入history中比DB多出来的新消息（末尾部分）
                     const lastDbMsg = dbHistory[dbHistory.length - 1];
@@ -14718,9 +16169,10 @@ ${loreContext}
                     let lastTimeStr = '';
                     const history = f.chat_history || [];
                     if (history.length > 0) {
-                        // 🔧 从后往前找到最后一条可显示的消息（跳过视频通话内容消息）
+                        // 🔧 从后往前找到最后一条可显示的消息（跳过视频通话内容消息和头像更换通知）
                         let last = null;
                         for (let li = history.length - 1; li >= 0; li--) {
+                            if (history[li].type === 'avatar_change') continue;
                             if (!history[li].isVideoCall || history[li].role === 'system') {
                                 last = history[li];
                                 break;
@@ -14841,9 +16293,10 @@ ${loreContext}
                 let lastTimeStr = '';
                 const history = getChatHistory(f, accountId);
                 if (history && history.length > 0) {
-                    // 🔧 从后往前找到最后一条可显示的消息（跳过视频通话内容消息）
+                    // 🔧 从后往前找到最后一条可显示的消息（跳过视频通话内容消息和头像更换通知）
                     let last = null;
                     for (let li = history.length - 1; li >= 0; li--) {
+                        if (history[li].type === 'avatar_change') continue;
                         if (!history[li].isVideoCall || history[li].role === 'system') {
                             last = history[li];
                             break;
@@ -15003,7 +16456,7 @@ ${loreContext}
         // 群聊置顶切换
         async function toggleGroupPin(groupId, e) {
             e.stopPropagation();
-            const group = await db.group_chats.get(groupId);
+            const group = await getCachedGroupChat(groupId);
             if (group) {
                 group.is_pinned = !group.is_pinned;
                 await safeGroupChatPut(group);
@@ -15799,7 +17252,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         
         // 添加成员到群聊
         async function addMembersToGroup(memberIds) {
-            const group = await db.group_chats.get(window.currentGroupChatId);
+            const group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group) return;
             
             // 添加新成员
@@ -15861,7 +17314,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         
         // 打开群聊窗口
         async function openGroupChatWindow(groupId) {
-            const group = await db.group_chats.get(groupId);
+            const group = await getCachedGroupChat(groupId);
             if (!group) return;
             
             // 如果是联机群聊，调用联机群聊的打开方法
@@ -15910,7 +17363,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         
         // 显示群聊详情页
         async function showGroupDetail(groupId) {
-            const group = await db.group_chats.get(groupId || window.currentGroupChatId);
+            const group = await getCachedGroupChat(groupId || window.currentGroupChatId);
             if (!group) return;
             
             document.getElementById('group-detail-page').style.display = 'flex';
@@ -16085,7 +17538,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         async function showGroupMemberManage() {
             if (!window.currentGroupChatId) return;
             
-            const group = await db.group_chats.get(window.currentGroupChatId);
+            const group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group) return;
             
             document.getElementById('group-member-manage-page').style.display = 'flex';
@@ -16209,7 +17662,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         async function showMemberActionModal(memberId, char, isAdmin, isMuted) {
             currentActionMemberId = memberId;
             
-            const group = await db.group_chats.get(window.currentGroupChatId);
+            const group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group) return;
             
             // 检查当前用户是否是群主（创建者）
@@ -16272,7 +17725,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         async function setMemberAsAdmin() {
             if (!window.currentGroupChatId || !currentActionMemberId) return;
             
-            const group = await db.group_chats.get(window.currentGroupChatId);
+            const group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group) return;
             
             // 权限检查：只有群主可以设置管理员
@@ -16305,7 +17758,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         async function removeMemberAdmin() {
             if (!window.currentGroupChatId || !currentActionMemberId) return;
             
-            const group = await db.group_chats.get(window.currentGroupChatId);
+            const group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group) return;
             
             // 权限检查：只有群主可以取消管理员
@@ -16335,7 +17788,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         async function toggleMemberMute() {
             if (!window.currentGroupChatId || !currentActionMemberId) return;
             
-            const group = await db.group_chats.get(window.currentGroupChatId);
+            const group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group) return;
             
             const isOwner = group.ownerAccountId === getCurrentAccountId();
@@ -16386,7 +17839,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         async function kickMember() {
             if (!window.currentGroupChatId || !currentActionMemberId) return;
             
-            const group = await db.group_chats.get(window.currentGroupChatId);
+            const group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group) return;
             
             const isOwner = group.ownerAccountId === getCurrentAccountId();
@@ -16565,7 +18018,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         async function saveGroupDetail() {
             if (!window.currentGroupChatId) return;
             
-            const group = await db.group_chats.get(window.currentGroupChatId);
+            const group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group) return;
             
             group.name = document.getElementById('group-detail-name').value.trim() || group.name;
@@ -16616,7 +18069,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             reader.onload = async (e) => {
                 const avatarUrl = e.target.result;
                 
-                const group = await db.group_chats.get(window.currentGroupChatId);
+                const group = await getCachedGroupChat(window.currentGroupChatId);
                 if (!group) return;
                 
                 group.avatar = avatarUrl;
@@ -16637,7 +18090,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             
             if (!confirm('确定要清空该群聊的所有聊天记录吗？（同时清除总结）')) return;
             
-            const group = await db.group_chats.get(window.currentGroupChatId);
+            const group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group) return;
             
             group.chat_history = [{
@@ -16688,7 +18141,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         
         // 移除群成员
         async function removeGroupMember(groupId, memberId) {
-            const group = await db.group_chats.get(groupId);
+            const group = await getCachedGroupChat(groupId);
             if (!group) return;
             
             group.memberIds = group.memberIds.filter(id => id !== memberId);
@@ -16711,7 +18164,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         async function showAddGroupMemberModal() {
             if (!window.currentGroupChatId) return;
             
-            const group = await db.group_chats.get(window.currentGroupChatId);
+            const group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group) return;
             
             // 复用创建群聊的弹窗逻辑
@@ -16798,7 +18251,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
         // 追加用户群聊消息到UI（优化性能，避免重新渲染整个页面）
         async function appendUserGroupMessageToUI(msg, group) {
             const body = document.getElementById('chat-body');
-            const myChar = currentMyCharId ? await db.characters.get(parseInt(currentMyCharId)) : null;
+            const myChar = currentMyCharId ? await getCachedCharacter(parseInt(currentMyCharId)) : null;
             const myNickname = group.myNickname || (myChar ? (myChar.nick || myChar.name) : '我');
             const myAvatar = myChar?.avatar || '';
             const avatarStyle = myAvatar ? `background-image:url(${myAvatar})` : 'background:#ccc';
@@ -16813,7 +18266,7 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             
             // 处理图片卡片
             if (msg.content.startsWith('[imgcard:')) {
-                const cardText = msg.content.substring(9, msg.content.length - 1).trim();
+                const cardText = stripImgcardInlineTags(msg.content.substring(9, msg.content.length - 1).trim());
                 // ✅ 如果已有 NovelAI 生成的图片，直接显示
                 if (msg.novelai_generated && msg.novelai_image) {
                     renderedContent = `<div class="img-card-bubble" style="cursor:default;">
@@ -16843,16 +18296,17 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             // 处理语音
             else if (msg.content.startsWith('[voice:')) {
                 const voiceText = msg.content.substring(7, msg.content.length - 1).trim();
-                const barCount = Math.min(Math.max(Math.ceil(voiceText.length / 3), 3), 10);
-                let bars = '';
-                for (let i = 0; i < barCount; i++) {
-                    const height = 8 + Math.random() * 12;
-                    bars += `<div style="width:3px; height:${height}px; background:#999; border-radius:2px;"></div>`;
-                }
-                renderedContent = `<div class="voice-bubble" data-text="${escapeHtml(voiceText)}" style="background:#ffe4e8; padding:10px 14px; border-radius:18px; cursor:pointer; display:flex; align-items:center; gap:8px; min-width:80px;" onclick="playVoiceBubble(this)">
-                    <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:#666;"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
-                    <div style="display:flex; align-items:center; gap:2px;">${bars}</div>
-                    <span style="font-size:12px; color:#666;">${Math.ceil(voiceText.length / 5)}"</span>
+                const duration = Math.ceil(voiceText.length / 5);
+                renderedContent = `<div class="voice-bubble" onclick="this.classList.toggle('expanded')">
+                    <div class="voice-bubble-header">
+                        <div class="voice-icon">
+                            <i></i>
+                            <i></i>
+                            <i></i>
+                        </div>
+                        <div class="voice-duration">${duration}"</div>
+                    </div>
+                    <div class="voice-text-content">${escapeHtml(voiceText)}</div>
                 </div>`;
             }
             // 普通文字
@@ -16891,10 +18345,175 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             body.scrollTop = body.scrollHeight;
         }
         
+        /**
+         * 🚀 增量追加多条群聊消息到DOM（AI回复后使用，避免全量重渲染）
+         * @param {Array} messages - 要追加的消息数组
+         * @param {Object} group - 群聊对象
+         */
+        async function appendGroupMessagesToUI(messages, group) {
+            if (!messages || messages.length === 0) return;
+            const body = document.getElementById('chat-body');
+            if (!body) return;
+            
+            const isFpGroup = !!window._fpGroupChatMode;
+            const accountId = getCurrentAccountId();
+            const myChar = currentMyCharId ? await getCachedCharacter(parseInt(currentMyCharId)) : null;
+            const myNickname = group.myNickname || (myChar ? (myChar.nick || myChar.name) : '我');
+            
+            // 批量预加载发送者角色
+            const senderIds = messages.map(m => m.senderId).filter(Boolean);
+            if (senderIds.length > 0) await preloadCharacters(senderIds);
+            
+            const fragment = document.createDocumentFragment();
+            const totalHistory = (group.chat_history || []).length;
+            
+            for (let i = 0; i < messages.length; i++) {
+                const msg = messages[i];
+                // 当前消息在 chat_history 中的索引
+                const currentIndex = totalHistory - messages.length + i;
+                
+                if (msg.role === 'system') {
+                    // 系统消息
+                    const msgDiv = document.createElement('div');
+                    msgDiv.style.marginBottom = '12px';
+                    msgDiv.className = 'group-message-row';
+                    msgDiv.dataset.msgIndex = currentIndex;
+                    const systemSpan = document.createElement('span');
+                    systemSpan.className = 'group-system-text';
+                    systemSpan.style.cssText = 'display:block; text-align:center; font-size:12px; color:#999; padding:4px 0;';
+                    systemSpan.textContent = msg.content;
+                    msgDiv.appendChild(systemSpan);
+                    bindGroupMessageEvents(systemSpan, currentIndex, true);
+                    fragment.appendChild(msgDiv);
+                    continue;
+                }
+                
+                const msgDiv = document.createElement('div');
+                msgDiv.style.marginBottom = '12px';
+                msgDiv.className = 'group-message-row';
+                msgDiv.dataset.msgIndex = currentIndex;
+                
+                const isSelf = isFpGroup ? (msg.role === 'char' && msg.senderId && myChar && msg.senderId === myChar.id) : (msg.role === 'user');
+                
+                // 🔧 增量渲染也支持特殊消息类型（语音、图片卡片等）
+                function _renderAppendContent(content, isSelfMsg, msgObj) {
+                    if (!content) return renderMessageContent(content);
+                    // 图片卡片
+                    if (content.startsWith('[imgcard:')) {
+                        const cardText = stripImgcardInlineTags(content.substring(9, content.length - 1).trim());
+                        if (msgObj && msgObj.novelai_generated && msgObj.novelai_image) {
+                            return `<div class="img-card-bubble" style="cursor:default;">
+                                <img src="${msgObj.novelai_image}" class="chat-image" style="width:200px; max-height:300px; object-fit:cover; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" />
+                                <div style="font-size:10px; color:#bbb; text-align:center; margin-top:4px; padding:0 4px;">${escapeHtml(cardText)}</div>
+                            </div>`;
+                        }
+                        return `<div class="img-card-bubble" data-text="${escapeHtml(cardText)}" data-expanded="false" onclick="showImageCardContent(this)">
+                            <div class="img-card-placeholder">
+                                <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                                <div class="img-card-hint">点击查看文字</div>
+                            </div>
+                        </div>`;
+                    }
+                    // 图片
+                    if (content.startsWith('[img:')) {
+                        const imgUrl = content.substring(5, content.length - 1).trim();
+                        return `<img src="${imgUrl}" class="chat-image" style="width:150px; height:150px; object-fit:cover; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" ${getImageErrorHandler()} />`;
+                    }
+                    // 语音
+                    if (content.startsWith('[voice:')) {
+                        const voiceText = content.substring(7, content.length - 1).trim();
+                        const duration = Math.ceil(voiceText.length / 5);
+                        return `<div class="voice-bubble" onclick="this.classList.toggle('expanded')">
+                            <div class="voice-bubble-header">
+                                <div class="voice-icon">
+                                    <i></i>
+                                    <i></i>
+                                    <i></i>
+                                </div>
+                                <div class="voice-duration">${duration}"</div>
+                            </div>
+                            <div class="voice-text-content">${escapeHtml(voiceText)}</div>
+                        </div>`;
+                    }
+                    return renderMessageContent(content);
+                }
+                
+                // 判断是否是特殊消息类型（不需要气泡包裹）
+                const isSpecialMsg = msg.content && (msg.content.startsWith('[imgcard:') || msg.content.startsWith('[img:') || msg.content.startsWith('[voice:'));
+                
+                if (isSelf) {
+                    msgDiv.classList.add('message-row', 'self');
+                    const myAvatar = myChar?.avatar || '';
+                    const avatarStyle = myAvatar ? `background-image:url(${myAvatar})` : 'background:#ccc';
+                    const renderedContent = _renderAppendContent(msg.content, true, msg);
+                    const quoteHtml = msg.quote ? `<div class="quoted-message" style="margin-bottom:6px;"><div class="quoted-message-name">${escapeHtml(msg.quote.name)}</div><div class="quoted-message-text">${escapeHtml(msg.quote.content)}</div></div>` : '';
+                    msgDiv.innerHTML = `
+                        <div class="message-avatar" style="width:32px; height:32px; border-radius:50%; ${avatarStyle}; background-size:cover; background-position:center; flex-shrink:0; margin-bottom:2px;"></div>
+                        <div style="display:flex; flex-direction:column; align-items:flex-end; max-width:70%;">
+                            <div style="font-size:12px; color:#999; margin-bottom:2px;">${myNickname}</div>
+                            <div style="display:flex; align-items:flex-end; gap:6px;">
+                                <div style="font-size:10px; color:#999;">${formatChatTime(msg.time)}</div>
+                                <div class="message-content group-msg-content" data-index="${currentIndex}">${isSpecialMsg ? '' : quoteHtml}${renderedContent}</div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    msgDiv.classList.add('message-row', 'other');
+                    let senderChar = msg.senderId ? await getCachedCharacter(msg.senderId) : null;
+                    const memberNicknames = group.memberNicknames || {};
+                    const senderName = memberNicknames[msg.senderId] || (senderChar ? (senderChar.remark || senderChar.wx_nickname || senderChar.name) : (msg.senderName || '群成员'));
+                    const senderAvatar = senderChar?.avatar || '';
+                    const avatarStyle = senderAvatar ? `background-image:url(${senderAvatar})` : 'background:#ccc';
+                    const renderedContent = _renderAppendContent(msg.content, false, msg);
+                    const quoteHtml = msg.quote ? `<div class="quoted-message" style="margin-bottom:6px;"><div class="quoted-message-name">${escapeHtml(msg.quote.name)}</div><div class="quoted-message-text">${escapeHtml(msg.quote.content)}</div></div>` : '';
+                    msgDiv.innerHTML = `
+                        <div class="message-avatar" style="width:32px; height:32px; border-radius:50%; ${avatarStyle}; background-size:cover; background-position:center; flex-shrink:0; margin-bottom:2px;"></div>
+                        <div style="display:flex; flex-direction:column; max-width:70%;">
+                            <div style="font-size:12px; color:#999; margin-bottom:2px;">${senderName}</div>
+                            <div style="display:flex; align-items:flex-end; gap:6px;">
+                                <div class="message-content group-msg-content" data-index="${currentIndex}">${isSpecialMsg ? '' : quoteHtml}${renderedContent}</div>
+                                <div style="font-size:10px; color:#999;">${formatChatTime(msg.time)}</div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                const contentEl = msgDiv.querySelector('.group-msg-content');
+                if (contentEl) bindGroupMessageEvents(contentEl, currentIndex);
+                
+                fragment.appendChild(msgDiv);
+            }
+            
+            body.appendChild(fragment);
+            body.scrollTop = body.scrollHeight;
+            groupRenderedCount += messages.length;
+        }
+        
         // 渲染群聊消息
+        // 🚀 renderGroupChatBody 防抖：短时间内多次调用只执行最后一次
+        let _renderGroupChatBodyTimer = null;
+        let _renderGroupChatBodyResolve = null;
+        
         async function renderGroupChatBody(group) {
+            // 防抖：100ms 内多次调用只执行最后一次
+            if (_renderGroupChatBodyTimer) {
+                clearTimeout(_renderGroupChatBodyTimer);
+            }
+            return new Promise((resolve) => {
+                _renderGroupChatBodyResolve = resolve;
+                _renderGroupChatBodyTimer = setTimeout(async () => {
+                    _renderGroupChatBodyTimer = null;
+                    await _renderGroupChatBodyImpl(group);
+                    if (_renderGroupChatBodyResolve) _renderGroupChatBodyResolve();
+                }, 80);
+            });
+        }
+        
+        async function _renderGroupChatBodyImpl(group) {
             const body = document.getElementById('chat-body');
             body.innerHTML = '';
+            groupRenderedCount = 0; // 🚀 重置群聊渲染计数
+            isLoadingMoreGroupMessages = false; // 🔧 重置加载锁
             
             // ✅ 修复：重置私聊渲染缓存，防止切回私聊时因缓存命中而跳过渲染（导致私聊显示群聊内容）
             lastRenderedCharId = null;
@@ -16907,23 +18526,49 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
             history = [...history].sort((a, b) => (a.time || 0) - (b.time || 0));
             
             const accountId = getCurrentAccountId();
-            const myChar = currentMyCharId ? await db.characters.get(parseInt(currentMyCharId)) : null;
+            const myChar = currentMyCharId ? await getCachedCharacter(parseInt(currentMyCharId)) : null;
             
-            // 获取我的群昵称
-            const myNickname = group.myNickname || (myChar ? (myChar.nick || myChar.name) : '我');
+            // ★ fp群聊模式：角色视角查看群聊
+            const isFpGroup = !!window._fpGroupChatMode;
+            const fpGroupRoleId = isFpGroup ? window._fpRoleCharId : null;
+            let fpRoleChar = null;
+            if (isFpGroup && fpGroupRoleId) {
+                fpRoleChar = await db.characters.get(fpGroupRoleId);
+            }
             
-            // 预加载所有成员信息（包括已退群的成员，确保历史消息能正确显示）
+            // 获取我的群昵称（fp模式下使用角色的名字）
+            const myNickname = isFpGroup 
+                ? (fpRoleChar ? (fpRoleChar.nick || fpRoleChar.name) : '角色')
+                : (group.myNickname || (myChar ? (myChar.nick || myChar.name) : '我'));
+            
+            // fp模式下"我的头像"是角色的头像
+            const fpMyAvatar = isFpGroup 
+                ? (window._fpRoleAvatar || fpRoleChar?.avatar || '')
+                : null;
+            
+            // 🚀 批量预加载所有成员信息（避免循环内 N+1 查DB）
+            const allMemberIds = [...(group.memberIds || [])];
+            for (const lm of (group.leftMembers || [])) {
+                if (!allMemberIds.includes(lm.id)) allMemberIds.push(lm.id);
+            }
+            await preloadCharacters(allMemberIds);
+            
             const memberMap = {};
             for (const memberId of group.memberIds) {
-                const char = await db.characters.get(memberId);
+                const char = await getCachedCharacter(memberId);
                 if (char) memberMap[memberId] = char;
             }
             // 加载已退群成员信息（用于显示退群前的历史消息）
             for (const lm of (group.leftMembers || [])) {
                 if (!memberMap[lm.id]) {
-                    const char = await db.characters.get(lm.id);
+                    const char = await getCachedCharacter(lm.id);
                     if (char) memberMap[lm.id] = char;
                 }
+            }
+            
+            // ★ fp模式下，也将用户角色加入memberMap（用于显示用户的头像和名字）
+            if (isFpGroup && myChar && !memberMap[myChar.id]) {
+                memberMap[myChar.id] = myChar;
             }
             
             // 辅助函数：渲染群聊消息内容（支持特殊格式）
@@ -17003,7 +18648,16 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 
                 // 处理图片卡片消息 [imgcard:文字内容] - 使用与私聊相同的样式
                 if (content.startsWith('[imgcard:')) {
-                    const cardText = content.substring(9, content.length - 1).trim();
+                    const cardText = stripImgcardInlineTags(content.substring(9, content.length - 1).trim());
+                    // ✅ 如果已有 NovelAI 生成的图片，直接显示图片
+                    if (msgObj && msgObj.novelai_generated && msgObj.novelai_image) {
+                        return `<div class="img-card-bubble" style="cursor:default;">
+                            <img src="${msgObj.novelai_image}" class="chat-image" 
+                                 style="width:200px; max-height:300px; object-fit:cover; border-radius:8px; cursor:pointer;" 
+                                 onclick="showFullImage(this.src)" />
+                            <div style="font-size:10px; color:#bbb; text-align:center; margin-top:4px; padding:0 4px;">${escapeHtml(cardText)}</div>
+                        </div>`;
+                    }
                     return `<div class="img-card-bubble" data-text="${escapeHtml(cardText)}" data-expanded="false" onclick="showImageCardContent(this)">
                         <div class="img-card-placeholder">
                             <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -17025,17 +18679,17 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 // 处理语音消息 [voice:文字内容]
                 if (content.startsWith('[voice:')) {
                     const voiceText = content.substring(7, content.length - 1).trim();
-                    const bgColor = isSelf ? '#ffe4e8' : '#f2f2f7';
-                    const barCount = Math.min(Math.max(Math.ceil(voiceText.length / 3), 3), 10);
-                    let bars = '';
-                    for (let i = 0; i < barCount; i++) {
-                        const height = 8 + Math.random() * 12;
-                        bars += `<div style="width:3px; height:${height}px; background:#999; border-radius:2px;"></div>`;
-                    }
-                    return `<div class="voice-bubble" data-text="${escapeHtml(voiceText)}" style="background:${bgColor}; padding:10px 14px; border-radius:18px; cursor:pointer; display:flex; align-items:center; gap:8px; min-width:80px;" onclick="playVoiceBubble(this)">
-                        <svg viewBox="0 0 24 24" style="width:16px; height:16px; fill:#666;"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
-                        <div style="display:flex; align-items:center; gap:2px;">${bars}</div>
-                        <span style="font-size:12px; color:#666;">${Math.ceil(voiceText.length / 5)}"</span>
+                    const duration = Math.ceil(voiceText.length / 5);
+                    return `<div class="voice-bubble" onclick="this.classList.toggle('expanded')">
+                        <div class="voice-bubble-header">
+                            <div class="voice-icon">
+                                <i></i>
+                                <i></i>
+                                <i></i>
+                            </div>
+                            <div class="voice-duration">${duration}"</div>
+                        </div>
+                        <div class="voice-text-content">${escapeHtml(voiceText)}</div>
                     </div>`;
                 }
                 
@@ -17043,13 +18697,49 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 return renderMessageContent(content);
             }
             
-            let msgIndex = 0;
-            for (const msg of history) {
+            // 🚀 优化：只渲染最近的50条消息（和私聊保持一致）
+            const groupRenderWindow = 50;
+            const totalGroupMessages = history.length;
+            const groupStartIndex = Math.max(0, totalGroupMessages - groupRenderWindow);
+            const groupMessagesToRender = history.slice(groupStartIndex);
+            groupRenderedCount = groupMessagesToRender.length;
+
+            // 🚀 使用 DocumentFragment 批量插入，避免逐条 appendChild 触发多次 reflow
+            const fragment = document.createDocumentFragment();
+            
+            // 如果还有更多消息，添加"加载更多"按钮
+            if (groupStartIndex > 0) {
+                const loadMoreBtn = document.createElement('div');
+                loadMoreBtn.id = 'group-load-more-btn';
+                loadMoreBtn.style.cssText = 'text-align:center; padding:12px; margin:8px 0;';
+                loadMoreBtn.innerHTML = `<button onclick="loadMoreGroupMessages()" style="background:#f0f0f0; border:none; padding:8px 20px; border-radius:16px; color:#666; font-size:13px; cursor:pointer;">加载更早的消息 (${groupStartIndex}条)</button>`;
+                fragment.appendChild(loadMoreBtn);
+            }
+
+            let msgIndex = groupStartIndex;
+            for (const msg of groupMessagesToRender) {
                 const currentIndex = msgIndex;
                 const msgDiv = document.createElement('div');
                 msgDiv.style.marginBottom = '12px';
                 msgDiv.className = 'group-message-row';
                 msgDiv.dataset.msgIndex = currentIndex;
+                
+                // ★ fp群聊模式：判断消息是否为"自己"发的
+                // 正常模式：msg.role === 'user' 是自己
+                // fp模式：msg.role === 'char' && msg.senderId === fpGroupRoleId 是角色自己
+                let isSelfMsg = false;
+                if (isFpGroup) {
+                    isSelfMsg = (msg.role === 'char' && msg.senderId === fpGroupRoleId);
+                } else {
+                    isSelfMsg = (msg.role === 'user');
+                }
+                
+                // 头像更换通知：不在UI显示，仅保留在聊天记录中供AI读取
+                if (msg.type === 'avatar_change') {
+                    msgDiv.style.display = 'none';
+                    container.appendChild(msgDiv);
+                    continue;
+                }
                 
                 if (msg.role === 'system') {
                     // 系统消息（支持长按删除和多选）
@@ -17077,12 +18767,13 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                         }
                     };
                     msgIndex++;
-                } else if (msg.role === 'user') {
-                    // 🔧 统一类名：群聊也使用 message-row + self，样式由CSS统一控制
+                } else if (isSelfMsg) {
+                    // ★ "我"的消息（正常模式=用户，fp模式=角色自己）
                     msgDiv.classList.add('message-row', 'self');
                     
-                    const myAvatar = myChar?.avatar || '';
-                    const avatarStyle = myAvatar ? `background-image:url(${myAvatar})` : 'background:#ccc';
+                    // fp模式下用角色头像，正常模式用用户头像
+                    const selfAvatar = isFpGroup ? (fpMyAvatar || '') : (myChar?.avatar || '');
+                    const avatarStyle = selfAvatar ? `background-image:url(${selfAvatar})` : 'background:#ccc';
                     
                     // 判断是否是特殊消息类型（不需要气泡包裹）
                     const isSpecialMsg = msg.content.startsWith('[imgcard:') || msg.content.startsWith('[img:') || msg.content.startsWith('[voice:') || msg.type === 'redpacket' || msg.type === 'transfer' || msg.type === 'shopPayRequest' || msg.content.startsWith('[emei_order]') || msg.content.startsWith('[emei_share]') || msg.content.startsWith('[payment_request]') || msg.content.startsWith('[couple_avatar_card]');
@@ -17116,23 +18807,37 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     }
                     msgIndex++;
                 } else {
-                    // 🔧 统一类名：群聊也使用 message-row + other，样式由CSS统一控制
+                    // ★ 其他人的消息（正常模式=角色，fp模式=用户和其他角色）
                     msgDiv.classList.add('message-row', 'other');
                     
-                    // 群成员发的消息
-                    let senderChar = msg.senderId ? memberMap[msg.senderId] : null;
+                    // 群成员发的消息 - 确定发送者信息
+                    let senderChar = null;
+                    let senderName = '';
+                    let senderAvatar = '';
                     
-                    // 🔧 如果memberMap中找不到（可能已被踢出群），尝试从数据库获取
-                    if (!senderChar && msg.senderId) {
-                        try {
-                            senderChar = await db.characters.get(msg.senderId);
-                        } catch(e) {}
+                    if (isFpGroup && msg.role === 'user') {
+                        // ★ fp模式下用户发的消息 → 显示为其他人（左侧），用用户头像和名字
+                        senderChar = myChar;
+                        const memberNicknames = group.memberNicknames || {};
+                        senderName = group.myNickname || (myChar ? (myChar.nick || myChar.name) : '用户');
+                        senderAvatar = myChar?.avatar || '';
+                    } else {
+                        // 角色成员发的消息
+                        senderChar = msg.senderId ? memberMap[msg.senderId] : null;
+                        
+                        // 🔧 如果memberMap中找不到（可能已被踢出群），尝试从缓存获取
+                        if (!senderChar && msg.senderId) {
+                            try {
+                                senderChar = await getCachedCharacter(msg.senderId);
+                            } catch(e) {}
+                        }
+                        
+                        // 优先使用群昵称，其次用备注名，最后用消息中冗余存储的名字
+                        const memberNicknames = group.memberNicknames || {};
+                        senderName = memberNicknames[msg.senderId] || (senderChar ? (senderChar.remark || senderChar.wx_nickname || senderChar.name) : (msg.senderName || '群成员'));
+                        senderAvatar = senderChar?.avatar || '';
                     }
                     
-                    // 优先使用群昵称，其次用备注名，最后用消息中冗余存储的名字
-                    const memberNicknames = group.memberNicknames || {};
-                    const senderName = memberNicknames[msg.senderId] || (senderChar ? (senderChar.remark || senderChar.wx_nickname || senderChar.name) : (msg.senderName || '群成员'));
-                    const senderAvatar = senderChar?.avatar || '';
                     const avatarStyle = senderAvatar ? `background-image:url(${senderAvatar})` : 'background:#ccc';
                     
                     // 判断是否是特殊消息类型（不需要气泡包裹）
@@ -17168,9 +18873,9 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     msgIndex++;
                 }
                 
-                body.appendChild(msgDiv);
+                fragment.appendChild(msgDiv);
                 
-                // 绑定长按事件（非系统消息）
+                // 绑定长按事件（非系统消息）——在 fragment 中也可以绑定
                 if (msg.role !== 'system') {
                     const contentEl = msgDiv.querySelector('.group-msg-content');
                     if (contentEl) {
@@ -17179,48 +18884,383 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                 }
             }
             
+            // 🚀 一次性插入所有消息DOM，只触发一次 reflow
+            body.appendChild(fragment);
+            
             // 滚动到底部
             body.scrollTop = body.scrollHeight;
         }
         
-        // 群聊消息长按事件绑定
-        function bindGroupMessageEvents(element, index, isSystemMsg) {
-            let touchStartEvent = null;
-            let _grpTouchStartX = 0;
-            let _grpTouchStartY = 0;
+        // 🚀 加载更多群聊消息（懒加载优化，和私聊的 loadMoreMessages 一致）
+        async function loadMoreGroupMessages() {
+            if (isLoadingMoreGroupMessages) return;
+            if (!window.currentGroupChatId) return;
+            
+            isLoadingMoreGroupMessages = true;
+            
+            try {
+                const group = await getCachedGroupChat(window.currentGroupChatId);
+                if (!group) {
+                    console.warn('[loadMoreGroupMessages] 群聊不存在:', window.currentGroupChatId);
+                    return;
+                }
+                const body = document.getElementById('chat-body');
+                if (!body) return;
+                
+                let history = group.chat_history || [];
+                history = [...history].sort((a, b) => (a.time || 0) - (b.time || 0));
+                
+                // 计算要加载的消息范围
+                const renderWindow = 50;
+                const totalMessages = history.length;
+                const nextSliceEnd = totalMessages - groupRenderedCount;
+                
+                if (nextSliceEnd <= 0) {
+                    const oldBtn = document.getElementById('group-load-more-btn');
+                    if (oldBtn) oldBtn.remove();
+                    return;
+                }
+                
+                const nextSliceStart = Math.max(0, nextSliceEnd - renderWindow);
+                const messagesToPrepend = history.slice(nextSliceStart, nextSliceEnd);
+                
+                if (messagesToPrepend.length === 0) return;
+                
+                // 保存当前滚动位置
+                const oldScrollHeight = body.scrollHeight;
+                
+                // 移除旧的"加载更多"按钮
+                const oldLoadMoreBtn = document.getElementById('group-load-more-btn');
+                if (oldLoadMoreBtn) oldLoadMoreBtn.remove();
+                
+                // 如果还有更多消息，添加新的"加载更多"按钮
+                if (nextSliceStart > 0) {
+                    const loadMoreBtn = document.createElement('div');
+                    loadMoreBtn.id = 'group-load-more-btn';
+                    loadMoreBtn.style.cssText = 'text-align:center; padding:12px; margin:8px 0;';
+                    loadMoreBtn.innerHTML = `<button onclick="loadMoreGroupMessages()" style="background:#f0f0f0; border:none; padding:8px 20px; border-radius:16px; color:#666; font-size:13px; cursor:pointer;">加载更早的消息 (${nextSliceStart}条)</button>`;
+                    body.insertBefore(loadMoreBtn, body.firstChild);
+                }
+                
+                // 🚀 批量预加载成员信息（使用缓存）
+                const accountId = getCurrentAccountId();
+                const myChar = currentMyCharId ? await getCachedCharacter(parseInt(currentMyCharId)) : null;
+                const myNickname = group.myNickname || (myChar ? (myChar.nick || myChar.name) : '我');
+                const allIds = [...(group.memberIds || [])];
+                for (const lm of (group.leftMembers || [])) {
+                    if (!allIds.includes(lm.id)) allIds.push(lm.id);
+                }
+                await preloadCharacters(allIds);
+                const memberMap = {};
+                for (const memberId of group.memberIds) {
+                    const char = await getCachedCharacter(memberId);
+                    if (char) memberMap[memberId] = char;
+                }
+                for (const lm of (group.leftMembers || [])) {
+                    if (!memberMap[lm.id]) {
+                        const char = await getCachedCharacter(lm.id);
+                        if (char) memberMap[lm.id] = char;
+                    }
+                }
+                
+                // 复用 renderGroupChatBody 中的消息内容渲染函数
+                function renderGroupMsgContent(content, isSelf, msgType, msgObj) {
+                    if (!content) return '';
+                    if (msgType === 'redpacket') {
+                        try {
+                            const data = JSON.parse(content);
+                            const isAllClaimed = (data.claimed?.length || 0) >= data.count;
+                            return `<div class="redpacket-card" onclick="showRedPacketDetail('${data.id}')" style="width:220px; background:#fff; border-radius:12px; overflow:hidden; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.08); border:1px solid #eee;">
+                                <div style="padding:14px 16px; display:flex; align-items:center; gap:12px;">
+                                    <div style="width:40px; height:40px; background:#fff; border-radius:10px; display:flex; align-items:center; justify-content:center; border:1px solid #eee;">
+                                        <svg viewBox="0 0 24 24" style="width:20px; height:20px; stroke:#666; fill:none; stroke-width:1.5;"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18"/><circle cx="12" cy="15" r="2"/></svg>
+                                    </div>
+                                    <div style="flex:1;">
+                                        <div style="font-size:14px; color:#333; margin-bottom:2px;">${escapeHtml(data.wish || '恭喜发财')}</div>
+                                        <div style="font-size:11px; color:#999;">${data.redpacketType === 'lucky' ? '拼手气红包' : '普通红包'}</div>
+                                    </div>
+                                </div>
+                                <div style="padding:8px 16px; display:flex; justify-content:space-between; align-items:center; border-top:1px solid #eee;">
+                                    <span style="font-size:11px; color:#999;">红包</span>
+                                    <span style="font-size:11px; color:#999;">${isAllClaimed ? '已领完' : `${data.claimed?.length || 0}/${data.count}已领`}</span>
+                                </div>
+                            </div>`;
+                        } catch(e) { return content; }
+                    }
+                    if (msgType === 'transfer') {
+                        try {
+                            const data = JSON.parse(content);
+                            const targetHint = data.targetName ? `转给 ${data.targetName}` : '转账';
+                            const msgId = (msgObj && msgObj.id) || ('trans_' + (msgObj && msgObj.time || Date.now()));
+                            return `<div class="redpacket-card" onclick="receiveGroupTransfer('${msgId}')" style="width:220px; background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.08); border:1px solid #eee; cursor:pointer;">
+                                <div style="padding:14px 16px; display:flex; align-items:center; gap:12px;">
+                                    <div style="width:40px; height:40px; background:#fff; border-radius:10px; display:flex; align-items:center; justify-content:center; border:1px solid #eee;">
+                                        <svg viewBox="0 0 24 24" style="width:20px; height:20px; stroke:#666; fill:none; stroke-width:1.5;"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+                                    </div>
+                                    <div style="flex:1;">
+                                        <div style="font-size:18px; font-weight:600; color:#333; margin-bottom:2px;">¥${data.amount}</div>
+                                        <div style="font-size:12px; color:#999;">${escapeHtml(data.desc || '转账')}</div>
+                                    </div>
+                                </div>
+                                <div style="padding:8px 16px; display:flex; justify-content:space-between; align-items:center; border-top:1px solid #eee;">
+                                    <span style="font-size:11px; color:#999;">${targetHint}</span>
+                                    <span style="font-size:11px; color:#999;">${data.status === 'received' ? '已收款' : '待收款'}</span>
+                                </div>
+                            </div>`;
+                        } catch(e) { return content; }
+                    }
+                    if (msgType === 'shopPayRequest') {
+                        try {
+                            const sd = JSON.parse(content);
+                            const amt = parseFloat(sd.amount || 0).toFixed(2);
+                            const itm = sd.items || '购物商品';
+                            let title = '代付请求'; let st = '待确认'; let cv = '';
+                            if (sd.isShare) { title = '购物分享'; st = isSelf ? '已分享' : '来自好友'; cv = 'share'; }
+                            else if (sd.isGift) { title = '购物礼物'; st = isSelf ? '已赠送' : '已收到'; cv = 'gift'; }
+                            else { if (sd.status === 'paid') { st = '已代付'; cv = 'done'; } else if (sd.status === 'declined') { st = '已拒绝'; cv = 'declined'; } }
+                            let meta = '';
+                            if (sd.buyForName && sd.installmentInfo) meta = 'To: ' + sd.buyForName + ' · ' + sd.installmentInfo;
+                            else if (sd.buyForName) meta = 'To: ' + sd.buyForName;
+                            else if (sd.installmentInfo) meta = sd.installmentInfo;
+                            return `<div class="spr-card ${cv}"><div class="spr-top"><div class="spr-badge">${title}</div></div><div class="spr-body"><div class="spr-amount-row"><span class="spr-currency">¥</span><span class="spr-amount-num">${amt}</span></div><div class="spr-items-text">${escapeHtml(itm)}</div>${meta ? '<div class="spr-meta">' + escapeHtml(meta) + '</div>' : ''}</div><div class="spr-divider"></div><div class="spr-bottom"><span class="spr-status-text">${st}</span></div></div>`;
+                        } catch(e) { return content; }
+                    }
+                    if (content.startsWith('[imgcard:')) {
+                        const cardText = stripImgcardInlineTags(content.substring(9, content.length - 1).trim());
+                        return `<div class="img-card-bubble" data-text="${escapeHtml(cardText)}" data-expanded="false" onclick="showImageCardContent(this)">
+                            <div class="img-card-placeholder">
+                                <svg class="img-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                                <div class="img-card-hint">点击查看文字</div>
+                            </div>
+                        </div>`;
+                    }
+                    if (content.startsWith('[img:')) {
+                        const imgUrl = content.substring(5, content.length - 1).trim();
+                        return `<img src="${imgUrl}" class="chat-image" style="width:150px; height:150px; object-fit:cover; border-radius:8px; cursor:pointer;" onclick="showFullImage(this.src)" ${getImageErrorHandler()} />`;
+                    }
+                    if (content.startsWith('[voice:')) {
+                        const voiceText = content.substring(7, content.length - 1).trim();
+                        const duration = Math.ceil(voiceText.length / 5);
+                        return `<div class="voice-bubble" onclick="this.classList.toggle('expanded')">
+                            <div class="voice-bubble-header">
+                                <div class="voice-icon">
+                                    <i></i>
+                                    <i></i>
+                                    <i></i>
+                                </div>
+                                <div class="voice-duration">${duration}"</div>
+                            </div>
+                            <div class="voice-text-content">${escapeHtml(voiceText)}</div>
+                        </div>`;
+                    }
+                    return renderMessageContent(content);
+                }
+                
+                // 构建消息 DOM
+                const fragment = document.createDocumentFragment();
+                const memberNicknames = group.memberNicknames || {};
+                
+                for (let i = 0; i < messagesToPrepend.length; i++) {
+                    const msg = messagesToPrepend[i];
+                    const currentIndex = nextSliceStart + i;
+                    const msgDiv = document.createElement('div');
+                    msgDiv.style.marginBottom = '12px';
+                    msgDiv.className = 'group-message-row';
+                    msgDiv.dataset.msgIndex = currentIndex;
+                    
+                    // 头像更换通知：不在UI显示
+                    if (msg.type === 'avatar_change') {
+                        msgDiv.style.display = 'none';
+                        container.appendChild(msgDiv);
+                        continue;
+                    }
+                    
+                    if (msg.role === 'system') {
+                        msgDiv.style.textAlign = 'center';
+                        msgDiv.style.position = 'relative';
+                        const checkbox = document.createElement('div');
+                        checkbox.className = 'msg-checkbox';
+                        checkbox.style.cssText = 'position:absolute; left:8px; top:50%; transform:translateY(-50%); width:22px; height:22px; border:2px solid #ccc; border-radius:50%; display:none; align-items:center; justify-content:center; cursor:pointer; z-index:10;';
+                        msgDiv.appendChild(checkbox);
+                        const systemSpan = document.createElement('span');
+                        systemSpan.className = 'group-system-msg-content';
+                        systemSpan.style.cssText = 'background:#fff; color:#999; font-size:12px; padding:4px 12px; border-radius:4px; border:1px solid #ddd; display:inline-block;';
+                        systemSpan.textContent = msg.content;
+                        msgDiv.appendChild(systemSpan);
+                        bindGroupMessageEvents(systemSpan, currentIndex, true);
+                        msgDiv.onclick = (e) => { if (isSelectionMode) handleGroupRowClick(currentIndex, e); };
+                    } else if (msg.role === 'user') {
+                        msgDiv.classList.add('message-row', 'self');
+                        const myAvatar = myChar?.avatar || '';
+                        const avatarStyle = myAvatar ? `background-image:url(${myAvatar})` : 'background:#ccc';
+                        const isSpecialMsg = msg.content.startsWith('[imgcard:') || msg.content.startsWith('[img:') || msg.content.startsWith('[voice:') || msg.type === 'redpacket' || msg.type === 'transfer' || msg.type === 'shopPayRequest' || msg.content.startsWith('[emei_order]') || msg.content.startsWith('[emei_share]') || msg.content.startsWith('[payment_request]') || msg.content.startsWith('[couple_avatar_card]');
+                        const renderedContent = renderGroupMsgContent(msg.content, true, msg.type, msg);
+                        if (isSpecialMsg) {
+                            msgDiv.innerHTML = `
+                                <div class="message-avatar" style="width:32px; height:32px; border-radius:50%; ${avatarStyle}; background-size:cover; background-position:center; flex-shrink:0; margin-bottom:2px;"></div>
+                                <div style="display:flex; flex-direction:column; align-items:flex-end; max-width:70%;">
+                                    <div style="font-size:12px; color:#999; margin-bottom:2px;">${myNickname}</div>
+                                    <div style="display:flex; align-items:flex-end; gap:6px;">
+                                        <div style="font-size:10px; color:#999;">${formatChatTime(msg.time)}</div>
+                                        <div class="message-content group-msg-content" data-index="${currentIndex}">${renderedContent}</div>
+                                    </div>
+                                </div>`;
+                        } else {
+                            const quoteHtml = msg.quote ? `<div class="quoted-message" style="margin-bottom:6px;"><div class="quoted-message-name">${escapeHtml(msg.quote.name)}</div><div class="quoted-message-text">${escapeHtml(msg.quote.content)}</div></div>` : '';
+                            msgDiv.innerHTML = `
+                                <div class="message-avatar" style="width:32px; height:32px; border-radius:50%; ${avatarStyle}; background-size:cover; background-position:center; flex-shrink:0; margin-bottom:2px;"></div>
+                                <div style="display:flex; flex-direction:column; align-items:flex-end; max-width:70%;">
+                                    <div style="font-size:12px; color:#999; margin-bottom:2px;">${myNickname}</div>
+                                    <div style="display:flex; align-items:flex-end; gap:6px;">
+                                        <div style="font-size:10px; color:#999;">${formatChatTime(msg.time)}</div>
+                                        <div class="message-content group-msg-content" data-index="${currentIndex}">${quoteHtml}${renderedContent}</div>
+                                    </div>
+                                </div>`;
+                        }
+                    } else {
+                        msgDiv.classList.add('message-row', 'other');
+                        let senderChar = msg.senderId ? memberMap[msg.senderId] : null;
+                        if (!senderChar && msg.senderId) {
+                            try { senderChar = await db.characters.get(msg.senderId); } catch(e) {}
+                        }
+                        const senderName = memberNicknames[msg.senderId] || (senderChar ? (senderChar.remark || senderChar.wx_nickname || senderChar.name) : (msg.senderName || '群成员'));
+                        const senderAvatar = senderChar?.avatar || '';
+                        const avatarStyle = senderAvatar ? `background-image:url(${senderAvatar})` : 'background:#ccc';
+                        const isSpecialMsg = msg.content.startsWith('[imgcard:') || msg.content.startsWith('[img:') || msg.content.startsWith('[voice:') || msg.type === 'redpacket' || msg.type === 'transfer' || msg.type === 'shopPayRequest' || msg.content.startsWith('[emei_order]') || msg.content.startsWith('[emei_share]') || msg.content.startsWith('[payment_request]') || msg.content.startsWith('[couple_avatar_card]');
+                        const renderedContent = renderGroupMsgContent(msg.content, false, msg.type, msg);
+                        const quoteHtml = msg.quote ? `<div class="quoted-message" style="margin-bottom:6px;"><div class="quoted-message-name">${escapeHtml(msg.quote.name)}</div><div class="quoted-message-text">${escapeHtml(msg.quote.content)}</div></div>` : '';
+                        if (isSpecialMsg) {
+                            msgDiv.innerHTML = `
+                                <div class="message-avatar" style="width:32px; height:32px; border-radius:50%; ${avatarStyle}; background-size:cover; background-position:center; flex-shrink:0; margin-bottom:2px;"></div>
+                                <div style="display:flex; flex-direction:column; max-width:70%;">
+                                    <div style="font-size:12px; color:#999; margin-bottom:2px;">${senderName}</div>
+                                    <div style="display:flex; align-items:flex-end; gap:6px;">
+                                        <div class="message-content group-msg-content" data-index="${currentIndex}">${renderedContent}</div>
+                                        <div style="font-size:10px; color:#999;">${formatChatTime(msg.time)}</div>
+                                    </div>
+                                </div>`;
+                        } else {
+                            msgDiv.innerHTML = `
+                                <div class="message-avatar" style="width:32px; height:32px; border-radius:50%; ${avatarStyle}; background-size:cover; background-position:center; flex-shrink:0; margin-bottom:2px;"></div>
+                                <div style="display:flex; flex-direction:column; max-width:70%;">
+                                    <div style="font-size:12px; color:#999; margin-bottom:2px;">${senderName}</div>
+                                    <div style="display:flex; align-items:flex-end; gap:6px;">
+                                        <div class="message-content group-msg-content" data-index="${currentIndex}">${quoteHtml}${renderedContent}</div>
+                                        <div style="font-size:10px; color:#999;">${formatChatTime(msg.time)}</div>
+                                    </div>
+                                </div>`;
+                        }
+                    }
+                    
+                    fragment.appendChild(msgDiv);
+                    
+                    // 绑定长按事件（非系统消息）
+                    if (msg.role !== 'system') {
+                        const contentEl = msgDiv.querySelector('.group-msg-content');
+                        if (contentEl) bindGroupMessageEvents(contentEl, currentIndex);
+                    }
+                }
+                
+                // 插入到顶部（"加载更多"按钮之后）
+                const firstMessage = body.querySelector('.group-message-row');
+                if (firstMessage) {
+                    body.insertBefore(fragment, firstMessage);
+                } else {
+                    body.appendChild(fragment);
+                }
+                
+                // 恢复滚动位置
+                const newScrollHeight = body.scrollHeight;
+                body.scrollTop = newScrollHeight - oldScrollHeight;
+                
+                // 更新已渲染计数
+                groupRenderedCount += messagesToPrepend.length;
+                
+                console.log(`[loadMoreGroupMessages] 加载了 ${messagesToPrepend.length} 条消息，总计已渲染 ${groupRenderedCount} 条`);
+            } catch (err) {
+                console.error('[loadMoreGroupMessages] 加载历史消息出错:', err);
+            } finally {
+                isLoadingMoreGroupMessages = false;
+            }
+        }
+        
+        // 暴露到全局作用域，供 HTML onclick 使用
+        window.loadMoreGroupMessages = loadMoreGroupMessages;
+        
+        // ==================== 🚀 群聊消息事件委托（性能优化） ====================
+        // 使用事件委托：只在 chat-body 上绑定一次事件，替代每条消息绑定 7 个监听器
+        // 解决：消息越多监听器越多 → 内存泄漏 → 页面崩溃 的问题
+        
+        let _grpDelegateTouchStart = null;
+        let _grpDelegateStartX = 0;
+        let _grpDelegateStartY = 0;
+        let _grpDelegateTarget = null;
+        let _grpDelegateIndex = -1;
+        let _grpDelegateIsSystem = false;
+        let _grpDelegateInitialized = false;
+        
+        /**
+         * 从事件目标向上查找可长按的群聊消息元素
+         */
+        function _findGroupMsgTarget(target) {
+            // 查找 .group-msg-content 或 .group-system-text
+            const contentEl = target.closest('.group-msg-content');
+            if (contentEl) {
+                return { el: contentEl, index: parseInt(contentEl.dataset.index), isSystem: false };
+            }
+            const systemEl = target.closest('.group-system-text');
+            if (systemEl) {
+                return { el: systemEl, index: parseInt(systemEl.dataset.msgIndex || systemEl.closest('.group-message-row')?.dataset.msgIndex), isSystem: true };
+            }
+            return null;
+        }
+        
+        /**
+         * 初始化群聊消息事件委托（只调用一次）
+         */
+        function initGroupMessageDelegation() {
+            if (_grpDelegateInitialized) return;
+            const body = document.getElementById('chat-body');
+            if (!body) return;
+            _grpDelegateInitialized = true;
             
             const startHandler = (e) => {
                 if (isSelectionMode) return;
+                const info = _findGroupMsgTarget(e.target);
+                if (!info) return;
+                
                 isLongPress = false;
-                touchStartEvent = e;
-                // 记录起始触摸坐标
+                _grpDelegateTouchStart = e;
+                _grpDelegateTarget = info.el;
+                _grpDelegateIndex = info.index;
+                _grpDelegateIsSystem = info.isSystem;
+                
                 if (e.touches && e.touches[0]) {
-                    _grpTouchStartX = e.touches[0].clientX;
-                    _grpTouchStartY = e.touches[0].clientY;
+                    _grpDelegateStartX = e.touches[0].clientX;
+                    _grpDelegateStartY = e.touches[0].clientY;
                 } else {
-                    _grpTouchStartX = e.clientX || 0;
-                    _grpTouchStartY = e.clientY || 0;
+                    _grpDelegateStartX = e.clientX || 0;
+                    _grpDelegateStartY = e.clientY || 0;
                 }
                 longPressTimer = setTimeout(() => {
                     isLongPress = true;
-                    // 长按触发时阻止浏览器后续默认行为
                     try {
-                        if (touchStartEvent && touchStartEvent.cancelable) {
-                            touchStartEvent.preventDefault();
+                        if (_grpDelegateTouchStart && _grpDelegateTouchStart.cancelable) {
+                            _grpDelegateTouchStart.preventDefault();
                         }
                     } catch(ex) {}
-                    showGroupContextMenu(e, index, element, isSystemMsg);
-                }, 400); // 400ms 长按触发（降低门槛）
+                    showGroupContextMenu(e, _grpDelegateIndex, _grpDelegateTarget, _grpDelegateIsSystem);
+                }, 400);
             };
-
+            
             const cancelHandler = (e) => {
-                // ✅ 手机端容错：手指微小抖动不取消长按（阈值10px）
+                if (!_grpDelegateTarget) return;
                 if (e && (e.touches || e.clientX !== undefined)) {
                     const cx = e.touches ? e.touches[0].clientX : e.clientX;
                     const cy = e.touches ? e.touches[0].clientY : e.clientY;
-                    const dx = Math.abs(cx - _grpTouchStartX);
-                    const dy = Math.abs(cy - _grpTouchStartY);
-                    if (dx < 10 && dy < 10) return; // 微小移动，不取消
+                    const dx = Math.abs(cx - _grpDelegateStartX);
+                    const dy = Math.abs(cy - _grpDelegateStartY);
+                    if (dx < 10 && dy < 10) return;
                 }
                 if (longPressTimer) {
                     clearTimeout(longPressTimer);
@@ -17233,22 +19273,35 @@ User(${userChar.name}) 向你发送了好友申请，附言：“${reason || '�
                     clearTimeout(longPressTimer);
                     longPressTimer = null;
                 }
-                touchStartEvent = null;
+                _grpDelegateTouchStart = null;
+                _grpDelegateTarget = null;
                 if (isLongPress) {
                     e.preventDefault();
                     e.stopPropagation();
                 }
             };
-
-            // 触摸设备 - passive:false 允许在长按时调用preventDefault阻止浏览器默认菜单
-            element.addEventListener('touchstart', startHandler, {passive: false});
-            element.addEventListener('touchmove', cancelHandler, {passive: true});
-            element.addEventListener('touchend', endHandler);
-            element.addEventListener('mousedown', startHandler);
-            element.addEventListener('mousemove', cancelHandler);
-            element.addEventListener('mouseup', endHandler);
-            // 禁用右键默认菜单（同时覆盖手机端长按触发的contextmenu）
-            element.addEventListener('contextmenu', (e) => e.preventDefault());
+            
+            body.addEventListener('touchstart', startHandler, {passive: false});
+            body.addEventListener('touchmove', cancelHandler, {passive: true});
+            body.addEventListener('touchend', endHandler);
+            body.addEventListener('mousedown', startHandler);
+            body.addEventListener('mousemove', cancelHandler);
+            body.addEventListener('mouseup', endHandler);
+            body.addEventListener('contextmenu', (e) => {
+                if (_findGroupMsgTarget(e.target)) e.preventDefault();
+            });
+        }
+        
+        // 群聊消息长按事件绑定（兼容层：现在只标记 data 属性，实际事件由委托处理）
+        function bindGroupMessageEvents(element, index, isSystemMsg) {
+            // 🚀 只设置 data 属性，不再绑定监听器；由 chat-body 的事件委托统一处理
+            element.dataset.index = index;
+            if (isSystemMsg) {
+                element.classList.add('group-system-text');
+                element.dataset.msgIndex = index;
+            }
+            // 确保事件委托已初始化
+            initGroupMessageDelegation();
         }
         
         // 群聊消息右键菜单
@@ -19810,6 +21863,16 @@ ${chatContext || '（没有聊天记录）'}
         // --- 聊天详情页逻辑 ---
         // 统一入口：根据当前是私聊还是群聊显示对应详情页
         function showChatOrGroupDetail() {
+            // ★ fp模式下打开简化版聊天详情
+            if (window._fpChatMode) {
+                if (window._fpGroupChatMode) {
+                    // fp群聊模式暂不支持群聊详情
+                    showToast('查手机模式下暂不支持群聊设置');
+                    return;
+                }
+                showFpChatDetailPage();
+                return;
+            }
             if (window.currentGroupChatId) {
                 showGroupDetail(window.currentGroupChatId);
             } else if (currentChatCharId) {
@@ -19957,6 +22020,46 @@ ${chatContext || '（没有聊天记录）'}
             
             // 7. 更新视频通话记录数量
             updateVideoCallRecordCount();
+            
+            // 7.5. 加载视频通话人物图片设置
+            const videoCallImgSwitch = document.getElementById('detail-video-call-img-switch');
+            if (videoCallImgSwitch) {
+                videoCallImgSwitch.checked = !!char.video_call_img_enabled;
+                toggleVideoCallImgUploadArea();
+                // 监听开关变化以切换显隐
+                videoCallImgSwitch.onchange = function() {
+                    toggleVideoCallImgUploadArea();
+                    saveChatDetail();
+                };
+            }
+            // 回显用户图片预览
+            const userImgPreview = document.getElementById('detail-video-user-img-preview');
+            if (userImgPreview) {
+                if (char.video_call_user_img) {
+                    userImgPreview.style.backgroundImage = `url(${char.video_call_user_img})`;
+                    userImgPreview.textContent = '';
+                } else {
+                    userImgPreview.style.backgroundImage = '';
+                    userImgPreview.textContent = '未设置';
+                }
+            }
+            // 回显角色图片预览
+            const charImgPreview = document.getElementById('detail-video-char-img-preview');
+            if (charImgPreview) {
+                if (char.video_call_char_img) {
+                    charImgPreview.style.backgroundImage = `url(${char.video_call_char_img})`;
+                    charImgPreview.textContent = '';
+                } else {
+                    charImgPreview.style.backgroundImage = '';
+                    charImgPreview.textContent = '未设置';
+                }
+            }
+            
+            // 7.6. 加载视频通话 NovelAI 生图开关
+            const videoNovelaiSwitch = document.getElementById('detail-video-novelai-switch');
+            if (videoNovelaiSwitch) {
+                videoNovelaiSwitch.checked = !!char.video_novelai_enabled;
+            }
             
             // 7. 加载自定义气泡CSS
             document.getElementById('detail-bubble-css').value = char.custom_bubble_css || '';
@@ -20111,6 +22214,12 @@ async function saveChatDetail() {
     // 朋友圈频率设置
     const momentsFrequency = document.getElementById('detail-moments-frequency').value;
     
+    // 视频通话人物图片开关
+    const videoCallImgEnabled = document.getElementById('detail-video-call-img-switch').checked;
+    
+    // 视频通话 NovelAI 生图开关
+    const videoNovelaiEnabled = document.getElementById('detail-video-novelai-switch').checked;
+    
     // 自动总结设置
     const autoSummaryEnabled = document.getElementById('detail-auto-summary-switch').checked;
     const summaryInterval = parseInt(document.getElementById('detail-summary-interval').value);
@@ -20157,7 +22266,9 @@ async function saveChatDetail() {
         auto_summary_enabled: autoSummaryEnabled,
         summary_interval: summaryInterval > 0 ? summaryInterval : 50,
         custom_bubble_css: sanitizeCSS(bubbleCSS),
-        bubble_style: selectedBubbleOption ? selectedBubbleOption.dataset.style : 'default'
+        bubble_style: selectedBubbleOption ? selectedBubbleOption.dataset.style : 'default',
+        video_call_img_enabled: videoCallImgEnabled,
+        video_novelai_enabled: videoNovelaiEnabled
     };
 
     try {
@@ -20528,6 +22639,95 @@ window.unmountUser = unmountUser;
             // 让主题背景图（由 applyThemeToChat 通过 style.background 简写设置）保持不变
             // 清除操作由 clearChatBackground() 显式处理
         }
+
+        // ==================== 视频通话人物图片上传 ====================
+
+        /**
+         * 上传视频通话用户图片（右上小窗显示）
+         */
+        async function setVideoCallUserImg(input) {
+            const file = input.files[0];
+            if (file && currentChatCharId) {
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    const base64 = e.target.result;
+                    const preview = document.getElementById('detail-video-user-img-preview');
+                    preview.style.backgroundImage = `url(${base64})`;
+                    preview.textContent = '';
+                    
+                    await db.characters.update(currentChatCharId, { video_call_user_img: base64 }).catch(err => {
+                        console.error('[setVideoCallUserImg] update失败:', err);
+                    });
+                    console.log('[视频通话] ✅ 用户图片已保存');
+                };
+                reader.readAsDataURL(file);
+            }
+            input.value = '';
+        }
+
+        /**
+         * 上传视频通话角色图片（通话背景显示）
+         */
+        async function setVideoCallCharImg(input) {
+            const file = input.files[0];
+            if (file && currentChatCharId) {
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    const base64 = e.target.result;
+                    const preview = document.getElementById('detail-video-char-img-preview');
+                    preview.style.backgroundImage = `url(${base64})`;
+                    preview.textContent = '';
+                    
+                    await db.characters.update(currentChatCharId, { video_call_char_img: base64 }).catch(err => {
+                        console.error('[setVideoCallCharImg] update失败:', err);
+                    });
+                    console.log('[视频通话] ✅ 角色图片已保存');
+                };
+                reader.readAsDataURL(file);
+            }
+            input.value = '';
+        }
+
+        /**
+         * 清除视频通话用户图片
+         */
+        async function clearVideoCallUserImg() {
+            if (!currentChatCharId) return;
+            await db.characters.update(currentChatCharId, { video_call_user_img: null }).catch(err => {
+                console.error('[clearVideoCallUserImg] update失败:', err);
+            });
+            const preview = document.getElementById('detail-video-user-img-preview');
+            preview.style.backgroundImage = '';
+            preview.textContent = '未设置';
+            console.log('[视频通话] ✅ 用户图片已清除');
+        }
+
+        /**
+         * 清除视频通话角色图片
+         */
+        async function clearVideoCallCharImg() {
+            if (!currentChatCharId) return;
+            await db.characters.update(currentChatCharId, { video_call_char_img: null }).catch(err => {
+                console.error('[clearVideoCallCharImg] update失败:', err);
+            });
+            const preview = document.getElementById('detail-video-char-img-preview');
+            preview.style.backgroundImage = '';
+            preview.textContent = '未设置';
+            console.log('[视频通话] ✅ 角色图片已清除');
+        }
+
+        /**
+         * 切换视频通话人物图片上传区域的显隐
+         */
+        function toggleVideoCallImgUploadArea() {
+            const switchEl = document.getElementById('detail-video-call-img-switch');
+            const area = document.getElementById('video-call-img-upload-area');
+            if (area) {
+                area.style.display = switchEl && switchEl.checked ? 'block' : 'none';
+            }
+        }
+
+        // ==================== 视频通话人物图片上传结束 ====================
 
         // 展开/收起自定义样式区域
         function toggleCustomStyleSection() {
@@ -21534,24 +23734,6 @@ ${existingChatsContext.join('\n\n')}
                 }
                 
                 const accountId = getCurrentAccountId();
-                // 用户头像变化提示（下一轮系统提示词）
-                let avatarChangeNotice = '';
-                if (accountId) {
-                    const myChar = await db.characters.get(parseInt(accountId));
-                    console.log(`[triggerAutoChat] 头像通知检查: accountId=${accountId}, myChar存在=${!!myChar}, type=${myChar?.type}, avatarUpdatedAt=${myChar?.avatarUpdatedAt || '无'}`);
-                    if (myChar && myChar.type === 'user') {
-                        avatarChangeNotice = getUserAvatarChangeNotice(char, accountId, myChar);
-                        if (avatarChangeNotice) {
-                            console.log(`[triggerAutoChat] ✅ 头像更换通知已注入系统提示词，角色: ${char.name}`);
-                            // 🔧 修复数据丢失：使用 update() 只更新特定字段，避免用旧 char 覆盖并发写入的新数据
-                            await db.characters.update(char.id, {
-                                userAvatarNoticeMap: char.userAvatarNoticeMap
-                            });
-                        }
-                    }
-                } else {
-                    console.log('[triggerAutoChat] ⚠️ accountId为空，跳过头像通知检查');
-                }
                 let loreContext = "";
                 const lorebookIds = char.lorebookIds || (char.lorebookId ? [char.lorebookId] : []);
                 {
@@ -21566,6 +23748,15 @@ ${existingChatsContext.join('\n\n')}
                     summaryMemoryContext = await getSummaryMemoryContext('private', char.id, accountId);
                 } catch (e) {
                     console.warn('[triggerAutoChat] 读取总结记忆失败:', e);
+                }
+
+                // 🔧 构建实时话题感知
+                let recentTopicsContext = '';
+                try {
+                    const chatHist = getChatHistory(char, accountId);
+                    recentTopicsContext = buildRecentTopicsContext(chatHist);
+                } catch (e) {
+                    console.warn('[triggerAutoChat] 构建话题感知失败:', e);
                 }
 
                 // 读取查手机NPC活动记录
@@ -21674,6 +23865,9 @@ ${existingChatsContext.join('\n\n')}
                 }
 
                 // 2. 构建 Prompt（与主聊天保持一致结构）
+                // 🔧 检查 NovelAI 自动生图是否开启，决定 imgcard 是否需要附带英文 tag
+                const _novelaiAutoGenEnabledAuto = await isNovelAIAutoGenerateEnabled();
+                
                 let systemPrompt = `# 角色扮演任务
 
 【当前时间】
@@ -21706,12 +23900,15 @@ ${char.type !== 'user' && char.identity.bank_password ? `银行卡密码：${cha
 ${char.identity.balance !== undefined && char.identity.balance !== null ? `余额：${char.identity.balance}` : ''}
 ` : ''}
 
-${avatarChangeNotice}
-
 ${char.relationships && char.relationships.length > 0 ? `
 你身边的重要人物：
 ${char.relationships.map(r => `${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}
 ` : ''}
+
+${summaryMemoryContext ? `## 你的记忆（必须严格遵守，这些是已经发生过的事实）
+${summaryMemoryContext}
+` : ''}
+${recentTopicsContext || ''}
 
 ---
 
@@ -21726,9 +23923,6 @@ ${loreContext ? `## 世界观设定
 ${loreContext}
 ` : ''}
 
-${summaryMemoryContext ? `## 记忆摘要
-${summaryMemoryContext}
-` : ''}
 ${_hasOfflineMemoryAuto ? `\n## ★ 线上线下统一世界观
 注意：你和对方的互动包含【微信聊天】和【线下见面】两个场景，它们是同一段关系。
 - 带有 [线下见面] 前缀的消息是你们当面交流时说的话/做的事（已缩略）
@@ -21848,7 +24042,10 @@ ${char.theater_mode ? `## 🎭 小剧场模式（已开启）
 [voice:内容]
 
 图片：
-[imgcard:图片描述]
+${_novelaiAutoGenEnabledAuto ? `[imgcard:中文图片描述{{english, novelai, tags}}]
+发图片时必须在 {{ }} 内写英文 NovelAI/Danbooru 风格 tag。根据角色性别用1boy或1girl，包含外貌特征、服装、表情、动作、场景，不加质量词，不超过25个tag。
+**发图片时必须同时发送文字消息，用|||组合。禁止只发一条图片不说话。**
+例：嘿 刚洗完澡~|||[imgcard:洗完澡的自拍{{1girl, wet hair, towel, bathroom, mirror, smile, looking at viewer}}]|||好看吗` : `[imgcard:图片描述]`}
 
 转账：
 ((TRANSFER: 金额, 备注))
@@ -22137,6 +24334,7 @@ thought 要求：
                             .replace(/\[?CHECK_ACCOUNT(?::.*?)?\]?/gi, '')
                             .replace(/\(\(CHANGE_AVATAR\)\)/gi, '')
                             .replace(/\(\(COUPLE_AVATAR\)\)/gi, '')
+                            .replace(/\(\(CROP_AVATAR:\s*\d+\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*\)\)/gi, '')
                             .replace(/\[(?:sticker|imgcard|img|voice):[^\]]*\]/gi, '')
                             .replace(/\|\|\|/g, ' ')
                             .replace(/\/\/\//g, ' ')
@@ -22986,6 +25184,12 @@ thought 要求：
                     // ✅ 修复：清理每个分段末尾多余的 ]
                     seg = cleanMessage(seg);
                     
+                    // 🔧 过滤掉泄漏的 NovelAI {{tags}} 消息（AI有时把英文tags放在[imgcard:]外面）
+                    if (/^\s*\{\{[\s\S]+?\}\}\s*$/.test(seg)) {
+                        console.log(`[AutoChat] 🔧 过滤掉泄漏的 NovelAI tags: "${seg.substring(0, 60)}..."`);
+                        continue;
+                    }
+                    
                     // 🎯 检测换头像指令 ((CHANGE_AVATAR)) - 在主动聊天分段中检测
                     if (/\(\(CHANGE_AVATAR\)\)/i.test(seg)) {
                         console.log(`[AutoChat] 检测到换头像指令，执行换头像...`);
@@ -23033,6 +25237,24 @@ thought 要求：
                             console.error('[AutoChat] 使用图片当头像失败:', e);
                         }
                         seg = seg.replace(/\(\(USE_IMAGE_AS_AVATAR(?::\s*\d+)?\)\)/gi, '').trim();
+                        if (!seg) continue;
+                    }
+                    
+                    // 🎯 检测裁剪图片当头像指令 ((CROP_AVATAR: N, left, top, width, height)) - 在主动聊天分段中检测
+                    const cropMatchAuto = seg.match(/\(\(CROP_AVATAR:\s*(\d+)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)\)/i);
+                    if (cropMatchAuto) {
+                        const cropImgIdx = parseInt(cropMatchAuto[1]) || 1;
+                        const cropL = parseFloat(cropMatchAuto[2]);
+                        const cropT = parseFloat(cropMatchAuto[3]);
+                        const cropW = parseFloat(cropMatchAuto[4]);
+                        const cropH = parseFloat(cropMatchAuto[5]);
+                        console.log(`[AutoChat] 检测到裁剪头像指令: 图${cropImgIdx}, 区域(${cropL}%, ${cropT}%, ${cropW}%, ${cropH}%)`);
+                        try {
+                            await executeCropImageAsAvatar(char.id, accountId, cropImgIdx, cropL, cropT, cropW, cropH);
+                        } catch (e) {
+                            console.error('[AutoChat] 裁剪头像失败:', e);
+                        }
+                        seg = seg.replace(/\(\(CROP_AVATAR:\s*\d+\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*\)\)/gi, '').trim();
                         if (!seg) continue;
                     }
                     
@@ -23677,6 +25899,17 @@ thought 要求：
                 
                 const hasNPCs = selectedNPCList.length > 0;
                 
+                // 获取角色关联的世界书上下文
+                let autoMomentsLoreContext = '';
+                try {
+                    const _amLorebookIds = char.lorebookIds || (char.lorebookId ? [char.lorebookId] : []);
+                    if (_amLorebookIds.length > 0 && typeof getLorebookContext === 'function') {
+                        autoMomentsLoreContext = await getLorebookContext(_amLorebookIds, char.name);
+                    }
+                } catch (e) {
+                    console.warn('[AutoMoments] 获取世界书失败:', e);
+                }
+                
                 const systemPrompt = `你正在进行角色扮演。
 【当前时间】
 ${virtualTimeStr}
@@ -23688,6 +25921,7 @@ ${char.wx_nickname ? `微信网名：${char.wx_nickname}` : ''}
 ${char.wx_signature ? `个性签名：${char.wx_signature}` : ''}
 设定：
 ${char.description || ''}
+${autoMomentsLoreContext ? `\n【世界观】\n${autoMomentsLoreContext}` : ''}
 ${recentMomentsText}${recentChatContext}${npcInfoText}
 
 请以角色的身份发一条朋友圈动态${hasNPCs ? '，并为看到这条朋友圈的好友生成评论' : ''}。要求：
@@ -23925,7 +26159,13 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容。`;
             
             // ★ 查手机fp模式：以角色身份发送消息
             if (window._fpChatMode) {
-                await sendFpChatMessage();
+                if (window._fpGroupChatMode) {
+                    // fp群聊模式：以角色身份在群聊中发送
+                    await sendFpGroupMessage(text);
+                } else {
+                    // fp私聊模式：以角色身份在私聊中发送
+                    await sendFpChatMessage();
+                }
                 return;
             }
             
@@ -24094,7 +26334,7 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容。`;
         async function sendGroupMessage(text) {
             if (!text || !window.currentGroupChatId) return;
             
-            const group = await db.group_chats.get(window.currentGroupChatId);
+            const group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group) return;
             
             const input = document.getElementById('chat-input-box');
@@ -24160,11 +26400,11 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容。`;
                 return;
             }
             
-            // 🔧 手机端IndexedDB防卡死：用超时保护DB读取
+            // 🔧 手机端IndexedDB防卡死：用超时保护DB读取（优先内存缓存）
             let group;
             try {
                 group = await Promise.race([
-                    db.group_chats.get(window.currentGroupChatId),
+                    getCachedGroupChat(window.currentGroupChatId),
                     new Promise((_, reject) => setTimeout(() => reject(new Error('DB读取超时')), 8000))
                 ]);
             } catch (dbErr) {
@@ -24206,13 +26446,14 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容。`;
                     return;
                 }
                 
-                // 预加载所有成员信息
+                // 🚀 批量预加载所有成员信息（避免N+1查DB）
+                await preloadCharacters(group.memberIds);
                 const memberMap = {};
                 for (const memberId of group.memberIds) {
-                    const char = await db.characters.get(memberId);
+                    const char = await getCachedCharacter(memberId);
                     if (char) memberMap[memberId] = char;
                 }
-                const myChar = currentMyCharId ? await db.characters.get(parseInt(currentMyCharId)) : null;
+                const myChar = currentMyCharId ? await getCachedCharacter(parseInt(currentMyCharId)) : null;
                 const myNickname = group.myNickname || (myChar ? (myChar.nick || myChar.name) : '用户');
                 
                 // 构建成员列表描述（包含管理员标识和群昵称）
@@ -24299,52 +26540,6 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容。`;
                     }
                 }
                 
-                let groupContextStr = recentGroupHistory.map(m => {
-                    if (m.role === 'system') return `[系统消息] ${m.content}`;
-                    if (m.type === 'redpacket') {
-                        try {
-                            const rpData = JSON.parse(m.content);
-                            const claimedCount = rpData.claimed?.length || 0;
-                            const isAllClaimed = claimedCount >= rpData.count;
-                            return `${myNickname}: [发送了红包] "${rpData.wish || '恭喜发财'}" (红包ID: ${rpData.id}, ${isAllClaimed ? '已领完' : `还剩${rpData.count - claimedCount}个可领`})`;
-                        } catch(e) {
-                            return `${myNickname}: [发送了红包]`;
-                        }
-                    }
-                    
-                    // 🔧 修复：过滤特殊卡片消息，替换为简短描述，避免HTML导致API错误
-                    let content = m.content || '';
-                    if (content.startsWith('[couple_avatar_card]')) {
-                        content = '（发送了情头邀请卡片）';
-                    } else if (content.startsWith('[emei_order]')) {
-                        content = '（发送了外卖订单卡片）';
-                    } else if (content.startsWith('[emei_share]')) {
-                        content = '（分享了外卖订单）';
-                    } else if (content.startsWith('[payment_request]')) {
-                        content = '（发送了代付请求）';
-                    }
-                    // 购物卡片消息
-                    if (m.type === 'shopPayRequest') {
-                        try {
-                            const _sd = JSON.parse(content);
-                            if (_sd.isGift) content = '（发送了购物礼物）';
-                            else if (_sd.isShare) content = '（分享了购物订单）';
-                            else content = '（发送了代付请求）';
-                        } catch(e) { content = '（发送了购物卡片）'; }
-                    }
-                    
-                    // ✅ 如果消息有引用，在内容前添加引用标注
-                    if (m.quote) {
-                        content = `「引用 ${m.quote.name}: ${m.quote.content}」${content}`;
-                    }
-                    
-                    if (m.role === 'user') return `${myNickname}: ${content}`;
-                    const sender = m.senderId ? memberMap[m.senderId] : null;
-                    // 即使memberMap中找不到（如已退群角色），也保留消息上下文，用senderName兜底
-                    const senderName = sender ? getCharDisplayName(sender, accountId) : (m.senderName || '群成员');
-                    return `${senderName}: ${content}`;
-                }).filter(Boolean).join('\n');
-                
                 // 计算虚拟时间
                 const virtualTimeStr = getFormattedVirtualTime(0);
                 
@@ -24353,12 +26548,12 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容。`;
                 // ✅ 不截断消息内容：完整保留每条消息
                 let privateChatMemoryContext = '';
                 try {
-                    const _pcAccountId = getCurrentAccountId();
+                        const _pcAccountId = getCurrentAccountId();
                     const _pcContextCount = groupContextCount;
                     if (_pcAccountId) {
                         const pcSnippets = [];
                         for (const memberId of availableMembers) {
-                            const charData = await db.characters.get(memberId);
+                            const charData = await getCachedCharacter(memberId);
                             if (!charData) continue;
                             
                             // 兼容新旧数据结构
@@ -24414,6 +26609,9 @@ image_desc 字段：当 images > 0 时，用一句话描述配图内容。`;
                 const minReplies = Math.max(4, availableMembers.length * 2);
                 const maxReplies = Math.max(8, availableMembers.length * 3);
                 
+                // 🔧 检查 NovelAI 自动生图是否开启，决定 imgcard 是否需要附带英文 tag
+                const _novelaiAutoGenEnabledGroup = await isNovelAIAutoGenerateEnabled();
+                
                 let systemPrompt = `你是群聊导演 负责扮演群里的所有角色
 你扮演的是群成员 不是用户
 每个角色有独立的性格和想法
@@ -24440,9 +26638,6 @@ ${pendingRedPackets.map(rp => `红包ID ${rp.id} "${rp.wish}" 还剩${rp.remaini
 群成员及人设
 ${membersList}
 ${invitableNpcsText}${privateChatMemoryContext}
-最近聊天记录
-${groupContextStr}
-
 规则
 这是活跃的群聊 角色们要积极互动
 角色之间互相回应 补充 调侃 反驳
@@ -24459,6 +26654,10 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
 可用指令
 普通发言 {"name": "角色名", "content": "内容"} type可以省略
 引用消息回复 {"name": "角色名", "content": "回复内容", "quote": {"name": "被引用人名字", "content": "被引用的内容摘要"}} 引用之前某人说的话来回复 让对话更有针对性
+语音消息 content中使用 [voice:语音内容] 发送语音 像真人发微信语音一样 内容要口语化
+图片卡片 content中使用 ${_novelaiAutoGenEnabledGroup ? `[imgcard:中文图片描述{{english, novelai, tags}}] 发图片时必须在 {{ }} 内写英文 NovelAI/Danbooru 风格 tag 根据角色性别用1boy或1girl 包含外貌特征、服装、表情、动作、场景 不加质量词 不超过25个tag` : `[imgcard:图片描述] 发送图片`}
+  发图片时必须同时发送文字消息 用|||组合 禁止只发一条图片不说话
+  ${_novelaiAutoGenEnabledGroup ? `例 {"name": "角色A", "content": "刚拍的|||[imgcard:自拍照{{1girl, selfie, smile, peace sign, casual clothes, bedroom}}]|||好看吗"}` : `例 {"name": "角色A", "content": "刚拍的|||[imgcard:自拍照]|||好看吗"}`}
 改群昵称 {"type": "change_nickname", "name": "角色名", "nickname": "新昵称"}
 拉朋友进群 {"type": "invite_npc", "name": "操作者角色名", "target": "朋友名字"} 只能拉自己的朋友
 发红包 {"type": "send_redpacket", "name": "角色名", "redpacketType": "lucky或normal或single", "totalAmount": 金额, "count": 个数, "wish": "祝福语"}
@@ -24476,25 +26675,143 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
 角色聊到某个朋友时可以顺手把朋友拉进群 用invite_npc
 角色如果对群聊氛围不满 被冒犯 或者有合理的角色动机 可以用leave_group主动退群 退群是比较严重的行为 不要轻易使用
 
+消息类型混搭要求
+真实群聊不会全是纯文字 角色必须混合使用多种消息类型
+每轮回复中 至少要有1-2条语音消息[voice:] 和1条图片卡片[imgcard:]
+语音消息适合 情绪激动 撒娇 吐槽 感叹 搞笑 嘲讽 兴奋 惊讶等情绪化场景 用口语化的内容
+图片卡片适合 分享自拍 风景 美食 截图 表情包 穿搭 宠物等场景 角色想秀图时用imgcard
+发图片时必须用|||组合文字消息 不能只发图不说话
+不要每条都是纯文字 要像真人群聊一样丰富多样
+
 示例
 [
   {"name": "角色A", "content": "哇 你说的这个|||我也遇到过"},
   {"name": "角色B", "content": "真的吗"},
   {"type": "change_nickname", "name": "角色A", "nickname": "话痨本痨"},
   {"name": "角色A", "content": "对啊对啊|||改个昵称玩"},
-  {"name": "角色C", "content": "我也想说|||之前就想吐槽了"},
+  {"name": "角色C", "content": "[voice:哈哈哈哈笑死我了]"},
   {"name": "角色B", "content": "哈哈哈", "quote": {"name": "角色A", "content": "我也遇到过"}},
-  {"name": "角色A", "content": "笑死"},
-  {"name": "角色C", "content": "你们太好笑了|||不行了"}
+  ${_novelaiAutoGenEnabledGroup ? `{"name": "角色A", "content": "看我今天的穿搭|||[imgcard:穿搭自拍{{1girl, selfie, casual outfit, white t-shirt, jeans, mirror, smile, peace sign, bedroom}}]|||好看吧"},` : `{"name": "角色A", "content": "看我今天的穿搭|||[imgcard:穿搭自拍]|||好看吧"},`}
+  {"name": "角色C", "content": "[voice:啊啊啊好好看 我酸了]"},
+  {"name": "角色B", "content": "你们太好笑了|||不行了"}
 ]
 
-根据以上信息生成群聊中多个角色的回复 ${minReplies}-${maxReplies}条 只输出JSON数组`;
+根据以上信息和聊天记录上下文 生成群聊中多个角色的回复 ${minReplies}-${maxReplies}条 只输出JSON数组`;
 
-                // 准备对话历史
+                // 🔧 构建多轮对话历史（像私聊一样，把群聊记录作为 user/assistant 交替传入）
+                // 用户发的消息 → role: 'user'
+                // AI（角色们）之前生成的回复 → role: 'assistant'
+                // 这样AI能真正"看到"完整的对话上下文，而不是只在system prompt里塞一段文字
                 const messages = [
-                    { role: 'system', content: systemPrompt },
-                    { role: 'user', content: `请生成群聊中多个角色对"${myNickname}"最后发言的回复` }
+                    { role: 'system', content: systemPrompt }
                 ];
+                
+                // 将群聊历史按"用户发言"和"角色回复"分组，构建多轮对话
+                // 连续的角色消息合并为一个 assistant 消息，用户消息作为 user 消息
+                let pendingAssistantMsgs = [];
+                
+                const _flushAssistant = () => {
+                    if (pendingAssistantMsgs.length > 0) {
+                        messages.push({
+                            role: 'assistant',
+                            content: JSON.stringify(pendingAssistantMsgs)
+                        });
+                        pendingAssistantMsgs = [];
+                    }
+                };
+                
+                // 辅助函数：安全地添加 user 消息（避免连续两个 user 消息）
+                const _pushUserMsg = (content) => {
+                    const last = messages[messages.length - 1];
+                    if (last && last.role === 'user') {
+                        // 合并到上一条 user 消息
+                        last.content += '\n' + content;
+                    } else {
+                        messages.push({ role: 'user', content: content });
+                    }
+                };
+                
+                for (const m of recentGroupHistory) {
+                    if (m.role === 'user') {
+                        // 遇到用户消息，先把之前积累的角色消息刷出去
+                        _flushAssistant();
+                        
+                        // 处理用户消息内容
+                        let userContent = m.content || '';
+                        if (userContent.startsWith('[couple_avatar_card]')) userContent = '（发送了情头邀请卡片）';
+                        else if (userContent.startsWith('[emei_order]')) userContent = '（发送了外卖订单卡片）';
+                        else if (userContent.startsWith('[emei_share]')) userContent = '（分享了外卖订单）';
+                        else if (userContent.startsWith('[payment_request]')) userContent = '（发送了代付请求）';
+                        else if (m.type === 'shopPayRequest') {
+                            try { const _sd = JSON.parse(userContent); userContent = _sd.isGift ? '（购物礼物）' : _sd.isShare ? '（购物分享）' : '（代付请求）'; } catch(e) { userContent = '（购物卡片）'; }
+                        }
+                        if (m.type === 'redpacket') {
+                            try {
+                                const rpData = JSON.parse(userContent);
+                                userContent = `[发送了红包] "${rpData.wish || '恭喜发财'}" (红包ID: ${rpData.id})`;
+                            } catch(e) { userContent = '[发送了红包]'; }
+                        }
+                        if (m.quote) {
+                            userContent = `「引用 ${m.quote.name}: ${m.quote.content}」${userContent}`;
+                        }
+                        
+                        _pushUserMsg(`${myNickname}: ${userContent}`);
+                    } else if (m.role === 'system') {
+                        // 系统消息附加到下一个user或当前assistant
+                        _flushAssistant();
+                        _pushUserMsg(`[系统消息] ${m.content}`);
+                    } else {
+                        // 角色消息，积累起来
+                        let content = m.content || '';
+                        if (content.startsWith('[couple_avatar_card]')) content = '（发送了情头邀请卡片）';
+                        else if (content.startsWith('[emei_order]')) content = '（发送了外卖订单卡片）';
+                        else if (content.startsWith('[emei_share]')) content = '（分享了外卖订单）';
+                        else if (content.startsWith('[payment_request]')) content = '（发送了代付请求）';
+                        else if (m.type === 'shopPayRequest') {
+                            try { const _sd = JSON.parse(content); content = _sd.isGift ? '（购物礼物）' : _sd.isShare ? '（购物分享）' : '（代付请求）'; } catch(e) { content = '（购物卡片）'; }
+                        }
+                        if (m.type === 'redpacket') {
+                            try {
+                                const rpData = JSON.parse(content);
+                                const claimedCount = rpData.claimed?.length || 0;
+                                content = `[发送了红包] "${rpData.wish || '恭喜发财'}" (红包ID: ${rpData.id}, ${claimedCount >= rpData.count ? '已领完' : `还剩${rpData.count - claimedCount}个`})`;
+                            } catch(e) { content = '[发送了红包]'; }
+                        }
+                        if (m.quote) {
+                            content = `「引用 ${m.quote.name}: ${m.quote.content}」${content}`;
+                        }
+                        
+                        const sender = m.senderId ? memberMap[m.senderId] : null;
+                        const senderName = sender ? getCharDisplayName(sender, accountId) : (m.senderName || '群成员');
+                        
+                        if (m.type === 'change_nickname') {
+                            pendingAssistantMsgs.push({ type: 'change_nickname', name: senderName, nickname: m.nickname || content });
+                        } else {
+                            pendingAssistantMsgs.push({ name: senderName, content: content });
+                        }
+                    }
+                }
+                // 刷出最后剩余的角色消息
+                _flushAssistant();
+                
+                // 确保最后一条是 user 消息（AI 需要 user 消息来触发回复）
+                const lastMessage = messages[messages.length - 1];
+                if (!lastMessage || lastMessage.role !== 'user') {
+                    // 如果最后不是用户消息，添加一个触发消息
+                    const _lastUserMsg = recentGroupHistory.filter(m => m.role === 'user').slice(-1)[0];
+                    const _lastUserContent = _lastUserMsg ? _lastUserMsg.content : '';
+                    messages.push({
+                        role: 'user',
+                        content: _lastUserContent 
+                            ? `${myNickname}: ${_lastUserContent.substring(0, 200)}\n\n请根据以上对话上下文，生成群聊中多个角色的自然回复。混合使用文字、语音[voice:]、图片卡片[imgcard:]。只输出JSON数组。`
+                            : `${myNickname}进入了群聊。请生成群聊中多个角色的自然回复。混合使用文字、语音[voice:]、图片卡片[imgcard:]。只输出JSON数组。`
+                    });
+                } else {
+                    // 最后已经是用户消息，在其内容后追加指令提示
+                    lastMessage.content += `\n\n请根据以上对话上下文，生成群聊中多个角色的自然回复。混合使用文字、语音[voice:]、图片卡片[imgcard:]。只输出JSON数组。`;
+                }
+                
+                console.log('[triggerGroupMemberReply] 构建多轮对话消息数:', messages.length);
                 
                 // 调用AI
                 let aiResponse = await callAI(messages);
@@ -24584,7 +26901,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                 
                 // 处理每条回复
                 if (replies.length > 0) {
-                    const updatedGroup = await db.group_chats.get(window.currentGroupChatId);
+                    const updatedGroup = await getCachedGroupChat(window.currentGroupChatId);
                     if (!updatedGroup) return;
                     
                     if (!updatedGroup.chat_history) updatedGroup.chat_history = [];
@@ -24594,6 +26911,9 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     let msgIndex = 0;
                     const memberNicknamesMap = updatedGroup.memberNicknames || {};
                     const _matchAccountId = getCurrentAccountId();
+                    // 🚀 记录本轮新增消息起始位置，用于判断是否可以增量追加
+                    const _historyLenBefore = updatedGroup.chat_history.length;
+                    let _hasStructuralChange = false; // 踢人/改昵称/红包等结构性变化
                     for (const reply of replies) {
                         // 查找操作者的成员ID（匹配：角色名、备注名、微信昵称、群昵称、按账号隔离的备注/昵称）
                         let senderId = null;
@@ -24652,6 +26972,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                         // 处理修改群昵称指令
                         if (reply.type === 'change_nickname' && reply.nickname) {
                             if (!senderId) continue;
+                            _hasStructuralChange = true; // 昵称变化影响已渲染消息的显示
                             
                             if (!updatedGroup.memberNicknames) updatedGroup.memberNicknames = {};
                             // 使用角色本名（备注名或原名）
@@ -24676,7 +26997,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                                 if (!dmSenderChar) continue;
                                 
                                 const _dmAccId = getCurrentAccountId();
-                                const dmCharRecord = await db.characters.get(senderId);
+                                const dmCharRecord = await getCachedCharacter(senderId);
                                 if (!dmCharRecord) continue;
                                 
                                 // 把小窗消息写入该角色的私聊记录
@@ -24828,6 +27149,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                         
                         // 处理拉朋友进群指令
                         if (reply.type === 'invite_npc' && reply.target) {
+                            _hasStructuralChange = true; // 成员变化需重渲染
                             if (!senderId) continue;
                             const inviter = memberMap[senderId];
                             if (!inviter || !inviter.relationships) continue;
@@ -24876,6 +27198,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                         
                         // 处理退群指令
                         if (reply.type === 'leave_group') {
+                            _hasStructuralChange = true; // 成员变化需重渲染
                             if (!senderId) continue;
                             
                             const leaver = memberMap[senderId];
@@ -24917,6 +27240,8 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                         
                         // 处理发送红包指令
                         if (reply.type === 'send_redpacket') {
+                            _hasStructuralChange = true; // 红包需特殊渲染
+                            _hasStructuralChange = true; // 红包是特殊渲染，需重渲染
                             console.log('[群聊红包] 检测到发红包指令:', JSON.stringify(reply));
                             
                             if (!reply.totalAmount || !reply.count || !reply.redpacketType) {
@@ -25004,6 +27329,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                         
                         // 处理领取红包指令
                         if (reply.type === 'claim_redpacket' && reply.redpacketId) {
+                            _hasStructuralChange = true; // 红包状态变化需重渲染
                             if (!senderId) continue;
                             
                             // 如果redpacketId是"auto"或空，尝试获取最近的红包
@@ -25193,10 +27519,23 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     updatedGroup.updated_at = Date.now();
                     await safeGroupChatPut(updatedGroup);
                     
-                    // 重新渲染群聊
-                    await renderGroupChatBody(updatedGroup);
+                    // 🚀 性能优化：无结构性变化时增量追加DOM，避免全量重渲染
+                    const _newMessages = updatedGroup.chat_history.slice(_historyLenBefore);
+                    if (!_hasStructuralChange && _newMessages.length > 0 && _newMessages.length <= 20) {
+                        await appendGroupMessagesToUI(_newMessages, updatedGroup);
+                    } else {
+                        // 有结构性变化（踢人/改昵称/红包等）或消息过多，走全量渲染
+                        await renderGroupChatBody(updatedGroup);
+                    }
                     // 刷新群成员列表（可能有新成员通过invite_npc加入）
-                    await renderGroupMemberList(updatedGroup);
+                    if (_hasStructuralChange) await renderGroupMemberList(updatedGroup);
+                    
+                    // 🔧 群聊回复完成后，检查是否有 imgcard 需要 NovelAI 自动生图
+                    try {
+                        await processGroupImgCardsWithNovelAI(window.currentGroupChatId);
+                    } catch (novelaiErr) {
+                        console.error('[NovelAI-GroupGen] 群聊自动生图失败:', novelaiErr);
+                    }
                     
                     // ✅ 群聊回复完成后，检查是否需要自动总结
                     try {
@@ -25240,6 +27579,10 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             // ★ fp聊天模式：返回查手机微信页面
             if (window._fpChatMode) {
                 window._fpChatMode = false;
+                window._fpGroupChatMode = false; // ★ 清除fp群聊模式标记
+                // ★ 移除fp聊天详情页覆盖层
+                const fpDetailOverlay = document.getElementById('fp-chat-detail-overlay');
+                if (fpDetailOverlay) fpDetailOverlay.remove();
                 const win = document.getElementById('chat-window');
                 win.style.transform = 'translateX(100%)';
                 setTimeout(() => {
@@ -25252,8 +27595,10 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                 // 清除 fp 缓存
                 window._fpRoleCharId = null;
                 window._fpContactCharId = null;
+                window._fpGroupId = null;       // ★ 清除fp群聊ID
                 window._fpAccountId = null;
                 window._fpRoleAvatar = null;
+                window._fpRoleName = null;       // ★ 清除fp角色名称
                 window._fpContactAvatar = null;
                 window._fpContactName = null;
                 // 重置渲染缓存，防止下次打开正常聊天时跳过渲染
@@ -25490,6 +27835,16 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             return div.innerHTML;
         }
         
+        /**
+         * 辅助函数：剥离 imgcard 内容中的内联 NovelAI tags {{...}}
+         * AI 在开启 NovelAI 自动生图时会输出 [imgcard:中文描述{{english,tags}}]
+         * UI 显示时需要隐藏 {{...}} 部分，只显示中文描述
+         */
+        function stripImgcardInlineTags(text) {
+            if (!text) return text;
+            return text.replace(/\s*\{\{.+?\}\}/, '').trim();
+        }
+        
         // 辅助函数：生成图片加载失败的HTML
         function getImageErrorHandler() {
             return `onerror="this.onerror=null; this.style.cssText='width:80px; height:80px; display:flex; align-items:center; justify-content:center; background:#f5f5f5; border-radius:8px;'; this.outerHTML='<div style=\\'width:80px; height:80px; display:flex; align-items:center; justify-content:center; background:#f5f5f5; border-radius:8px; color:#999; font-size:11px; text-align:center;\\'>图片加载失败</div>';"`;
@@ -25604,6 +27959,12 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             // 🎯 视频通话内容：不在聊天页面渲染（仅保留在历史记录中供AI读取）
             // 只显示系统类的视频通话消息（已接通/已结束），隐藏实际对话内容
             if (msg.isVideoCall && msg.role !== 'system') {
+                row.style.display = 'none';
+                return row;
+            }
+            
+            // 🎯 头像更换通知：不在UI显示，仅保留在聊天记录中供AI读取
+            if (msg.type === 'avatar_change') {
                 row.style.display = 'none';
                 return row;
             }
@@ -26017,7 +28378,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             // 处理图片卡片消息
             else if (msg.content.startsWith('[imgcard:')) {
                 // 直接提取方括号内的内容，不要用 sanitizeMessage（会破坏格式）
-                const cardText = msg.content.substring(9, msg.content.length - 1).trim();
+                const cardText = stripImgcardInlineTags(msg.content.substring(9, msg.content.length - 1).trim());
                 
                 content.className = 'img-card-bubble';
                 content.dataset.text = cardText; // 存储文字内容
@@ -26169,6 +28530,8 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
         let lastRenderedAvatar = null;
         let currentRenderedCount = 0; // 跟踪已渲染的消息数量
         let isLoadingMoreMessages = false; // 防止重复加载
+        let groupRenderedCount = 0; // 🚀 群聊：跟踪已渲染的消息数量
+        let isLoadingMoreGroupMessages = false; // 🚀 群聊：防止重复加载
 
         // 🎯 新增：只添加单条消息，不重新渲染整个聊天（性能优化）
         async function appendChatMessage(char, msg, msgIndex) {
@@ -26976,7 +29339,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // 群聊复制
             if (window.currentGroupChatId) {
-                const group = await db.group_chats.get(window.currentGroupChatId);
+                const group = await getCachedGroupChat(window.currentGroupChatId);
                 if (group && group.chat_history && group.chat_history[activeMsgIndex]) {
                     const msg = group.chat_history[activeMsgIndex];
                     textToCopy = msg.content || '';
@@ -27075,7 +29438,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // 群聊编辑
             if (window.currentGroupChatId) {
-                const group = await db.group_chats.get(window.currentGroupChatId);
+                const group = await getCachedGroupChat(window.currentGroupChatId);
                 if (!group || !group.chat_history) return;
                 
                 const msg = group.chat_history[activeMsgIndex];
@@ -27091,7 +29454,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
 
                 const editIndex = activeMsgIndex;
                 openEditMsgModal(msg.content, async (newContent) => {
-                    const grp = await db.group_chats.get(window.currentGroupChatId);
+                    const grp = await getCachedGroupChat(window.currentGroupChatId);
                     if (!grp || !grp.chat_history) return;
                     grp.chat_history[editIndex].content = newContent;
                     await safeGroupChatPut(grp);
@@ -27153,7 +29516,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // 群聊撤回
             if (window.currentGroupChatId) {
-                const group = await db.group_chats.get(window.currentGroupChatId);
+                const group = await getCachedGroupChat(window.currentGroupChatId);
                 if (!group || !group.chat_history) return;
                 
                 const msg = group.chat_history[activeMsgIndex];
@@ -27296,7 +29659,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // 群聊引用
             if (window.currentGroupChatId) {
-                const group = await db.group_chats.get(window.currentGroupChatId);
+                const group = await getCachedGroupChat(window.currentGroupChatId);
                 if (!group || !group.chat_history) return;
                 
                 const msg = group.chat_history[activeMsgIndex];
@@ -27390,7 +29753,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // 群聊删除
             if (window.currentGroupChatId) {
-                const group = await db.group_chats.get(window.currentGroupChatId);
+                const group = await getCachedGroupChat(window.currentGroupChatId);
                 if (!group || !group.chat_history) return;
                 
                 group.chat_history.splice(activeMsgIndex, 1);
@@ -27421,7 +29784,8 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             history.splice(activeMsgIndex, 1);
             
-            await setChatHistory(char, accountId, history);
+            // 🔧 传入 isDelete 标记，让 setChatHistory 跳过竞态保护，防止被DB旧数据恢复
+            await setChatHistory(char, accountId, history, { isDelete: true });
             
             // 🔧 只删除DOM元素，不重新渲染整个界面 - 使用data-index属性查找
             const chatBody = document.getElementById('chat-body');
@@ -27614,7 +29978,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // 群聊批量删除
             if (window.currentGroupChatId) {
-                const group = await db.group_chats.get(window.currentGroupChatId);
+                const group = await getCachedGroupChat(window.currentGroupChatId);
                 if (!group || !group.chat_history) return;
                 
                 const newHistory = group.chat_history.filter((_, idx) => !selectedIndices.has(idx));
@@ -27643,8 +30007,8 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             }
             const newHistory = history.filter((_, idx) => !validIndices.has(idx));
             
-            await setChatHistory(char, accountId, newHistory);
-            await safeCharacterPut(char);
+            // 🔧 传入 isDelete 标记，让 setChatHistory 跳过竞态保护，防止被DB旧数据恢复
+            await setChatHistory(char, accountId, newHistory, { isDelete: true });
             
             // 🔧 只删除DOM元素，不重新渲染整个界面 - 使用data-index属性查找
             const chatBody = document.getElementById('chat-body');
@@ -27712,12 +30076,18 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // ★ fp模式：以角色身份发送表情包
             if (window._fpChatMode) {
+                if (window._fpGroupChatMode) {
+                    // fp群聊模式
+                    await sendFpGroupMessage(msgContent);
+                    closeChatPanel();
+                    return;
+                }
                 if (!window._fpRoleCharId || !window._fpAccountId) return;
                 const roleChar = await db.characters.get(window._fpRoleCharId);
                 if (!roleChar) return;
                 const fpAccountId = window._fpAccountId;
                 let history = getChatHistory(roleChar, fpAccountId);
-                history.push({ role: 'char', content: msgContent, time: Date.now(), fpSent: true });
+                history.push({ role: 'char', content: msgContent, time: Date.now(), fpSent: true, isSticker: true });
                 try {
                     await setChatHistory(roleChar, fpAccountId, history);
                 } catch(e) { console.error('[FP] 表情包保存失败:', e); }
@@ -27728,14 +30098,15 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // 支持群聊模式
             if (window.currentGroupChatId) {
-                const group = await db.group_chats.get(window.currentGroupChatId);
+                const group = await getCachedGroupChat(window.currentGroupChatId);
                 if (!group) return;
                 
                 if (!group.chat_history) group.chat_history = [];
                 group.chat_history.push({
                     role: 'user',
                     content: msgContent,
-                    time: Date.now()
+                    time: Date.now(),
+                    isSticker: true
                 });
                 group.updated_at = Date.now();
                 await safeGroupChatPut(group);
@@ -27753,7 +30124,8 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             history.push({
                 role: 'user',
                 content: msgContent,
-                time: Date.now()
+                time: Date.now(),
+                isSticker: true
             });
             
             await setChatHistory(char, accountId, history);
@@ -27895,6 +30267,10 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // ★ fp模式：以角色身份发送
             if (window._fpChatMode) {
+                if (window._fpGroupChatMode) {
+                    await sendFpGroupMessage(msgContent);
+                    return;
+                }
                 if (!window._fpRoleCharId) return;
                 const roleChar = await db.characters.get(window._fpRoleCharId);
                 if (!roleChar) return;
@@ -27908,7 +30284,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // 支持群聊模式
             if (window.currentGroupChatId) {
-                const group = await db.group_chats.get(window.currentGroupChatId);
+                const group = await getCachedGroupChat(window.currentGroupChatId);
                 if (!group) return;
                 
                 if (!group.chat_history) group.chat_history = [];
@@ -27948,6 +30324,18 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // ★ fp模式：以角色身份发送图片
             if (window._fpChatMode) {
+                if (window._fpGroupChatMode) {
+                    // fp群聊模式发送图片
+                    const reader = new FileReader();
+                    reader.onload = async (e) => {
+                        const base64 = await convertImageForAI(e.target.result);
+                        const imgContent = `[img:${base64}]`;
+                        await sendFpGroupMessage(imgContent);
+                    };
+                    reader.readAsDataURL(file);
+                    input.value = '';
+                    return;
+                }
                 if (!window._fpRoleCharId) return;
                 const reader = new FileReader();
                 reader.onload = async (e) => {
@@ -27974,7 +30362,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
                     const base64 = await convertImageForAI(e.target.result);
                     const msgContent = `[img:${base64}]`;
                     
-                    const group = await db.group_chats.get(window.currentGroupChatId);
+                    const group = await getCachedGroupChat(window.currentGroupChatId);
                     if (!group) return;
                     
                     if (!group.chat_history) group.chat_history = [];
@@ -28593,6 +30981,10 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // ★ fp模式：以角色身份发送语音
             if (window._fpChatMode) {
+                if (window._fpGroupChatMode) {
+                    await sendFpGroupMessage(msgContent);
+                    return;
+                }
                 if (!window._fpRoleCharId) return;
                 const roleChar = await db.characters.get(window._fpRoleCharId);
                 if (!roleChar) return;
@@ -28606,7 +30998,7 @@ name字段只能用这些名字 ${validMemberNames.join(' ')}
             
             // 支持群聊模式
             if (window.currentGroupChatId) {
-                const group = await db.group_chats.get(window.currentGroupChatId);
+                const group = await getCachedGroupChat(window.currentGroupChatId);
                 if (!group) return;
                 
                 if (!group.chat_history) group.chat_history = [];
@@ -29383,7 +31775,7 @@ ${loreContext}
 
 每条消息简短自然 像真人发微信/短信一样
 5-15个字最佳
-禁止使用逗号和句号（包括，。,. ）想表达停顿就拆成多条
+禁止使用逗号和句号（包括，。,. ）想表达停顿就拆成多条（但 {{}} 标签内的逗号例外）
 保持你平时的语气 用词习惯 称呼方式
 不要突然变得书面化或用奇怪的措辞
 参考上面的聊天历史记录中你是怎么说话的
@@ -29396,8 +31788,7 @@ ${loreContext}
 
 像真人一样说话`;
 
-            const userPromptForBlocked = `${summaryMemoryContext ? `【记忆摘要】
-以下是你和对方之前发生过的事情总结：
+            const userPromptForBlocked = `${summaryMemoryContext ? `【你的记忆（已经发生过的事实，必须遵守）】
 ${summaryMemoryContext}
 
 ` : ''}【完整的聊天历史记录】
@@ -30380,24 +32771,9 @@ messages:
                     console.log('[triggerAiReply] ℹ️ 未设置关联用户');
                 }
                 
-                // 用户头像变化提示（下一轮系统提示词）
-                let avatarChangeNotice = '';
                 let accountUserChar = null;
                 if (accountId) {
                     accountUserChar = await db.characters.get(parseInt(accountId));
-                    console.log(`[triggerAiReply] 头像通知检查: accountId=${accountId}, accountUserChar存在=${!!accountUserChar}, type=${accountUserChar?.type}, avatarUpdatedAt=${accountUserChar?.avatarUpdatedAt || '无'}`);
-                    if (accountUserChar && accountUserChar.type === 'user') {
-                        avatarChangeNotice = getUserAvatarChangeNotice(char, accountId, accountUserChar);
-                        if (avatarChangeNotice) {
-                            console.log(`[triggerAiReply] ✅ 头像更换通知已注入系统提示词，角色: ${char.name}`);
-                            // 🔧 修复数据丢失：使用 update() 只更新特定字段，避免用旧 char 覆盖并发写入的新数据
-                            await db.characters.update(targetCharId, {
-                                userAvatarNoticeMap: char.userAvatarNoticeMap
-                            });
-                        }
-                    }
-                } else {
-                    console.log('[triggerAiReply] ⚠️ accountId为空，跳过头像通知检查');
                 }
                 
                 let loreContext = "";
@@ -30468,6 +32844,14 @@ messages:
                     summaryMemoryContext = await getSummaryMemoryContext('private', targetCharId, accountId);
                 } catch (e) {
                     console.warn('[triggerAiReply] 读取总结记忆失败:', e);
+                }
+
+                // 2.6.1 构建实时话题感知（分析不同时间维度的关键词）
+                let recentTopicsContext = '';
+                try {
+                    recentTopicsContext = buildRecentTopicsContext(fullHistory);
+                } catch (e) {
+                    console.warn('[triggerAiReply] 构建话题感知失败:', e);
                 }
 
                 // 2.7 读取查手机模式下用户以角色身份给NPC发送的消息记录
@@ -30786,6 +33170,9 @@ ${hasPassword ? `
                     console.warn('[triggerAiReply] 群聊记忆互通构建失败:', gmErr);
                 }
 
+                // 🔧 检查 NovelAI 自动生图是否开启，决定 imgcard 是否需要附带英文 tag
+                const _novelaiAutoGenEnabledMain = await isNovelAIAutoGenerateEnabled();
+
                  let systemPrompt = `# 角色扮演任务
 
 【当前时间】
@@ -30821,12 +33208,15 @@ ${char.type !== 'user' && char.identity.bank_password ? `银行卡密码：${cha
 ${char.identity.balance !== undefined && char.identity.balance !== null ? `余额：${char.identity.balance}` : ''}
 ` : ''}
 
-${avatarChangeNotice}
-
 ${char.relationships && char.relationships.length > 0 ? `
 你身边的重要人物：
 ${char.relationships.map(r => `${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}
 ` : ''}
+
+${summaryMemoryContext ? `## 你的记忆（必须严格遵守，这些是已经发生过的事实）
+${summaryMemoryContext}
+` : ''}
+${recentTopicsContext || ''}
 
 ---
 
@@ -30841,9 +33231,6 @@ ${loreContext ? `## 世界观设定
 ${loreContext}
 ` : ''}
 
-${summaryMemoryContext ? `## 记忆摘要
-${summaryMemoryContext}
-` : ''}
 ${groupMemoryContext}
 ${_hasOfflineMemory ? `\n## ★ 线上线下统一世界观
 注意：你和对方的互动包含【微信聊天】和【线下见面】两个场景，它们是同一段关系。
@@ -30961,7 +33348,10 @@ ${char.theater_mode ? `## 🎭 小剧场模式（已开启）
 [voice:内容]
 
 图片：
-[imgcard:图片描述]
+${_novelaiAutoGenEnabledMain ? `[imgcard:中文图片描述{{english, novelai, tags}}]
+发图片时必须在 {{ }} 内写英文 NovelAI/Danbooru 风格 tag。根据角色性别用1boy或1girl，包含外貌特征、服装、表情、动作、场景，不加质量词，不超过25个tag。
+**发图片时必须同时发送文字消息，用|||组合。禁止只发一条图片不说话。**
+例：嘿 刚洗完澡~|||[imgcard:洗完澡的自拍{{1girl, wet hair, towel, bathroom, mirror, smile, looking at viewer}}]|||好看吗` : `[imgcard:图片描述]`}
 
 转账：
 ((TRANSFER: 金额, 备注))
@@ -31127,15 +33517,37 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                             avatarPrompt += `\n- **发送情头邀请**：\`((COUPLE_AVATAR))\` — 从头像库随机挑选一对情头，发送给对方，问对方要不要一起换情头。适用场景：感情升温、告白成功、想秀恩爱等浪漫时刻。`;
                         }
                         avatarPrompt += `\n- **换回单人头像**：\`((REVERT_COUPLE_AVATAR))\` — 换回单人头像（不再用情头）。适用场景：吵架了、生气了、冷战、分手、赌气等。会产生系统提示"XX换回了单人头像"。`;
-                        avatarPrompt += `\n- **使用对方发的图片当头像**：\`((USE_IMAGE_AS_AVATAR: 序号))\` — 对方发了图片，你根据图片描述分析选择其中一张当头像。序号是从最近往前数的编号（1=最近一张，2=倒数第2张...）。例如对方连发了2张图，你分析后觉得第2张更好看更适合当头像：\`((USE_IMAGE_AS_AVATAR: 2))\`。根据人设和情感决定是否使用。会产生系统提示"XX把你发的图片换成了头像"。`;
+                        avatarPrompt += `\n- **使用对方发的图片当头像**：\`((USE_IMAGE_AS_AVATAR: 序号))\` — 对方发了**真实照片/图片**（不是表情包！），你根据图片描述分析选择其中一张当头像。序号是从最近往前数的编号（1=最近一张，2=倒数第2张...）。例如对方连发了2张图，你分析后觉得第2张更好看更适合当头像：\`((USE_IMAGE_AS_AVATAR: 2))\`。根据人设和情感决定是否使用。会产生系统提示"XX把你发的图片换成了头像"。`;
+                        avatarPrompt += `\n- **截取图片局部当头像**：\`((CROP_AVATAR: 序号, 左%, 上%, 宽%, 高%))\` — 对方发了**真实照片/图片**，你仔细观察后发现图中某个**局部细节**（小饰品、配饰、小物件、可爱的小图案等）很适合当头像，你可以指定裁剪区域来截取那部分当头像。参数说明：序号=第几张图（同USE_IMAGE_AS_AVATAR），左%=从左边开始的百分比位置(0-100)，上%=从顶部开始的百分比位置(0-100)，宽%=裁剪宽度占原图百分比，高%=裁剪高度占原图百分比。例如图片右上角有个可爱的小发卡：\`((CROP_AVATAR: 1, 65, 5, 25, 20))\`。系统会自动裁剪并输出正方形头像。`;
+                        avatarPrompt += `\n  ⚠️ **严禁**对表情包使用此指令！表情包是聊天中用来表达情绪的小图片，不是真实照片，不能当头像。如果消息提示是"用户发送了一张表情包"，绝对不要使用 ((USE_IMAGE_AS_AVATAR)) 或 ((CROP_AVATAR))。只有对方发的是真实照片/自拍/图片时才可以考虑使用。`;
                         avatarPrompt += `\n\n注意：`;
                         avatarPrompt += `\n- 不要频繁使用，自然地在合适的时机使用`;
                         avatarPrompt += `\n- 换头像时可以配合聊天内容，比如"我换了个新头像你觉得怎么样"`;
                         avatarPrompt += `\n- 发情头邀请时要自然，不要突兀`;
                         avatarPrompt += `\n- 如果对方发了图片问你要不要换头像，先看图片描述分析每张图片，再根据你的人设和心情选择是否使用、使用哪张。例如：\`这张好看 我换这个|||((USE_IMAGE_AS_AVATAR: 1))\``;
+                        avatarPrompt += `\n- 如果看到图中有特别可爱/有趣的小细节（小饰品、挂件、小图案等），可以截取那部分当头像。例如：\`哇你这个小挂件好可爱 我截出来当头像了|||((CROP_AVATAR: 1, 70, 10, 25, 25))\``;
                         avatarPrompt += `\n- 如果吵架生气了、冷战了，可以用 ((REVERT_COUPLE_AVATAR)) 换回单人头像表示不满`;
                         avatarPrompt += `\n- 当然也可以根据人设选择不换，不是每次都要换的`;
                         avatarPrompt += `\n- 指令放在回复内容中，可以和文字混合。例如：嘿你看我换了个新头像|||((CHANGE_AVATAR))`;
+                        
+                        avatarPrompt += `\n\n【当对方换头像时的识图与反应】`;
+                        avatarPrompt += `\n当你收到"XX更换了头像"的系统通知时，通知中会附带对方新头像的图片。你应该仔细观察这张头像，识别其中的内容，然后根据你的人设、你们的关系、以及上下文，自然地做出反应。`;
+                        avatarPrompt += `\n\n**你需要观察和判断的内容：**`;
+                        avatarPrompt += `\n- 这是一张什么样的头像？（单人照？风景？插画？动漫角色？）`;
+                        avatarPrompt += `\n- 有没有"情头的另一半"的感觉？（比如构图明显是成对的一半、画面有互动暗示、是经典情侣头像风格等）`;
+                        avatarPrompt += `\n- 头像中有没有有趣的小细节、小饰品、小装饰、小图案？`;
+                        avatarPrompt += `\n\n**根据不同情境做出不同反应（以你的人设为准，不要刻板）：**`;
+                        avatarPrompt += `\n\n情境A：对方在聊天中已经发了图片给你，并且上下文暗示了"一起换情头/一起换头像"`;
+                        avatarPrompt += `\n→ 不要去裁剪系统通知里的头像图片。对方发的那张图片是给你用的，你应该用 ((USE_IMAGE_AS_AVATAR)) 来使用聊天中对方发给你的那张图片当头像。`;
+                        avatarPrompt += `\n→ 例如：\`好 我也换上了|||((USE_IMAGE_AS_AVATAR: 1))\``;
+                        avatarPrompt += `\n\n情境B：对方只是自己换了头像，没有配对的上下文，但你觉得对方新头像中有个小细节很可爱`;
+                        avatarPrompt += `\n→ 你可以截取对方头像的某个局部来当自己的头像（就像现实中情侣会截取对象头像的一小部分当情头）`;
+                        avatarPrompt += `\n→ 注意：此时要裁剪的是系统通知中附带的那张头像图片，它在对话中是最近的一张用户图片，用 ((CROP_AVATAR: 1, ...)) 来裁剪`;
+                        avatarPrompt += `\n→ 例如：\`你这个头像上的小猫咪好可爱 我截下来当头像了嘿嘿|||((CROP_AVATAR: 1, 60, 10, 30, 30))\``;
+                        avatarPrompt += `\n\n情境C：对方换了头像，看起来像是情头的一半`;
+                        avatarPrompt += `\n→ 根据你的人设和你们的关系自然反应：可以开心地问"是不是在等我换另一半？"、可以主动去找配对头像、也可以吃醋问"你跟谁换的情头？"等`;
+                        avatarPrompt += `\n\n情境D：对方换了头像，但你不想换 / 没什么特别反应`;
+                        avatarPrompt += `\n→ 完全可以只是评论一下（"换头像了？好看"）或者根本不提，一切以人设为准`;
                         
                         systemPrompt += avatarPrompt;
                         console.log('[triggerAiReply] ✅ 已添加自主换头像系统提示');
@@ -31238,7 +33650,7 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                     .filter(m => {
                         if (m.role !== 'system') return true;
                         // 🔧 保留重要的系统事件消息，过滤普通时间戳
-                        if (m.type === 'char_unblock_self' || m.type === 'fake_message_notice' || m.type === 'login_attempt_failed' || m.type === 'transfer_action') return true;
+                        if (m.type === 'char_unblock_self' || m.type === 'fake_message_notice' || m.type === 'login_attempt_failed' || m.type === 'transfer_action' || m.type === 'avatar_change') return true;
                         // 🔧 保留时间快进标记，让AI知道时间跳跃了
                         if (m.isTimeSkip) return true;
                         // 🔧 保留修改密码记录，让AI知道自己已经改过密码，避免重复修改
@@ -31274,6 +33686,26 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                             return {
                                 role: 'user',
                                 content: `[系统事件] ${content}`
+                            };
+                        }
+                        
+                        // 🖼️ 头像更换通知：转为多模态消息（文字+头像图片），让AI能识图判断
+                        if (m.role === 'system' && m.type === 'avatar_change') {
+                            if (m.avatarImage) {
+                                // 有头像图片：构建多模态消息，让AI同时看到通知文字和新头像图片
+                                return {
+                                    role: 'user',
+                                    content: [
+                                        { type: 'text', text: `[系统通知] ${content}。以下是对方更换的新头像图片，请仔细观察头像的内容（是单人头像？情头的一半？有什么特征/饰品/小细节？），然后结合上下文和你的人设自然地做出反应。` },
+                                        { type: 'image_url', image_url: { url: m.avatarImage } }
+                                    ],
+                                    _hasImage: true
+                                };
+                            }
+                            // 没有图片数据的旧版通知：仅文字
+                            return {
+                                role: 'user',
+                                content: `[系统通知] ${content}`
                             };
                         }
                         
@@ -31357,18 +33789,34 @@ ${togetherListenInfo.isPlaying ? '正在播放中...' : '已暂停'}
                         }
                         
                         // 🖼️ 图片识别：将 [img:base64/url] 转为多模态格式，让AI能看到图片
+                        // ⚠️ 重要：OpenAI 兼容 API 只允许 user 角色消息包含 image_url，
+                        // assistant 角色消息如果包含 image_url 会导致 400 错误！
                         if (content.startsWith('[img:') && content.endsWith(']')) {
                             const imgData = content.substring(5, content.length - 1).trim();
                             if (imgData.startsWith('data:') || imgData.startsWith('http')) {
-                                // ✅ 修复：根据发送者角色动态生成提示词，避免AI混淆谁发的图片/表情包
-                                const descText = m.imageDescription
-                                    ? (role === 'assistant' 
-                                        ? `（你发送了一张表情包，表情包描述: ${m.imageDescription}）`
-                                        : `（用户发送了一张表情包，表情包描述: ${m.imageDescription}。请根据表情包的含义和描述自然回复）`)
-                                    : (role === 'assistant'
+                                const isStickerMsg = m.isSticker || m.imageDescription;
+                                let descText;
+                                if (isStickerMsg) {
+                                    const stickerDesc = m.imageDescription ? `，表情包描述: ${m.imageDescription}` : '';
+                                    descText = role === 'assistant'
+                                        ? `（你发送了一张表情包${stickerDesc}）`
+                                        : `（用户发送了一张表情包${stickerDesc}。这是表情包，不是真实照片，不能当头像。请根据表情包的含义自然回复）`;
+                                } else {
+                                    descText = role === 'assistant'
                                         ? '（你发送了一张图片）'
-                                        : '（用户发送了一张图片，请仔细查看并根据图片内容回复）');
-                                // 构建多模态内容：文字提示（含描述） + 图片
+                                        : '（用户发送了一张图片，请仔细查看并根据图片内容回复）';
+                                }
+                                
+                                // 🔧 修复400错误：只有 user 角色才能发送 image_url 多模态内容
+                                // assistant 角色的图片/表情包只保留文字描述，不发送图片数据
+                                if (role === 'assistant') {
+                                    return {
+                                        role: role,
+                                        content: descText
+                                    };
+                                }
+                                
+                                // user 角色：构建多模态内容（文字提示 + 图片），让AI能看到图片
                                 return {
                                     role: role,
                                     content: [
@@ -31806,6 +34254,7 @@ ${checkResult.checkResult}
                             .replace(/\[?CHECK_ACCOUNT(?::.*?)?\]?/gi, '')
                             .replace(/\(\(CHANGE_AVATAR\)\)/gi, '')
                             .replace(/\(\(COUPLE_AVATAR\)\)/gi, '')
+                            .replace(/\(\(CROP_AVATAR:\s*\d+\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*\)\)/gi, '')
                             .replace(/\[(?:sticker|imgcard|img|voice):[^\]]*\]/gi, '')
                             .replace(/\|\|\|/g, ' ')
                             .replace(/\/\/\//g, ' ')
@@ -32261,6 +34710,23 @@ ${checkResult.checkResult}
                             console.error('[TriggerAI] 预处理换回单人头像失败:', e);
                         }
                         replyText = replyText.replace(/\(\(REVERT_COUPLE_AVATAR\)\)/gi, '').trim();
+                    }
+                    
+                    // ((CROP_AVATAR: N, left, top, width, height))
+                    const cropMatchPre = replyText.match(/\(\(CROP_AVATAR:\s*(\d+)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)\)/i);
+                    if (cropMatchPre) {
+                        const cropImgIdx = parseInt(cropMatchPre[1]) || 1;
+                        const cropL = parseFloat(cropMatchPre[2]);
+                        const cropT = parseFloat(cropMatchPre[3]);
+                        const cropW = parseFloat(cropMatchPre[4]);
+                        const cropH = parseFloat(cropMatchPre[5]);
+                        console.log(`[TriggerAI] 预处理裁剪头像指令: 图${cropImgIdx}, 区域(${cropL}%, ${cropT}%, ${cropW}%, ${cropH}%)`);
+                        try {
+                            await executeCropImageAsAvatar(targetCharId, accountId, cropImgIdx, cropL, cropT, cropW, cropH);
+                        } catch (e) {
+                            console.error('[TriggerAI] 预处理裁剪头像失败:', e);
+                        }
+                        replyText = replyText.replace(/\(\(CROP_AVATAR:\s*\d+\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*\)\)/gi, '').trim();
                     }
                     
                     // ((RECALL)) - 撤回：预处理移除，稍后在消息循环中不会遇到问题
@@ -33228,6 +35694,12 @@ ${checkResult.checkResult}
                 for (let i = 0; i < segments.length; i++) {
                     let seg = segments[i];
                     
+                    // 🔧 过滤掉泄漏的 NovelAI {{tags}} 消息（AI有时把英文tags放在[imgcard:]外面）
+                    if (/^\s*\{\{[\s\S]+?\}\}\s*$/.test(seg)) {
+                        console.log(`[AiReply] 🔧 过滤掉泄漏的 NovelAI tags: "${seg.substring(0, 60)}..."`);
+                        continue;
+                    }
+                    
                     // 🎯 检测换头像指令 ((CHANGE_AVATAR)) - 在分段中检测
                     if (/\(\(CHANGE_AVATAR\)\)/i.test(seg)) {
                         console.log(`[AiReply] 检测到换头像指令，执行换头像...`);
@@ -33276,6 +35748,24 @@ ${checkResult.checkResult}
                             console.error('[AiReply] 使用图片当头像失败:', e);
                         }
                         seg = seg.replace(/\(\(USE_IMAGE_AS_AVATAR(?::\s*\d+)?\)\)/gi, '').trim();
+                        if (!seg) continue;
+                    }
+                    
+                    // 🎯 检测裁剪图片当头像指令 ((CROP_AVATAR: N, left, top, width, height)) - 在分段中检测
+                    const cropMatchReply = seg.match(/\(\(CROP_AVATAR:\s*(\d+)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)\)/i);
+                    if (cropMatchReply) {
+                        const cropImgIdx = parseInt(cropMatchReply[1]) || 1;
+                        const cropL = parseFloat(cropMatchReply[2]);
+                        const cropT = parseFloat(cropMatchReply[3]);
+                        const cropW = parseFloat(cropMatchReply[4]);
+                        const cropH = parseFloat(cropMatchReply[5]);
+                        console.log(`[AiReply] 检测到裁剪头像指令: 图${cropImgIdx}, 区域(${cropL}%, ${cropT}%, ${cropW}%, ${cropH}%)`);
+                        try {
+                            await executeCropImageAsAvatar(targetCharId, accountId, cropImgIdx, cropL, cropT, cropW, cropH);
+                        } catch (e) {
+                            console.error('[AiReply] 裁剪头像失败:', e);
+                        }
+                        seg = seg.replace(/\(\(CROP_AVATAR:\s*\d+\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*\)\)/gi, '').trim();
                         if (!seg) continue;
                     }
                     
@@ -33797,7 +36287,7 @@ ${checkResult.checkResult}
             }
         }
 
-        // 重新生成回复（删除上一次AI回复的所有消息并重新生成，不删除用户消息）
+        // 重新生成回复（找到最后一条用户消息，截断其后所有AI回复，然后重新生成）
         async function regenerateLastReply() {
             // 群聊重回
             if (window.currentGroupChatId) {
@@ -33816,49 +36306,37 @@ ${checkResult.checkResult}
                 return;
             }
             
-            // 找到上一次AI回复的所有消息（从最后往前找，直到遇到用户消息）
-            let lastAiMessageStartIndex = -1;
-            let lastAiMessageEndIndex = -1;
-            
-            // 从后往前找最后一条AI消息
+            // ★ 核心修复：找到最后一条用户消息的位置
+            let lastUserMsgIndex = -1;
             for (let i = history.length - 1; i >= 0; i--) {
-                if (history[i].role === 'char') {
-                    lastAiMessageEndIndex = i;
+                if (history[i].role === 'user') {
+                    lastUserMsgIndex = i;
                     break;
                 }
             }
             
-            // 如果没有AI回复，直接生成新的
-            if (lastAiMessageEndIndex === -1) {
-                closeChatPanel();
-                await triggerAiReply();
+            // 如果没有用户消息，无法重新生成
+            if (lastUserMsgIndex === -1) {
+                showToast('没有可供重新生成的用户消息');
                 return;
             }
             
-            // 🔥 修复：扩展endIndex到包含最后一条char消息之后的所有非user消息
-            // 这些system消息（戳一戳、改网名等）是同一次AI回复中产生的，也应一并删除
-            let actualEndIndex = lastAiMessageEndIndex;
-            for (let i = lastAiMessageEndIndex + 1; i < history.length; i++) {
-                if (history[i].role === 'user') {
+            // 确认AI已经回复了这条用户消息（最后一条AI消息要在用户消息之后）
+            let lastAiMsgIndex = -1;
+            for (let i = history.length - 1; i >= 0; i--) {
+                if (history[i].role === 'char') {
+                    lastAiMsgIndex = i;
                     break;
                 }
-                actualEndIndex = i;
             }
             
-            // 从最后一条AI消息往前找，找到连续的所有AI消息
-            lastAiMessageStartIndex = lastAiMessageEndIndex;
-            for (let i = lastAiMessageEndIndex - 1; i >= 0; i--) {
-                if (history[i].role === 'user') {
-                    // 遇到用户消息，停止
-                    break;
-                }
-                // 还是AI的消息（包含system消息如戳一戳等），继续往前
-                lastAiMessageStartIndex = i;
+            if (lastAiMsgIndex < lastUserMsgIndex) {
+                showToast('AI 尚未对你的最后一条消息做出回应，无法重新生成');
+                return;
             }
             
-            // 删除所有连续的AI消息和关联的system消息（不删除用户消息）
-            const deleteCount = actualEndIndex - lastAiMessageStartIndex + 1;
-            history.splice(lastAiMessageStartIndex, deleteCount);
+            // ★ 关键：直接截断到最后一条用户消息之后，删除其后所有AI回复和系统消息
+            history.splice(lastUserMsgIndex + 1);
             await setChatHistory(char, accountId, history);
             await safeCharacterPut(char);
             
@@ -33868,8 +36346,8 @@ ${checkResult.checkResult}
             // 关闭面板
             closeChatPanel();
             
-            // 重新生成回复（基于删除后的历史记录，用户消息还在）
-            window._isRegenerateMode = true;
+            // 直接重新生成回复，不使用特殊的重回模式提示
+            // 历史记录以用户消息结尾，AI会自然地回复该用户消息
             await triggerAiReply();
         }
         
@@ -33877,7 +36355,7 @@ ${checkResult.checkResult}
         async function regenerateGroupReply() {
             if (!window.currentGroupChatId) return;
             
-            let group = await db.group_chats.get(window.currentGroupChatId);
+            let group = await getCachedGroupChat(window.currentGroupChatId);
             if (!group || !group.chat_history || group.chat_history.length === 0) {
                 showToast('没有聊天记录');
                 return;
@@ -33885,67 +36363,37 @@ ${checkResult.checkResult}
             
             const history = group.chat_history;
             
-            // 找到上一次AI回复的所有消息（从最后往前找，直到遇到用户消息或系统消息）
-            let lastAiMessageStartIndex = -1;
-            let lastAiMessageEndIndex = -1;
-            
-            // 从后往前找最后一条AI角色消息
+            // ★ 核心修复：找到最后一条用户消息的位置
+            let lastUserMsgIndex = -1;
             for (let i = history.length - 1; i >= 0; i--) {
-                if (history[i].role === 'char') {
-                    lastAiMessageEndIndex = i;
+                if (history[i].role === 'user') {
+                    lastUserMsgIndex = i;
                     break;
                 }
             }
             
-            // 如果没有AI回复，直接生成新的
-            if (lastAiMessageEndIndex === -1) {
-                closeChatPanel();
-                await triggerAiReply();
+            // 如果没有用户消息，无法重新生成
+            if (lastUserMsgIndex === -1) {
+                showToast('没有可供重新生成的用户消息');
                 return;
             }
             
-            // 🔥 修复：扩展endIndex到包含最后一条char消息之后的关联非user消息
-            let actualGroupEndIndex = lastAiMessageEndIndex;
-            for (let i = lastAiMessageEndIndex + 1; i < history.length; i++) {
-                if (history[i].role === 'user') {
-                    break;
-                }
-                // 只包含与AI回复关联的系统消息（红包领取、改昵称等）
-                if (history[i].role === 'system') {
-                    const content = history[i].content || '';
-                    if (content.includes('领取了红包') || content.includes('将自己的群昵称改为')) {
-                        actualGroupEndIndex = i;
-                        continue;
-                    }
-                }
+            // 确认AI已经回复了这条用户消息
+            let lastAiMsgIndex = -1;
+            for (let i = history.length - 1; i >= 0; i--) {
                 if (history[i].role === 'char') {
-                    actualGroupEndIndex = i;
+                    lastAiMsgIndex = i;
+                    break;
                 }
             }
             
-            // 从最后一条AI消息往前找，找到连续的所有AI消息（不包括系统消息）
-            lastAiMessageStartIndex = lastAiMessageEndIndex;
-            for (let i = lastAiMessageEndIndex - 1; i >= 0; i--) {
-                if (history[i].role === 'user') {
-                    // 遇到用户消息，停止
-                    break;
-                }
-                if (history[i].role === 'system') {
-                    // 系统消息也算作分隔，但如果是领取红包等系统消息，也删除
-                    const content = history[i].content || '';
-                    if (content.includes('领取了红包') || content.includes('将自己的群昵称改为')) {
-                        lastAiMessageStartIndex = i;
-                        continue;
-                    }
-                    break;
-                }
-                // 还是AI的消息，继续往前
-                lastAiMessageStartIndex = i;
+            if (lastAiMsgIndex < lastUserMsgIndex) {
+                showToast('AI 尚未对你的最后一条消息做出回应，无法重新生成');
+                return;
             }
             
-            // 删除所有连续的AI消息和相关系统消息
-            const deleteCount = actualGroupEndIndex - lastAiMessageStartIndex + 1;
-            history.splice(lastAiMessageStartIndex, deleteCount);
+            // ★ 关键：直接截断到最后一条用户消息之后，删除其后所有AI回复和系统消息
+            history.splice(lastUserMsgIndex + 1);
             
             group.chat_history = history;
             group.updated_at = Date.now();
@@ -33957,8 +36405,7 @@ ${checkResult.checkResult}
             // 关闭面板
             closeChatPanel();
             
-            // 重新生成群聊回复
-            window._isRegenerateMode = true;
+            // 直接重新生成群聊回复，不使用特殊的重回模式提示
             await triggerAiReply();
         }
 
@@ -35038,6 +37485,14 @@ ${loreContext}
                 
                 // 支持多模态内容（数组格式，用于图片识别）
                 if (Array.isArray(content)) {
+                    // ⚠️ 防御：OpenAI API 只允许 user 角色包含 image_url，assistant 角色带 image_url 会导致 400
+                    // 如果是 assistant 消息且包含 image_url，降级为纯文字
+                    if (role === 'assistant') {
+                        const textParts = content.filter(part => part.type === 'text' && part.text && part.text.trim().length > 0);
+                        const textContent = textParts.map(p => p.text).join(' ').trim();
+                        return { role, content: textContent || '（发送了一张图片）' };
+                    }
+                    
                     // 验证数组中每个元素
                     const validParts = content.filter(part => {
                         if (part.type === 'text') return part.text && part.text.trim().length > 0;
@@ -35368,6 +37823,13 @@ ${loreContext}
                 
                 let content = m.content;
                 if (Array.isArray(content)) {
+                    // ⚠️ 防御：OpenAI API 只允许 user 角色包含 image_url，assistant 角色带 image_url 会导致 400
+                    if (role === 'assistant') {
+                        const textParts = content.filter(part => part.type === 'text' && part.text && part.text.trim().length > 0);
+                        const textContent = textParts.map(p => p.text).join(' ').trim();
+                        return { role, content: textContent || '（发送了一张图片）' };
+                    }
+                    
                     const validParts = content.filter(part => {
                         if (part.type === 'text') return part.text && part.text.trim().length > 0;
                         if (part.type === 'image_url') return part.image_url && part.image_url.url;
@@ -37806,14 +40268,15 @@ async function sendGlobalSticker(catId, url) {
     
     // ✅ 支持群聊模式：和私聊一样，追加消息到UI即可
     if (window.currentGroupChatId) {
-        const group = await db.group_chats.get(window.currentGroupChatId);
+        const group = await getCachedGroupChat(window.currentGroupChatId);
         if (!group) return;
         
         if (!group.chat_history) group.chat_history = [];
         const msg = {
             role: 'user',
             content: msgContent,
-            time: Date.now()
+            time: Date.now(),
+            isSticker: true
         };
         group.chat_history.push(msg);
         group.updated_at = Date.now();
@@ -37847,6 +40310,7 @@ async function sendGlobalSticker(catId, url) {
         role: 'user',
         content: msgContent,
         imageDescription: desc, // 新增字段：图片描述
+        isSticker: true, // 标记为表情包，防止被当作头像使用
         time: Date.now()
     });
     
@@ -40205,9 +42669,16 @@ async function doPublishMoment() {
     document.getElementById('moments-page').scrollTop = 0;
     
     // ✅ 触发好友自动点赞评论（延迟执行，模拟真实场景）
-    setTimeout(() => {
-        generateFriendInteractions(momentId, currentMomentPrivacy, selectedPrivacyFriends.slice());
-    }, 2000);
+    // 私密朋友圈不调用API，不生成任何好友互动
+    if (currentMomentPrivacy !== 'private') {
+        const _privacy = currentMomentPrivacy;
+        const _privacyList = selectedPrivacyFriends.slice();
+        setTimeout(() => {
+            generateFriendInteractions(momentId, _privacy, _privacyList);
+        }, 2000);
+    } else {
+        console.log('[朋友圈] 私密朋友圈，跳过AI互动生成');
+    }
 }
 
 // ★ 查手机FP模式 - 以角色身份发朋友圈（复用原版发布页面）
@@ -40274,6 +42745,18 @@ async function generateFriendInteractions(momentId, privacy, privacyList) {
         const accountId = getCurrentAccountId();
         const myChar = await db.characters.get(parseInt(currentMyCharId));
         const myName = myChar?.name || '我';
+        const myDesc = myChar?.description || myChar?.personality || '';
+        
+        // 获取发布者关联的世界书上下文
+        let friendInterLoreContext = '';
+        try {
+            const lorebookIds = myChar?.lorebookIds || (myChar?.lorebookId ? [myChar.lorebookId] : []);
+            if (lorebookIds.length > 0 && typeof getLorebookContext === 'function') {
+                friendInterLoreContext = await getLorebookContext(lorebookIds, myName);
+            }
+        } catch (e) {
+            console.warn('[朋友圈互动] 获取世界书失败:', e);
+        }
         
         // 获取所有好友（排除联机好友）
         const allChars = await db.characters.toArray();
@@ -40319,6 +42802,17 @@ async function generateFriendInteractions(momentId, privacy, privacyList) {
             name: getCharDisplayName(f, _likeAid)
         }));
         
+        // 构建包含人设上下文的 system prompt
+        const friendInterSystemPrompt = `你正在进行角色扮演世界中的社交模拟。请严格基于以下角色设定和世界观来生成评论，确保每条评论都符合对应角色的人设。
+
+【朋友圈发布者信息】
+名字：${myName}
+${myChar?.wx_nickname ? `微信网名：${myChar.wx_nickname}` : ''}
+${myDesc ? `人设：\n${myDesc}` : ''}
+${friendInterLoreContext ? `\n【世界观】\n${friendInterLoreContext}` : ''}
+
+只返回JSON数组，不要任何其他文字。`;
+        
         // ✅ 调用AI生成评论
         const comments = [];
         
@@ -40333,24 +42827,29 @@ async function generateFriendInteractions(momentId, privacy, privacyList) {
                 
                 for (const batch of batches) {
                     try {
-                        // 构建角色信息（使用微信显示名）
+                        // 构建角色信息（使用微信显示名，包含详细人设和关系）
                         const _cmtAid = getCurrentAccountId();
                         const commenterInfos = batch.map(c => {
                             const displayName = getCharDisplayName(c, _cmtAid);
-                            return `- ${displayName}：${c.description || c.personality || '普通朋友'}`;
+                            const desc = c.description || c.personality || '普通朋友';
+                            // 尝试获取与发布者的关系
+                            const relationships = myChar?.relationships || [];
+                            const rel = relationships.find(r => r.targetId === c.id);
+                            const relInfo = rel ? `（与${myName}的关系：${rel.relation}）` : '';
+                            return `- ${displayName}${relInfo}：${desc}`;
                         }).join('\n');
                         
                         const batchPrompt = `${myName} 发了一条朋友圈：
 "${moment.content}"
 ${moment.images?.length > 0 || moment.imageCount > 0 ? `（附带${moment.imageCount || moment.images.length}张图片${moment.imageDesc ? '：' + moment.imageDesc : ''}）` : ''}
 
-以下好友看到了这条朋友圈，请为每个人生成一条符合其性格的评论：
+以下好友看到了这条朋友圈，请为每个人生成一条符合其人设和性格的评论：
 ${commenterInfos}
 
 要求：
 1. 每条评论简短自然（3-20字）
 2. 可以用表情、语气词
-3. 符合每个角色的性格特点
+3. **必须符合每个角色的人设、性格特点和与${myName}的关系**
 4. 鼓励好友之间互相回复（使用 replyTo 字段指定回复的人名）
 5. 不是所有人都要互相回复，但至少有一些好友之间会有对话
 
@@ -40358,7 +42857,7 @@ ${commenterInfos}
 [{"name": "角色名", "content": "评论内容"}, {"name": "角色名", "replyTo": "被回复的角色名", "content": "回复内容"}, ...]`;
 
                         const result = await callAI([
-                            { role: 'system', content: '你是一个社交媒体评论生成助手，只返回JSON数组，不要任何其他文字。' },
+                            { role: 'system', content: friendInterSystemPrompt },
                             { role: 'user', content: batchPrompt }
                         ], { _useSecondary: true });
                         
@@ -41145,22 +43644,45 @@ async function triggerMutualFriendComments(momentId) {
             const freshMoment = await db.moments.get(momentId);
             if (!freshMoment) return;
             
+            // 获取发布者的人设和世界书上下文
+            const ownerDesc = ownerChar.description || ownerChar.personality || '';
+            let mutualLoreContext = '';
+            try {
+                const lorebookIds = ownerChar.lorebookIds || (ownerChar.lorebookId ? [ownerChar.lorebookId] : []);
+                if (lorebookIds.length > 0 && typeof getLorebookContext === 'function') {
+                    mutualLoreContext = await getLorebookContext(lorebookIds, ownerChar.name);
+                }
+            } catch (e) {
+                console.warn('[朋友圈NPC] 获取世界书失败:', e);
+            }
+            
             // 构建所有选中NPC的信息
             const npcInfos = selectedNPCs.map(({ npc, relation }) => {
                 const displayName = npc.remark || npc.wx_nickname || npc.name;
                 return `- ${displayName}（和${ownerChar.name}的关系：${relation}）：${npc.description || npc.personality || '普通朋友'}`;
             }).join('\n');
             
+            // 构建包含人设上下文的 system prompt
+            const mutualNpcSystemPrompt = `你正在进行角色扮演世界中的社交模拟。请严格基于以下角色设定和世界观来生成评论，确保每条评论都符合对应角色的人设。
+
+【朋友圈发布者信息】
+名字：${ownerChar.name}
+${ownerChar.wx_nickname ? `微信网名：${ownerChar.wx_nickname}` : ''}
+${ownerDesc ? `人设：\n${ownerDesc}` : ''}
+${mutualLoreContext ? `\n【世界观】\n${mutualLoreContext}` : ''}
+
+只返回JSON数组，不要任何其他文字。`;
+            
             const batchPrompt = `${ownerChar.name} 发了一条朋友圈："${freshMoment.content}"
 ${freshMoment.imageCount > 0 || (freshMoment.images && freshMoment.images.length > 0) ? `（附带${freshMoment.imageCount || freshMoment.images.length}张图片${freshMoment.imageDesc ? '：' + freshMoment.imageDesc : ''}）` : ''}
 
-以下是 ${ownerChar.name} 的好友，请为每个人生成一条符合其性格和关系的朋友圈评论：
+以下是 ${ownerChar.name} 的好友，请为每个人生成一条符合其人设、性格和关系的朋友圈评论：
 ${npcInfos}
 
 要求：
 1. 每条评论简短自然（2-25字）
 2. 可以用表情、语气词、调侃、夸赞、吐槽等
-3. 符合每个角色和${ownerChar.name}的关系
+3. **必须符合每个角色的人设、性格特点和与${ownerChar.name}的关系**
 4. 像真人在朋友圈下评论一样随意
 5. 鼓励好友之间互相回复（使用 replyTo 字段指定回复的人名）
 
@@ -41168,7 +43690,7 @@ ${npcInfos}
 [{"name": "角色名", "content": "评论内容"}, {"name": "角色名", "replyTo": "被回复的角色名", "content": "回复内容"}, ...]`;
 
             const result = await callAI([
-                { role: 'system', content: '你是一个社交媒体评论生成助手，只返回JSON数组，不要任何其他文字。' },
+                { role: 'system', content: mutualNpcSystemPrompt },
                 { role: 'user', content: batchPrompt }
             ], { json_mode: true, _useSecondary: true });
             
@@ -42604,6 +45126,7 @@ async function showTransferPage() {
     
     // ★ fp模式：用联系人信息显示转账目标
     if (window._fpChatMode) {
+        if (window._fpGroupChatMode) { showToast("群聊中暂不支持此操作"); return; }
         if (!window._fpContactCharId) { showToast("请先进入聊天"); return; }
         const contactChar = await db.characters.get(window._fpContactCharId);
         if (!contactChar) { showToast("联系人不存在"); return; }
@@ -42763,7 +45286,7 @@ async function sendGroupRedPacket() {
     await safeCharacterPut(user);
     
     // 构建红包消息
-    const group = await db.group_chats.get(window.currentGroupChatId);
+    const group = await getCachedGroupChat(window.currentGroupChatId);
     if (!group) return;
     
     const redPacketData = {
@@ -42807,7 +45330,7 @@ async function showExclusiveTransferPage() {
     
     if (!window.currentGroupChatId) return;
     
-    const group = await db.group_chats.get(window.currentGroupChatId);
+    const group = await getCachedGroupChat(window.currentGroupChatId);
     if (!group) return;
     
     const listEl = document.getElementById('exclusive-member-list');
@@ -42873,7 +45396,7 @@ let currentViewingRedPacketId = null;
 async function showRedPacketDetail(redPacketId) {
     if (!window.currentGroupChatId) return;
     
-    const group = await db.group_chats.get(window.currentGroupChatId);
+    const group = await getCachedGroupChat(window.currentGroupChatId);
     if (!group || !group.chat_history) return;
     
     // 找到红包消息
@@ -43002,7 +45525,7 @@ async function claimRedPacket() {
         return;
     }
     
-    const group = await db.group_chats.get(window.currentGroupChatId);
+    const group = await getCachedGroupChat(window.currentGroupChatId);
     if (!group || !group.chat_history) {
         console.warn('[领取红包] 找不到群聊或聊天记录');
         showToast('群聊数据异常');
@@ -43110,7 +45633,7 @@ async function claimRedPacket() {
 async function receiveGroupTransfer(msgId) {
     if (!window.currentGroupChatId) return;
     
-    const group = await db.group_chats.get(window.currentGroupChatId);
+    const group = await getCachedGroupChat(window.currentGroupChatId);
     if (!group || !group.chat_history) return;
     
     // 找到转账消息
@@ -43212,6 +45735,35 @@ async function sendLocationMessage() {
     
     // ★ fp模式：以角色身份发送位置
     if (window._fpChatMode) {
+        if (window._fpGroupChatMode) {
+            // fp群聊模式发送位置
+            const locContent = JSON.stringify({ name: nameVal, address: addressVal || '暂无详细地址' });
+            if (window.currentGroupChatId && window._fpRoleCharId) {
+                const group = await getCachedGroupChat(window.currentGroupChatId);
+                if (group) {
+                    const roleChar = await db.characters.get(window._fpRoleCharId);
+                    if (!group.chat_history) group.chat_history = [];
+                    group.chat_history.push({
+                        id: 'loc_' + Date.now(),
+                        role: 'char',
+                        senderId: window._fpRoleCharId,
+                        senderName: roleChar ? (roleChar.nick || roleChar.name) : '角色',
+                        type: 'location',
+                        content: locContent,
+                        time: Date.now(),
+                        fpSent: true
+                    });
+                    group.updated_at = Date.now();
+                    await safeGroupChatPut(group);
+                    await renderGroupChatBody(group);
+                }
+            }
+            hideLocationModal();
+            showToast("位置已发送");
+            document.getElementById('action-panel').style.display = 'none';
+            document.getElementById('chat-panel-container').classList.remove('open');
+            return;
+        }
         if (!window._fpRoleCharId) return;
         const roleChar = await db.characters.get(window._fpRoleCharId);
         if (!roleChar) return;
@@ -43441,7 +45993,7 @@ async function doTransfer() {
     // 3. 判断是群聊专属转账还是私聊转账
     if (window.currentGroupChatId && exclusiveTransferTarget) {
         // 群聊专属转账
-        const group = await db.group_chats.get(window.currentGroupChatId);
+        const group = await getCachedGroupChat(window.currentGroupChatId);
         if (!group) {
             showToast("群聊不存在");
             return;
@@ -47684,6 +50236,9 @@ if (!document.getElementById('couple-space-animations')) {
             50% { transform: scale(1.2); opacity: 1; }
             100% { transform: scale(0.8); opacity: 0.5; }
         }
+        #video-msg-input::placeholder {
+            color: rgba(255,255,255,0.5);
+        }
         @keyframes blink {
             0%, 100% { opacity: 0.8; }
             50% { opacity: 0.3; }
@@ -47862,6 +50417,7 @@ let videoCallTimeout = null;
 let videoCallTimer = null;
 let videoCallSeconds = 0;
 let videoCallCharId = null;
+let videoCallCancelled = false; // 标记视频通话是否已被取消/超时
 let isCameraOn = true;
 let currentVideoCallId = null; // 当前视频通话的ID
 let currentVideoCallMessages = []; // 当前视频通话的消息记录
@@ -47892,13 +50448,20 @@ async function initiateVideoCall() {
     }
 
     videoCallCharId = currentChatCharId;
+    videoCallCancelled = false; // 重置取消标记
 
     // 显示等待接听页面
     showVideoWaitingPage(char);
 
     try {
-        // 调用API判断角色是否接听
+        // 调用API判断角色是否接听（一次调用返回：是否接通 + 第一句话/拒绝消息）
         const response = await callVideoCallAPI(char, accountId);
+        
+        // ✅ 检查：如果在 API 调用期间被超时/取消了，忽略响应
+        if (videoCallCancelled) {
+            console.log('[视频通话] API 返回但通话已被取消/超时，忽略响应');
+            return;
+        }
         
         // 清除超时定时器
         if (videoCallTimeout) {
@@ -47907,17 +50470,19 @@ async function initiateVideoCall() {
         }
 
         if (response.accepted) {
-            // 接听了，显示视频通话页面，直接传入第一句话（不再单独调用API）
-            showVideoCallPage(char, response.acceptMessage);
+            // 接听了，显示视频通话页面，直接传入第一句话和预生成的图片tags（一次 API 调用已获得）
+            showVideoCallPage(char, response.acceptMessage, response.imageTags);
         } else {
-            // 不接听，返回聊天页面并显示消息（保存到聊天记录）
-            await addVideoCallMessage(char, accountId, response.rejectMessage || '抱歉，现在不方便接听视频通话...');
+            // 不接听，返回聊天页面并显示拒绝消息（保存到聊天记录）
             hideVideoWaitingPage();
+            await addVideoCallMessage(char, accountId, response.rejectMessage);
         }
     } catch (error) {
         console.error('视频通话请求失败:', error);
-        alert('视频通话请求失败: ' + error.message);
-        hideVideoWaitingPage();
+        if (!videoCallCancelled) {
+            hideVideoWaitingPage();
+            alert('视频通话请求失败: ' + error.message);
+        }
     }
 }
 
@@ -47948,6 +50513,69 @@ async function callVideoCallAPI(char, accountId) {
     // 计算虚拟时间
     const virtualTimeStr = getFormattedVirtualTime(char);
     
+    // 🔧 读取总结记忆和话题感知
+    let summaryMemoryContext = '';
+    try { summaryMemoryContext = await getSummaryMemoryContext('private', char.id, accountId); } catch (e) {}
+    let recentTopicsContext = '';
+    try { recentTopicsContext = buildRecentTopicsContext(history); } catch (e) {}
+    
+    // 🔧 构建通话前的聊天摘要（至关重要！让 AI 知道通话的上下文和原因）
+    const preCallHistory = history.slice(-10);
+    const preCallContext = preCallHistory.map(m => {
+        // 🔧 修复：系统消息正确归属为"[系统]"，而非角色名
+        if (m.role === 'system') return `[系统]: ${String(m.content || '').substring(0, 80)}`;
+        const sender = m.role === 'user' ? userName : char.name;
+        const content = String(m.content || '').substring(0, 80);
+        return `${sender}: ${content}`;
+    }).join('\n');
+    
+    // 🔧 检查并构建之前视频通话的详细历史摘要（解决"每次都以为是第一次通话"的问题）
+    const prevVideoCallMsgs = history.filter(m => m.isVideoCall && m.role !== 'system');
+    const hasPrevVideoCalls = prevVideoCallMsgs.length > 0;
+    let prevVideoCallSummary = '';
+    if (hasPrevVideoCalls) {
+        // 从历史中提取所有视频通话会话，按"接通→结束"分组
+        const callSessions = [];
+        let currentSession = null;
+        for (const m of history) {
+            if (m.isVideoCall && m.role === 'system' && m.content.includes('已接通')) {
+                currentSession = { messages: [], startTime: m.time };
+            } else if (m.isVideoCall && m.role === 'system' && m.content.includes('已结束')) {
+                if (currentSession) {
+                    currentSession.endTime = m.time;
+                    callSessions.push(currentSession);
+                    currentSession = null;
+                }
+            } else if (m.isVideoCall && m.role !== 'system' && currentSession) {
+                currentSession.messages.push(m);
+            } else if (m.isVideoCall && m.role !== 'system' && !currentSession) {
+                // 未接通的视频通话（拒接）
+                callSessions.push({ messages: [m], rejected: true, startTime: m.time });
+            }
+        }
+        // 如果有未结束的会话也记录下来
+        if (currentSession && currentSession.messages.length > 0) {
+            callSessions.push(currentSession);
+        }
+        
+        if (callSessions.length > 0) {
+            const summaryParts = [`你和${userName}之前已经进行过 **${callSessions.length} 次**视频通话：`];
+            callSessions.slice(-5).forEach((session, idx) => { // 最多显示最近5次
+                const charMsgs = session.messages.filter(m => m.role === 'char');
+                const userMsgs = session.messages.filter(m => m.role === 'user');
+                if (session.rejected) {
+                    const rejectContent = charMsgs.length > 0 ? String(charMsgs[0].content || '').replace('[未接听视频通话] ', '').replace('[视频通话] ', '').substring(0, 60) : '';
+                    summaryParts.push(`- 第${callSessions.length - callSessions.slice(-5).length + idx + 1}次：你没接听${rejectContent ? '，理由："' + rejectContent + '"' : ''}`);
+                } else {
+                    const firstCharMsg = charMsgs.length > 0 ? String(charMsgs[0].content || '').replace('[视频通话] ', '').substring(0, 80) : '';
+                    const msgCount = session.messages.length;
+                    summaryParts.push(`- 第${callSessions.length - callSessions.slice(-5).length + idx + 1}次：已接通（共${msgCount}条对话）${firstCharMsg ? '，你接通时说："' + firstCharMsg + '..."' : ''}`);
+                }
+            });
+            prevVideoCallSummary = summaryParts.join('\n');
+        }
+    }
+
     // 构建完整系统提示（包含双方人设、世界书、上下文）
     const systemPrompt = `# 视频通话请求
 
@@ -47967,23 +50595,48 @@ ${char.wx_nickname ? `**微信网名**：${char.wx_nickname}` : ''}
 **你的人设**：
 ${char.description || ''}
 ${userDesc}
-${loreContext}
 ${char.relationships && char.relationships.length > 0 ? `
 **你的关联角色/NPC**：
 ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}` : ''}
+
+${summaryMemoryContext ? `## 你的记忆（必须严格遵守，这些是已经发生过的事实）
+${summaryMemoryContext}
+` : ''}
+${recentTopicsContext || ''}
+${loreContext ? `## 世界观设定\n${loreContext}` : ''}
+
+---
+
+## 通话前的聊天摘要（这是你们通话的上下文和原因，至关重要！）
+
+${preCallContext || '（暂无聊天记录）'}
+
+${prevVideoCallSummary ? `---
+
+## ⚡ 视频通话历史（非常重要！你们不是第一次通话！）
+
+${prevVideoCallSummary}
+
+**⚠️ 这不是你们的第一次视频通话！你必须自然地承接之前通话的关系、话题和记忆。绝对不能表现得像第一次通话一样打招呼或做自我介绍。你要像和熟悉的人再次视频一样自然。**` : ''}
 
 ---
 
 ## 场景
 
-用户刚刚向你发起了**视频通话请求**。
+${userName}${hasPrevVideoCalls ? '再次' : ''}向你发起了**视频通话请求**（不是文字聊天！）。
 
-请根据你的人设、与用户的关系、当前聊天氛围和情绪，决定是否接听。
+请根据你的人设、与${userName}的关系、**上面的聊天摘要内容**${hasPrevVideoCalls ? '以及之前的视频通话历史' : ''}和当前情绪氛围，决定是否接听。
+
+⚠️ **这是视频通话，不是文字聊天！绝对禁止以下行为**：
+- 禁止使用 ||| 分隔符（那是文字聊天的格式，视频通话不需要）
+- 禁止把回复拆分成多条短消息
+- 你说的是完整的口语对话，不是打字
 
 - 如果你决定**接听**：写出你接通视频后的第一段话（100-500字），包含动作描写。
   - 格式：动作描写:"说的话"
-  - 例如：微笑的挥挥手:"嗨～终于接通啦！刚刚在干嘛呢？"
   - 动作必须是通过手机屏幕能看到的（挥手、微笑、调整镜头、比心、做鬼脸等）
+  - ⚡ **你的第一句话必须跟上面的「通话前聊天摘要」内容相关**！自然地延续之前的话题、情绪或事件。绝对不要每次都用一样的"嗨～接通啦"之类的通用打招呼，要根据你们最近聊了什么来说。比如之前聊到出去玩，你可以说"对了刚才说要去哪玩来着？让我看看你现在在哪～"
+  ${hasPrevVideoCalls ? `- ⚡ **你们之前已经通过话！** 不要像第一次通话那样惊讶或新奇地打招呼。可以提到上次通话的内容、吐槽对方又打来了、或者自然地继续之前的话题。` : ''}
   
 - 如果你决定**不接听**：写出拒绝消息，说明原因，符合你的人设和语气。
 
@@ -47995,19 +50648,34 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
 
 {
     "accepted": true或false,
-    "message": "你的回复内容（接听则写视频通话第一段话含动作描写，不接听则写拒绝消息）"
+    "message": "你的回复内容（接听则写视频通话第一段话含动作描写，不接听则写拒绝消息）"${char.video_novelai_enabled ? `,
+    "image_tags": "（仅接听时需要）根据你的回复内容，生成一组英文 NovelAI/Danbooru 风格的图片 tag，用逗号分隔，不超过30个tag。规则：根据角色性别用1boy或1girl；提取表情(smile,blush,wink等)、动作(waving,peace sign等)、外貌特征(发色发型瞳色)、服装、场景；必须包含 looking at viewer, upper body；禁止出现 smartphone/phone/screen/video call/pov/UI 等标签；不要加质量词(masterpiece等)。只写tag，不要解释。"` : ''}
 }
 
 只返回JSON，不要有其他内容。`;
 
     // 构建消息数组（带上下文）
+    // 🔧 修复：保留视频通话的系统边界标记（接通/结束），让AI清楚区分每次通话
     const contextCount = char.context_message_count || 20;
-    const recentHistory = history.slice(-contextCount)
-        .filter(m => m.role !== 'system')
-        .map(m => ({
+    const recentHistory = [];
+    const slicedHistory = history.slice(-contextCount);
+    for (const m of slicedHistory) {
+        if (m.role === 'system') {
+            // 视频通话边界标记转为 user 消息，让AI看到通话的起止
+            if (m.isVideoCall) {
+                recentHistory.push({
+                    role: 'user',
+                    content: m.content // 如 "📹 视频通话已接通" / "📹 视频通话已结束，通话时长 X秒"
+                });
+            }
+            // 其他系统消息跳过
+            continue;
+        }
+        recentHistory.push({
             role: m.role === 'user' ? 'user' : 'assistant',
             content: m.content
-        }));
+        });
+    }
     
     const messages = [
         { role: 'system', content: systemPrompt },
@@ -48036,17 +50704,12 @@ ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '�
         return {
             accepted: response.accepted || false,
             acceptMessage: response.accepted ? response.message : null,
-            rejectMessage: !response.accepted ? response.message : null
+            rejectMessage: !response.accepted ? response.message : null,
+            imageTags: response.accepted ? (response.image_tags || null) : null
         };
     } catch (error) {
         console.error('AI调用失败:', error);
-        // 默认情况：有70%概率接听
-        const randomAccept = Math.random() < 0.7;
-        return {
-            accepted: randomAccept,
-            acceptMessage: randomAccept ? '微笑的挥挥手:"嗨～接通啦！"' : null,
-            rejectMessage: !randomAccept ? '抱歉，现在不太方便接视频通话...' : null
-        };
+        throw error;
     }
 }
 
@@ -48094,12 +50757,6 @@ function showVideoWaitingPage(char) {
 
     // 显示页面
     waitingPage.style.display = 'block';
-
-    // 设置30秒超时
-    videoCallTimeout = setTimeout(() => {
-        hideVideoWaitingPage();
-        alert('对方未接听');
-    }, 30000);
 }
 
 // 隐藏等待接听页面
@@ -48122,25 +50779,67 @@ function hideVideoWaitingPage() {
 // 取消视频通话
 function cancelVideoCall() {
     if (confirm('确定要取消视频通话吗？')) {
+        videoCallCancelled = true; // ✅ 标记已取消，防止 API 延迟返回后仍接通
         hideVideoWaitingPage();
     }
 }
 
 // 显示视频通话页面
-async function showVideoCallPage(char, firstMessage) {
-    hideVideoWaitingPage();
+async function showVideoCallPage(char, firstMessage, imageTags) {
+    // ⚠️ 不要先切换页面！保持"正在呼叫"等待页，直到所有内容（文字+图片）都准备好再一次性呈现
 
     const videoPage = document.getElementById('video-call-page');
     const avatar = document.getElementById('video-call-avatar');
     const username = document.getElementById('video-call-username');
     const status = document.getElementById('video-call-status');
     const messageArea = document.getElementById('video-message-area');
+    const bgDiv = document.getElementById('video-call-bg');
+    const selfWindow = document.getElementById('video-self-window');
 
-    // 设置头像和名字（确保使用角色的头像，不要混淆）
-    if (char.avatar) {
-        avatar.style.backgroundImage = `url(${char.avatar})`;
+    const accountId = getCurrentAccountId();
+    
+    // 获取角色头像（按账号隔离）
+    const charAvatar = getCharAvatar(char, accountId) || char.avatar || '';
+    
+    // 判断是否使用自定义视频通话图片
+    const useCustomImg = !!char.video_call_img_enabled;
+    const customCharImg = useCustomImg ? (char.video_call_char_img || '') : '';
+    const customUserImg = useCustomImg ? (char.video_call_user_img || '') : '';
+    
+    // 设置角色背景图（全屏背景）：优先用自定义图片，否则用角色头像
+    const bgImage = customCharImg || charAvatar;
+    if (bgImage) {
+        bgDiv.style.backgroundImage = `url(${bgImage})`;
     } else {
-        avatar.style.backgroundImage = ''; // 清空背景图
+        bgDiv.style.backgroundImage = '';
+        bgDiv.style.backgroundColor = '#1a1a2e';
+    }
+    
+    // 设置右上小窗（用户图片）：优先用自定义图片，否则用当前用户头像
+    let userAvatar = '';
+    if (customUserImg) {
+        userAvatar = customUserImg;
+    } else if (currentMyCharId) {
+        try {
+            const myChar = await db.characters.get(parseInt(currentMyCharId));
+            if (myChar) {
+                userAvatar = getCharAvatar(myChar, accountId) || myChar.avatar || '';
+            }
+        } catch(e) {
+            console.warn('[showVideoCallPage] 获取用户头像失败:', e);
+        }
+    }
+    if (userAvatar) {
+        selfWindow.style.backgroundImage = `url(${userAvatar})`;
+    } else {
+        selfWindow.style.backgroundImage = '';
+    }
+    
+    // 设置左上角小头像和角色名
+    if (charAvatar) {
+        avatar.style.backgroundImage = `url(${charAvatar})`;
+    } else {
+        avatar.style.backgroundImage = '';
     }
     username.textContent = char.name || '未知角色';
 
@@ -48151,14 +50850,42 @@ async function showVideoCallPage(char, firstMessage) {
     currentVideoCallId = Date.now() + '_' + Math.random().toString(36).substr(2, 9);
     currentVideoCallMessages = [];
 
-    // 显示页面
-    videoPage.style.display = 'block';
-
     // 重置状态
     videoCallSeconds = 0;
     isCameraOn = true;
-    document.getElementById('video-self-window').style.opacity = '1';
-    document.getElementById('video-camera-btn').style.backgroundColor = '#FFFFFF';
+    if (selfWindow) selfWindow.style.opacity = '1';
+    const cameraBtn = document.getElementById('video-camera-btn');
+    if (cameraBtn) cameraBtn.style.backgroundColor = 'rgba(255,255,255,0.15)';
+
+    // ————————————————————————————————————
+    // 在等待页面期间，先把第一条消息和图片全部准备好
+    // ————————————————————————————————————
+    let novelaiImage = null;
+    let aiMsgDiv = null;
+
+    if (firstMessage) {
+        // 🎨 在等待页期间生成 NovelAI 图片（用户看到的仍是"正在呼叫"）
+        if (char.id) {
+            novelaiImage = await processVideoCallNovelAI(firstMessage, char.id, imageTags);
+        }
+
+        // 预先创建消息元素（还没添加到页面）
+        aiMsgDiv = document.createElement('div');
+        aiMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; word-wrap: break-word; align-self: flex-start; background-color: rgba(255,255,255,0.9); color: #333333; border-bottom-left-radius: 4px; backdrop-filter: blur(10px);';
+        aiMsgDiv.textContent = firstMessage;
+
+        currentVideoCallMessages.push({
+            role: 'assistant',
+            content: firstMessage,
+            time: Date.now()
+        });
+    }
+
+    // ————————————————————————————————————
+    // 一切就绪，一次性切换页面并呈现所有内容
+    // ————————————————————————————————————
+    hideVideoWaitingPage();
+    videoPage.style.display = 'block';
 
     // 开始计时
     if (videoCallTimer) {
@@ -48171,22 +50898,13 @@ async function showVideoCallPage(char, firstMessage) {
         status.textContent = `视频通话中 ${minutes}:${seconds < 10 ? '0' + seconds : seconds}`;
     }, 1000);
 
-    // 直接显示第一句话（已在 callVideoCallAPI 中一次性获取，不再单独调用AI）
-    if (firstMessage) {
-        const aiMsgDiv = document.createElement('div');
-        aiMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #333333; border-bottom-left-radius: 4px;';
-        aiMsgDiv.textContent = firstMessage;
+    // 一次性显示第一条消息 + 背景图片
+    if (aiMsgDiv) {
         messageArea.appendChild(aiMsgDiv);
         messageArea.scrollTop = messageArea.scrollHeight;
-        
-        currentVideoCallMessages.push({
-            role: 'assistant',
-            content: firstMessage,
-            time: Date.now()
-        });
-    } else {
-        // 兜底：如果没有第一句话，再单独调用
-        await generateVideoCallFirstMessage(char);
+    }
+    if (novelaiImage) {
+        updateVideoCallBackground(novelaiImage);
     }
 }
 
@@ -48210,6 +50928,15 @@ function hideVideoCallPage() {
     if (avatar) {
         avatar.style.backgroundImage = '';
     }
+    // 清除背景图和小窗图片
+    const bgDiv = document.getElementById('video-call-bg');
+    if (bgDiv) {
+        bgDiv.style.backgroundImage = '';
+    }
+    const selfWindow = document.getElementById('video-self-window');
+    if (selfWindow) {
+        selfWindow.style.backgroundImage = '';
+    }
 }
 
 // 切换摄像头
@@ -48218,16 +50945,20 @@ function toggleCamera() {
     const selfWindow = document.getElementById('video-self-window');
     const cameraBtn = document.getElementById('video-camera-btn');
 
-    selfWindow.style.opacity = isCameraOn ? '1' : '0.4';
-    cameraBtn.style.backgroundColor = isCameraOn ? '#FFFFFF' : '#F5F5F5';
+    if (selfWindow) selfWindow.style.opacity = isCameraOn ? '1' : '0.3';
+    if (cameraBtn) cameraBtn.style.backgroundColor = isCameraOn ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)';
 }
 
 // 挂断视频通话
 async function hangupVideoCall() {
     if (confirm('确定要挂断视频通话吗？')) {
-        // 保存视频通话记录到 localStorage
+        // 保存视频通话记录到 localStorage（容错处理，不能阻塞挂断流程）
         if (currentVideoCallId && videoCallCharId && currentVideoCallMessages.length > 0) {
-            await saveVideoCallRecord(videoCallCharId, currentVideoCallId, currentVideoCallMessages, videoCallSeconds);
+            try {
+                await saveVideoCallRecord(videoCallCharId, currentVideoCallId, currentVideoCallMessages, videoCallSeconds);
+            } catch (e) {
+                console.error('[hangupVideoCall] 保存通话记录失败，不影响挂断:', e.message);
+            }
         }
         
         // 🔧 将视频通话内容写入聊天历史（让角色有记忆）
@@ -48296,6 +51027,84 @@ async function hangupVideoCall() {
     }
 }
 
+// 📞 角色主动挂断视频通话（无需确认弹窗）
+async function performAutoHangup() {
+    console.log('[视频通话] 📞 角色主动挂断通话');
+    
+    // 保存视频通话记录到 localStorage
+    if (currentVideoCallId && videoCallCharId && currentVideoCallMessages.length > 0) {
+        try {
+            await saveVideoCallRecord(videoCallCharId, currentVideoCallId, currentVideoCallMessages, videoCallSeconds);
+        } catch (e) {
+            console.error('[performAutoHangup] 保存通话记录失败:', e.message);
+        }
+    }
+    
+    // 将视频通话内容写入聊天历史（让角色有记忆）
+    const savedCharId = videoCallCharId;
+    const savedMessages = [...currentVideoCallMessages];
+    const savedSeconds = videoCallSeconds;
+    
+    if (savedCharId && savedMessages.length > 0) {
+        try {
+            const char = await db.characters.get(savedCharId);
+            if (char) {
+                const accountId = getCurrentAccountId();
+                let history = getChatHistory(char, accountId);
+                
+                // 1. 添加系统消息：视频通话开始
+                history.push({
+                    role: 'system',
+                    content: '📹 视频通话已接通',
+                    time: savedMessages[0] ? savedMessages[0].time - 1 : Date.now(),
+                    isVideoCall: true
+                });
+                
+                // 2. 将视频通话中的每条消息写入聊天历史
+                for (const msg of savedMessages) {
+                    history.push({
+                        role: msg.role === 'user' ? 'user' : 'char',
+                        content: `[视频通话] ${msg.content}`,
+                        time: msg.time || Date.now(),
+                        isVideoCall: true
+                    });
+                }
+                
+                // 3. 添加系统消息：对方挂断了视频通话 + 时长
+                const minutes = Math.floor(savedSeconds / 60);
+                const seconds = savedSeconds % 60;
+                const durationStr = minutes > 0 
+                    ? `${minutes}分${seconds}秒` 
+                    : `${seconds}秒`;
+                
+                history.push({
+                    role: 'system',
+                    content: `📹 对方挂断了视频通话，通话时长 ${durationStr}`,
+                    time: Date.now(),
+                    isVideoCall: true
+                });
+                
+                await setChatHistory(char, accountId, history);
+                console.log('[视频通话] ✅ 对方挂断，通话记录已写入聊天历史，共', savedMessages.length, '条消息');
+            }
+        } catch (e) {
+            console.error('[视频通话] 写入聊天历史失败:', e);
+        }
+    }
+    
+    hideVideoCallPage();
+    
+    // 确保返回聊天界面后，角色信息正确显示
+    if (savedCharId && currentChatCharId === savedCharId) {
+        const char = await db.characters.get(savedCharId);
+        if (char) {
+            renderChatBody(char);
+        }
+    }
+    
+    alert('对方挂断了视频通话');
+}
+
 // 保存视频通话记录
 async function saveVideoCallRecord(charId, callId, messages, duration) {
     const accountId = getCurrentAccountId();
@@ -48309,12 +51118,11 @@ async function saveVideoCallRecord(charId, callId, messages, duration) {
     const key = `video_calls_${accountId}_${charId}`;
     const existingRecords = JSON.parse(localStorage.getItem(key) || '[]');
     
-    // 创建新记录
+    // ✅ 只保留角色名，不保存头像（头像可能是巨大的 base64，会撑爆 localStorage）
     const newRecord = {
         id: callId,
         charId: charId,
         charName: char.name,
-        charAvatar: char.avatar,
         startTime: Date.now(),
         duration: duration, // 秒数
         messages: messages
@@ -48323,117 +51131,25 @@ async function saveVideoCallRecord(charId, callId, messages, duration) {
     // 添加到记录列表（最新的在前面）
     existingRecords.unshift(newRecord);
     
-    // 保存到localStorage
-    localStorage.setItem(key, JSON.stringify(existingRecords));
+    // ✅ 只保留最近 20 条记录，防止无限累积
+    if (existingRecords.length > 20) {
+        existingRecords.length = 20;
+    }
     
-    console.log('视频通话记录已保存:', newRecord);
-}
-
-// 生成角色接通视频后的第一句话（仅作为兜底，正常流程已在 callVideoCallAPI 中一次性获取）
-async function generateVideoCallFirstMessage(char) {
-    const accountId = getCurrentAccountId();
-    const messageArea = document.getElementById('video-message-area');
-
+    // 保存到localStorage（带容错）
     try {
-        // 获取聊天历史作为上下文
-        let history = getChatHistory(char, accountId);
-        
-        // 获取对话对象（用户）人设
-        let userDesc = "";
-        let userName = "用户";
-        if (char.linked_user_id) {
-            const user = await db.characters.get(char.linked_user_id);
-            if (user) {
-                userName = user.name;
-                userDesc = `\n\n【对话对象(User)信息】\n名字：${user.name}\n设定：${user.description || '无'}`;
-            }
+        localStorage.setItem(key, JSON.stringify(existingRecords));
+        console.log('视频通话记录已保存:', newRecord.id);
+    } catch (e) {
+        console.warn('[saveVideoCallRecord] localStorage 写入失败，尝试清理旧记录:', e.message);
+        // 容量不够时，只保留最近 5 条再试
+        existingRecords.length = Math.min(existingRecords.length, 5);
+        try {
+            localStorage.setItem(key, JSON.stringify(existingRecords));
+            console.log('[saveVideoCallRecord] 清理后保存成功');
+        } catch (e2) {
+            console.error('[saveVideoCallRecord] 仍然无法保存，跳过:', e2.message);
         }
-        
-        // 获取世界书上下文
-        let loreContext = "";
-        const lorebookIds = char.lorebookIds || (char.lorebookId ? [char.lorebookId] : []);
-        const recentText = history.slice(-10).map(m => m.content).join(' ');
-        loreContext = await getLorebookContext(lorebookIds, `${char.name} ${userName} ${recentText}`);
-        
-        // 计算虚拟时间
-        const virtualTimeStr = getFormattedVirtualTime(char);
-        
-        // 构建系统提示（包含完整人设）
-        const systemPrompt = `# 视频通话 - 接通
-
-【当前时间】
-${virtualTimeStr}
-
----
-
-## 你是谁
-
-**你的名字**：${char.name}
-${char.nick ? `**昵称**：${char.nick}` : ''}
-
-你不是AI助手，你不是${userName}。你是一个独立的人，有自己的生活、情绪和想法。
-
-**你的人设**：
-${char.description || ''}
-${userDesc}
-${loreContext}
-
----
-
-## 场景
-
-你刚刚接通了${userName}的视频通话请求。现在是视频通话模式，你和对方隔着手机屏幕进行视频对话。
-
-**回复要求**：
-- 格式：动作描写:"说的话"，例如：微笑的挥挥手:"嗨～终于接通啦！"
-- 动作必须是通过手机屏幕能看到的（挥手、微笑、调整镜头、比心、做鬼脸等）
-- 回复字数：100-500字
-- 完全贴合你的人设和性格，像真人一样自然
-
-现在请说第一句话。`;
-
-        const contextCount = char.context_message_count || 20;
-        const recentHistory = history.slice(-contextCount)
-            .filter(m => m.role !== 'system')
-            .map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content }));
-
-        const messages = [
-            { role: 'system', content: systemPrompt },
-            ...recentHistory,
-            { role: 'user', content: '[视频通话已接通]' }
-        ];
-
-        const reply = await callAI(messages);
-
-        // 添加AI消息到界面
-        const aiMsgDiv = document.createElement('div');
-        aiMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #333333; border-bottom-left-radius: 4px;';
-        aiMsgDiv.textContent = reply;
-        messageArea.appendChild(aiMsgDiv);
-        messageArea.scrollTop = messageArea.scrollHeight;
-        
-        // 保存到当前视频通话记录
-        currentVideoCallMessages.push({
-            role: 'assistant',
-            content: reply,
-            time: Date.now()
-        });
-    } catch (error) {
-        console.error('生成第一句话失败:', error);
-        // 失败时使用默认消息
-        const defaultMsg = '微笑的挥挥手:"嗨～接通啦！"';
-        const aiMsgDiv = document.createElement('div');
-        aiMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #333333; border-bottom-left-radius: 4px;';
-        aiMsgDiv.textContent = defaultMsg;
-        messageArea.appendChild(aiMsgDiv);
-        messageArea.scrollTop = messageArea.scrollHeight;
-        
-        // 保存到当前视频通话记录
-        currentVideoCallMessages.push({
-            role: 'assistant',
-            content: defaultMsg,
-            time: Date.now()
-        });
     }
 }
 
@@ -48452,7 +51168,7 @@ async function sendVideoMessage() {
 
     // 添加用户消息到界面
     const userMsgDiv = document.createElement('div');
-    userMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-end; background-color: #FFFFFF; color: #333333; border-bottom-right-radius: 4px;';
+    userMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; word-wrap: break-word; align-self: flex-end; background-color: rgba(76,175,80,0.85); color: #FFFFFF; border-bottom-right-radius: 4px; backdrop-filter: blur(10px);';
     userMsgDiv.textContent = text;
     messageArea.appendChild(userMsgDiv);
     messageArea.scrollTop = messageArea.scrollHeight;
@@ -48474,7 +51190,7 @@ async function sendVideoMessage() {
     // 显示"正在生成中"提示
     const loadingDiv = document.createElement('div');
     loadingDiv.id = 'video-loading-indicator';
-    loadingDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #999999; border-bottom-left-radius: 4px;';
+    loadingDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; word-wrap: break-word; align-self: flex-start; background-color: rgba(255,255,255,0.85); color: #999999; border-bottom-left-radius: 4px; backdrop-filter: blur(10px);';
     loadingDiv.innerHTML = '<span style="display:inline-flex;align-items:center;gap:6px;"><svg width="16" height="16" viewBox="0 0 24 24" style="animation:spin 1s linear infinite;"><circle cx="12" cy="12" r="10" stroke="#999" stroke-width="2" fill="none" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>正在生成中...</span>';
     messageArea.appendChild(loadingDiv);
     messageArea.scrollTop = messageArea.scrollHeight;
@@ -48513,6 +51229,12 @@ async function sendVideoMessage() {
         // 计算虚拟时间
         const virtualTimeStr = getFormattedVirtualTime(char);
 
+        // 🔧 读取总结记忆和话题感知
+        let summaryMemoryContext = '';
+        try { summaryMemoryContext = await getSummaryMemoryContext('private', char.id, accountId); } catch (e) {}
+        let recentTopicsContext = '';
+        try { recentTopicsContext = buildRecentTopicsContext(chatHistory); } catch (e) {}
+
         // 构建系统提示（包含完整人设、世界书、上下文）
         const systemPrompt = `# 视频通话中
 
@@ -48532,51 +51254,148 @@ ${char.wx_nickname ? `**微信网名**：${char.wx_nickname}` : ''}
 **你的人设**：
 ${char.description || ''}
 ${userDesc}
-${loreContext}
 ${char.relationships && char.relationships.length > 0 ? `
 **你的关联角色/NPC**：
 ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}` : ''}
+
+${summaryMemoryContext ? `## 你的记忆（必须严格遵守，这些是已经发生过的事实）
+${summaryMemoryContext}
+` : ''}
+${recentTopicsContext || ''}
+${loreContext ? `## 世界观设定\n${loreContext}` : ''}
 
 ---
 
 ## 场景
 
-你正在和${userName}进行**视频通话**。你和对方隔着手机屏幕进行视频对话，你可以看到对方，对方也能看到你。
+你正在和${userName}进行**视频通话**（不是文字聊天！）。你和对方隔着手机屏幕进行视频对话，你可以看到对方，对方也能看到你。
+
+**注意**：聊天记录中带有"[视频通话]"标记的内容是你们之前视频通话的记录。请自然地承接之前的关系、话题和记忆，保持连贯性。
+
+⚠️ **这是视频通话，不是文字聊天！绝对禁止以下行为**：
+- 禁止使用 ||| 分隔符（那是文字聊天的格式，视频通话不需要）
+- 禁止把回复拆分成多条短消息
+- 禁止模仿微信文字聊天的风格（如碎片化短句、省略主语等）
+- 你在视频通话中说的是完整的口语对话，不是打字
 
 **回复要求**：
 - 格式：动作描写:"说的话"，例如：歪着头笑:"真的吗？太有趣了！"
 - 动作必须是通过手机屏幕能看到的（挥手、微笑、调整镜头、比心、做鬼脸、靠近屏幕等）
-- 回复要自然、生动，可以结合视频场景（比如评论对方的背景、表情等）
+- 回复要自然、生动，像真人视频聊天一样说完整的话
 - 回复字数：100-500字
 - **严格贴合你的人设**，展现独特的说话方式、价值观和小习惯
 - 根据人设调整你的语气、用词和态度
 
-请根据对方的消息自然回复，保持视频通话的互动感。`;
+## 主动挂断通话
 
+如果你在通话中觉得需要挂断电话（比如生气了、有急事要走、困了要睡觉、被激怒了、聊够了、或者任何符合你人设和当前情绪的原因），你可以主动挂断。
+在你的回复最末尾另起一行加上 **[HANGUP]** 标记即可。注意：
+- 挂断前要有合理的理由和自然的告别/挂断台词（也可以是赌气直接挂掉）
+- 不要频繁挂断，只有在剧情/情绪合理时才使用
+- [HANGUP] 必须单独一行，放在回复最末尾（如果有图片标签，则放在图片标签之后）
+
+请根据对方的消息自然回复，保持视频通话的互动感。${char.video_novelai_enabled ? `
+
+---
+
+## 图片生成标签（重要！请务必在回复的最后一行附上）
+
+在你的回复内容最后，另起一行，用以下格式附上 NovelAI 图片标签：
+[IMG_TAGS: tag1, tag2, tag3, ...]
+
+规则：
+- 纯英文 NovelAI/Danbooru 风格 tag，逗号分隔，不超过30个
+- 根据角色性别用 1boy 或 1girl（绝对不能搞错！）
+- 提取：表情(smile,blush,wink等)、动作(waving,peace sign等)、外貌特征(发色发型瞳色)、服装、场景
+- 必须包含 looking at viewer, upper body
+- 禁止出现：smartphone, phone, screen, video call, pov, UI, device, frame
+- 不要加质量词（masterpiece, best quality等）
+- [IMG_TAGS: ...] 必须独占最后一行
+- 如果需要挂断，[HANGUP] 放在 [IMG_TAGS] 之后` : ''}`;
+
+        // 构建消息数组：系统提示 + 近期聊天历史（提供上下文）+ 视频通话消息
+        // 🔧 修复：保留视频通话边界标记，让AI清楚区分每次通话
+        const contextCount = char.context_message_count || 20;
+        const recentHistory = [];
+        const slicedChatHistory = chatHistory.slice(-contextCount);
+        for (const m of slicedChatHistory) {
+            if (m.role === 'system') {
+                if (m.isVideoCall) {
+                    recentHistory.push({ role: 'user', content: m.content });
+                }
+                continue;
+            }
+            recentHistory.push({
+                role: m.role === 'user' ? 'user' : 'assistant',
+                content: m.content
+            });
+        }
+        
         const messages = [
             { role: 'system', content: systemPrompt },
+            ...recentHistory,
+            { role: 'assistant', content: '[视频通话已接通]' },
             ...videoMessages
         ];
 
-        const reply = await callAI(messages);
+        const rawReply = await callAI(messages);
+
+        // 🔧 解析回复：提取 [HANGUP] 和 [IMG_TAGS: ...] 部分（如果有），剩余为纯文本回复
+        let reply = rawReply;
+        let extractedTags = null;
+        let shouldHangup = false;
+
+        // 先检测 [HANGUP] 标记（可能在最末尾）
+        const hangupMatch = reply.match(/\[HANGUP\]\s*$/i);
+        if (hangupMatch) {
+            shouldHangup = true;
+            reply = reply.substring(0, hangupMatch.index).trim();
+            console.log('[VideoCall] 📞 角色主动挂断通话');
+        }
+
+        // 再检测 [IMG_TAGS]
+        const tagMatch = reply.match(/\[IMG_TAGS:\s*(.*?)\]\s*$/s);
+        if (tagMatch) {
+            extractedTags = tagMatch[1].trim();
+            reply = reply.substring(0, tagMatch.index).trim();
+            console.log(`[VideoCall] 🏷️ 提取到预生成 tags: "${extractedTags.substring(0, 60)}..."`);
+        }
+
+        // 🎨 等待 NovelAI 图片生成完成（使用预生成 tags，省去翻译调用）
+        let novelaiImage = null;
+        if (videoCallCharId) {
+            novelaiImage = await processVideoCallNovelAI(reply, videoCallCharId, extractedTags);
+        }
 
         // 移除"正在生成中"提示
         const loading = document.getElementById('video-loading-indicator');
         if (loading) loading.remove();
 
-        // 添加AI消息到界面
+        // 添加AI消息到界面（文字+图片同时呈现）
         const aiMsgDiv = document.createElement('div');
-        aiMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #333333; border-bottom-left-radius: 4px;';
+        aiMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; word-wrap: break-word; align-self: flex-start; background-color: rgba(255,255,255,0.9); color: #333333; border-bottom-left-radius: 4px; backdrop-filter: blur(10px);';
         aiMsgDiv.textContent = reply;
         messageArea.appendChild(aiMsgDiv);
         messageArea.scrollTop = messageArea.scrollHeight;
         
-        // 保存到当前视频通话记录
+        // 保存到当前视频通话记录（只保存纯文本，不含 tags）
         currentVideoCallMessages.push({
             role: 'assistant',
             content: reply,
             time: Date.now()
         });
+        
+        // 文字和图片一起呈现
+        if (novelaiImage) {
+            updateVideoCallBackground(novelaiImage);
+        }
+
+        // 📞 角色主动挂断：延迟一会儿让用户看到最后一条消息，然后自动挂断
+        if (shouldHangup) {
+            setTimeout(() => {
+                performAutoHangup();
+            }, 3000);
+        }
     } catch (error) {
         console.error('AI回复失败:', error);
         // 移除"正在生成中"提示
@@ -48628,7 +51447,7 @@ async function regenerateVideoMessage() {
     // 显示"正在生成中"提示
     const loadingDiv = document.createElement('div');
     loadingDiv.id = 'video-loading-indicator';
-    loadingDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #999999; border-bottom-left-radius: 4px;';
+    loadingDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; word-wrap: break-word; align-self: flex-start; background-color: rgba(255,255,255,0.85); color: #999999; border-bottom-left-radius: 4px; backdrop-filter: blur(10px);';
     loadingDiv.innerHTML = '<span style="display:inline-flex;align-items:center;gap:6px;"><svg width="16" height="16" viewBox="0 0 24 24" style="animation:spin 1s linear infinite;"><circle cx="12" cy="12" r="10" stroke="#999" stroke-width="2" fill="none" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>正在重新生成中...</span>';
     messageArea.appendChild(loadingDiv);
     messageArea.scrollTop = messageArea.scrollHeight;
@@ -48666,6 +51485,12 @@ async function regenerateVideoMessage() {
         // 计算虚拟时间
         const virtualTimeStr = getFormattedVirtualTime(char);
 
+        // 🔧 读取总结记忆和话题感知
+        let summaryMemoryContext = '';
+        try { summaryMemoryContext = await getSummaryMemoryContext('private', char.id, accountId); } catch (e) {}
+        let recentTopicsContext = '';
+        try { recentTopicsContext = buildRecentTopicsContext(chatHistory); } catch (e) {}
+
         // 构建系统提示
         const systemPrompt = `# 视频通话中
 
@@ -48685,51 +51510,148 @@ ${char.wx_nickname ? `**微信网名**：${char.wx_nickname}` : ''}
 **你的人设**：
 ${char.description || ''}
 ${userDesc}
-${loreContext}
 ${char.relationships && char.relationships.length > 0 ? `
 **你的关联角色/NPC**：
 ${char.relationships.map(r => `- ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}` : ''}
+
+${summaryMemoryContext ? `## 你的记忆（必须严格遵守，这些是已经发生过的事实）
+${summaryMemoryContext}
+` : ''}
+${recentTopicsContext || ''}
+${loreContext ? `## 世界观设定\n${loreContext}` : ''}
 
 ---
 
 ## 场景
 
-你正在和${userName}进行**视频通话**。你和对方隔着手机屏幕进行视频对话，你可以看到对方，对方也能看到你。
+你正在和${userName}进行**视频通话**（不是文字聊天！）。你和对方隔着手机屏幕进行视频对话，你可以看到对方，对方也能看到你。
+
+**注意**：聊天记录中带有"[视频通话]"标记的内容是你们之前视频通话的记录。请自然地承接之前的关系、话题和记忆，保持连贯性。
+
+⚠️ **这是视频通话，不是文字聊天！绝对禁止以下行为**：
+- 禁止使用 ||| 分隔符（那是文字聊天的格式，视频通话不需要）
+- 禁止把回复拆分成多条短消息
+- 禁止模仿微信文字聊天的风格（如碎片化短句、省略主语等）
+- 你在视频通话中说的是完整的口语对话，不是打字
 
 **回复要求**：
 - 格式：动作描写:"说的话"，例如：歪着头笑:"真的吗？太有趣了！"
 - 动作必须是通过手机屏幕能看到的（挥手、微笑、调整镜头、比心、做鬼脸、靠近屏幕等）
-- 回复要自然、生动，可以结合视频场景（比如评论对方的背景、表情等）
+- 回复要自然、生动，像真人视频聊天一样说完整的话
 - 回复字数：100-500字
 - **严格贴合你的人设**，展现独特的说话方式、价值观和小习惯
 - 根据人设调整你的语气、用词和态度
 
-请根据对方的消息自然回复，保持视频通话的互动感。`;
+## 主动挂断通话
 
+如果你在通话中觉得需要挂断电话（比如生气了、有急事要走、困了要睡觉、被激怒了、聊够了、或者任何符合你人设和当前情绪的原因），你可以主动挂断。
+在你的回复最末尾另起一行加上 **[HANGUP]** 标记即可。注意：
+- 挂断前要有合理的理由和自然的告别/挂断台词（也可以是赌气直接挂掉）
+- 不要频繁挂断，只有在剧情/情绪合理时才使用
+- [HANGUP] 必须单独一行，放在回复最末尾（如果有图片标签，则放在图片标签之后）
+
+请根据对方的消息自然回复，保持视频通话的互动感。${char.video_novelai_enabled ? `
+
+---
+
+## 图片生成标签（重要！请务必在回复的最后一行附上）
+
+在你的回复内容最后，另起一行，用以下格式附上 NovelAI 图片标签：
+[IMG_TAGS: tag1, tag2, tag3, ...]
+
+规则：
+- 纯英文 NovelAI/Danbooru 风格 tag，逗号分隔，不超过30个
+- 根据角色性别用 1boy 或 1girl（绝对不能搞错！）
+- 提取：表情(smile,blush,wink等)、动作(waving,peace sign等)、外貌特征(发色发型瞳色)、服装、场景
+- 必须包含 looking at viewer, upper body
+- 禁止出现：smartphone, phone, screen, video call, pov, UI, device, frame
+- 不要加质量词（masterpiece, best quality等）
+- [IMG_TAGS: ...] 必须独占最后一行
+- 如果需要挂断，[HANGUP] 放在 [IMG_TAGS] 之后` : ''}`;
+
+        // 构建消息数组：系统提示 + 近期聊天历史（提供上下文）+ 视频通话消息
+        // 🔧 修复：保留视频通话边界标记，让AI清楚区分每次通话
+        const contextCount = char.context_message_count || 20;
+        const recentHistory = [];
+        const slicedRegenHistory = chatHistory.slice(-contextCount);
+        for (const m of slicedRegenHistory) {
+            if (m.role === 'system') {
+                if (m.isVideoCall) {
+                    recentHistory.push({ role: 'user', content: m.content });
+                }
+                continue;
+            }
+            recentHistory.push({
+                role: m.role === 'user' ? 'user' : 'assistant',
+                content: m.content
+            });
+        }
+        
         const messages = [
             { role: 'system', content: systemPrompt },
+            ...recentHistory,
+            { role: 'assistant', content: '[视频通话已接通]' },
             ...videoMessages
         ];
 
-        const reply = await callAI(messages);
+        const rawReply = await callAI(messages);
+
+        // 🔧 解析回复：提取 [HANGUP] 和 [IMG_TAGS: ...] 部分（如果有），剩余为纯文本回复
+        let reply = rawReply;
+        let extractedTags = null;
+        let shouldHangup = false;
+
+        // 先检测 [HANGUP] 标记
+        const regenHangupMatch = reply.match(/\[HANGUP\]\s*$/i);
+        if (regenHangupMatch) {
+            shouldHangup = true;
+            reply = reply.substring(0, regenHangupMatch.index).trim();
+            console.log('[VideoCall-Regen] 📞 角色主动挂断通话');
+        }
+
+        // 再检测 [IMG_TAGS]
+        const regenTagMatch = reply.match(/\[IMG_TAGS:\s*(.*?)\]\s*$/s);
+        if (regenTagMatch) {
+            extractedTags = regenTagMatch[1].trim();
+            reply = reply.substring(0, regenTagMatch.index).trim();
+            console.log(`[VideoCall-Regen] 🏷️ 提取到预生成 tags: "${extractedTags.substring(0, 60)}..."`);
+        }
+
+        // 🎨 等待 NovelAI 图片生成完成（使用预生成 tags，省去翻译调用）
+        let novelaiImage = null;
+        if (videoCallCharId) {
+            novelaiImage = await processVideoCallNovelAI(reply, videoCallCharId, extractedTags);
+        }
 
         // 移除"正在生成中"提示
         const loading = document.getElementById('video-loading-indicator');
         if (loading) loading.remove();
 
-        // 添加新的AI消息到界面
+        // 添加新的AI消息到界面（文字+图片同时呈现）
         const aiMsgDiv = document.createElement('div');
-        aiMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; border: 1px solid #E5E5E5; word-wrap: break-word; align-self: flex-start; background-color: #FFFFFF; color: #333333; border-bottom-left-radius: 4px;';
+        aiMsgDiv.style.cssText = 'max-width: 80%; padding: 12px 18px; border-radius: 16px; font-size: 14px; line-height: 1.6; word-wrap: break-word; align-self: flex-start; background-color: rgba(255,255,255,0.9); color: #333333; border-bottom-left-radius: 4px; backdrop-filter: blur(10px);';
         aiMsgDiv.textContent = reply;
         messageArea.appendChild(aiMsgDiv);
         messageArea.scrollTop = messageArea.scrollHeight;
 
-        // 保存到当前视频通话记录
+        // 保存到当前视频通话记录（只保存纯文本，不含 tags）
         currentVideoCallMessages.push({
             role: 'assistant',
             content: reply,
             time: Date.now()
         });
+        
+        // 文字和图片一起呈现
+        if (novelaiImage) {
+            updateVideoCallBackground(novelaiImage);
+        }
+
+        // 📞 角色主动挂断：延迟一会儿让用户看到最后一条消息，然后自动挂断
+        if (shouldHangup) {
+            setTimeout(() => {
+                performAutoHangup();
+            }, 3000);
+        }
     } catch (error) {
         console.error('重新生成失败:', error);
         // 移除"正在生成中"提示
@@ -48896,6 +51818,52 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 });
+
+// 🔧 视频通话输入框键盘适配：检测虚拟键盘弹起，动态调整底部元素位置
+function onVideoInputFocus() {
+    if (window.visualViewport) {
+        window._videoVPHandler = () => {
+            const keyboardHeight = window.innerHeight - window.visualViewport.height;
+            const inputBar = document.getElementById('video-input-bar');
+            const btnBar = document.getElementById('video-btn-bar');
+            const msgArea = document.getElementById('video-message-area');
+            if (keyboardHeight > 80) {
+                // 键盘已弹起，把输入框、按钮、消息区域上移
+                const offset = keyboardHeight - (window.visualViewport.offsetTop || 0);
+                if (inputBar) inputBar.style.bottom = `${offset + 10}px`;
+                if (btnBar) btnBar.style.bottom = `${offset + 70}px`;
+                if (msgArea) msgArea.style.bottom = `${offset + 130}px`;
+            } else {
+                // 键盘已收起，恢复原位
+                if (inputBar) inputBar.style.bottom = '20px';
+                if (btnBar) btnBar.style.bottom = '80px';
+                if (msgArea) msgArea.style.bottom = '140px';
+            }
+        };
+        window.visualViewport.addEventListener('resize', window._videoVPHandler);
+        // 立即触发一次
+        window._videoVPHandler();
+    }
+    // 备用方案：对不支持 visualViewport 的浏览器，用 scrollIntoView
+    setTimeout(() => {
+        const input = document.getElementById('video-msg-input');
+        if (input) input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 350);
+}
+
+function onVideoInputBlur() {
+    // 移除监听，恢复原位
+    if (window.visualViewport && window._videoVPHandler) {
+        window.visualViewport.removeEventListener('resize', window._videoVPHandler);
+        window._videoVPHandler = null;
+    }
+    const inputBar = document.getElementById('video-input-bar');
+    const btnBar = document.getElementById('video-btn-bar');
+    const msgArea = document.getElementById('video-message-area');
+    if (inputBar) inputBar.style.bottom = '20px';
+    if (btnBar) btnBar.style.bottom = '80px';
+    if (msgArea) msgArea.style.bottom = '140px';
+}
 
 // ==================== 线下模式功能 ====================
 let offlineModeCharId = null;
@@ -49548,8 +52516,8 @@ ${char.nick ? `   - **昵称**：${char.nick}` : ''}
 ${char.relationships && char.relationships.length > 0 ? `
 3. **关联角色/NPC**：
 ${char.relationships.map(r => `   - ${r.targetName}（${r.relation}）${r.desc ? '：' + r.desc : ''}`).join('\n')}` : ''}
+${summaryMemoryContext ? `\n## 你的记忆（必须严格遵守，这些是已经发生过的事实）\n${summaryMemoryContext}` : ''}
 ${loreContext ? `\n## 📖 世界书设定\n${loreContext}` : ''}
-${summaryMemoryContext || ''}
 ${groupMemoryContext || ''}
 ${momentsContextText || ''}
 
@@ -50166,7 +53134,7 @@ async function renderFavoritesList(type) {
             }
             chatTypeLabel = '私聊';
         } else if (summary.chatType === 'group') {
-            const group = await db.group_chats.get(parseInt(summary.chatId));
+            const group = await getCachedGroupChat(parseInt(summary.chatId));
             if (group) {
                 avatarUrl = group.avatar || '';
                 name = group.name || '群聊';
@@ -50199,6 +53167,7 @@ async function renderFavoritesList(type) {
 }
 
 // 🔧 获取总结记忆上下文（注入到AI系统提示词中，让AI能读取历史总结）
+// 🔧 优化：全量注入所有总结记忆，不做截断
 async function getSummaryMemoryContext(chatType, chatId, accountId) {
     try {
         if (!accountId) accountId = 'offline';
@@ -50216,27 +53185,91 @@ async function getSummaryMemoryContext(chatType, chatId, accountId) {
         
         if (summaries.length === 0) return '';
         
-        // 按时间正序排列
+        // 按时间正序排列（从旧到新）
         summaries.sort((a, b) => a.time - b.time);
         
-        // 最多取最近10条总结
-        const recentSummaries = summaries.slice(-10);
-        
-        const memoryLines = recentSummaries.map(s => {
+        const memoryLines = summaries.map(s => {
             const timeStr = formatSummaryTime(s.time);
             const content = (s.content || '').replace(/【关键词】.*$/m, '').trim();
-            return `- (记录于 ${timeStr}) ${content}`;
+            return `- (${timeStr}) ${content}`;
         }).join('\n');
         
-        console.log(`[getSummaryMemoryContext] 加载了 ${recentSummaries.length} 条总结记忆`);
+        console.log(`[getSummaryMemoryContext] 全量加载 ${summaries.length} 条总结记忆`);
         
-        return `\n\n## 长期记忆（最高优先级，这是你们之间已经确立的事实，必须严格遵守）
-以下是你和对方之前的对话总结，你必须记住这些内容，并在聊天中自然地体现出你记得这些事：
-${memoryLines}`;
+        return `${memoryLines}`;
     } catch (e) {
         console.warn('[getSummaryMemoryContext] 获取总结记忆失败:', e);
         return '';
     }
+}
+
+// 🔧 实时话题感知：分析不同时间维度的聊天关键词，帮助AI感知"最近在聊什么"
+function buildRecentTopicsContext(chatHistory) {
+    if (!chatHistory || chatHistory.length < 5) return '';
+    
+    const now = Date.now();
+    // 中文停用词
+    const stopWords = new Set(['的', '是', '了', '在', '我', '你', '他', '她', '它', '我们', '你们', '他们',
+        '这', '那', '一个', '也', '和', '与', '或', '但', '然而', '所以', '因此', '就', '都', '地', '得',
+        '着', '过', '吧', '吗', '呢', '啊', '哦', '嗯', '好', '对', '不', '没', '有', '说', '会', '到',
+        '来', '去', '做', '能', '要', '想', '看', '知道', '什么', '怎么', '哈', '嘿', '哎', '呀', '噢']);
+    
+    /**
+     * 提取指定时间段内的高频关键词
+     */
+    function extractKeywords(messages, topN = 3) {
+        const allText = messages.map(msg => {
+            const content = msg.content || msg.message || '';
+            if (typeof content !== 'string') return '';
+            // 过滤掉指令类/系统类内容
+            if (content.startsWith('[img:') || content.startsWith('[voice:') || content.startsWith('[imgcard:')) return '';
+            return content;
+        }).join(' ');
+        
+        // 提取中文词组和英文单词
+        const words = allText.match(/[\u4e00-\u9fa5]{2,6}|[a-zA-Z0-9]{2,}/g) || [];
+        const freq = new Map();
+        words.forEach(w => {
+            if (!stopWords.has(w) && w.length > 1) {
+                freq.set(w, (freq.get(w) || 0) + 1);
+            }
+        });
+        
+        const sorted = [...freq.entries()].sort((a, b) => b[1] - a[1]).map(e => e[0]);
+        return sorted.length > 0 ? sorted.slice(0, topN) : null;
+    }
+    
+    // 定义时间维度（从近到远）
+    const timeframes = [
+        { label: '最近几小时话题', ms: 3 * 60 * 60 * 1000 },
+        { label: '今天的话题', ms: 24 * 60 * 60 * 1000 },
+        { label: '近几天话题', ms: 3 * 24 * 60 * 60 * 1000 },
+        { label: '近一周话题', ms: 7 * 24 * 60 * 60 * 1000 }
+    ];
+    
+    const lines = [];
+    const usedKeywords = new Set(); // 避免重复
+    
+    for (const tf of timeframes) {
+        const cutoff = now - tf.ms;
+        const msgs = chatHistory.filter(m => (m.time || m.timestamp || 0) > cutoff);
+        if (msgs.length < 3) continue;
+        
+        const keywords = extractKeywords(msgs);
+        if (!keywords) continue;
+        
+        // 过滤掉已出现过的关键词，避免每个维度都是同样的词
+        const newKeywords = keywords.filter(k => !usedKeywords.has(k));
+        if (newKeywords.length === 0) continue;
+        
+        newKeywords.forEach(k => usedKeywords.add(k));
+        lines.push(`- **${tf.label}**: ${newKeywords.join('、')}`);
+    }
+    
+    if (lines.length === 0) return '';
+    
+    return `\n## 近期话题回顾
+${lines.join('\n')}`;
 }
 
 // 格式化总结时间
@@ -50284,7 +53317,7 @@ async function showSummaryDetail(summaryId) {
                 name = getCharDisplayName(char, _sdAid) || '未知';
             }
         } else if (summary.chatType === 'group') {
-            const group = await db.group_chats.get(parseInt(summary.chatId));
+            const group = await getCachedGroupChat(parseInt(summary.chatId));
             if (group) {
                 avatarUrl = group.avatar || '';
                 name = group.name || '群聊';
@@ -50513,7 +53546,7 @@ async function showChatSummaries(chatType) {
             return;
         }
         chatId = window.currentGroupChatId;
-        const group = await db.group_chats.get(parseInt(chatId));
+        const group = await getCachedGroupChat(parseInt(chatId));
         name = group ? group.name : '群聊';
         console.log('[showChatSummaries] 群聊, chatId:', chatId, 'name:', name);
     }
@@ -50609,7 +53642,7 @@ async function triggerManualSummary(chatType) {
     } else if (chatType === 'group') {
         if (!window.currentGroupChatId) { alert('请先打开一个群聊'); return; }
         chatId = window.currentGroupChatId;
-        const group = await db.group_chats.get(parseInt(chatId));
+        const group = await getCachedGroupChat(parseInt(chatId));
         name = group ? group.name : '群聊';
         chatHistory = group ? (group.chat_history || []) : [];
     }
@@ -50788,7 +53821,7 @@ async function generateChatSummary(chatType, chatId, accountId, chatHistory) {
         }
     } else if (chatType === 'group') {
         // 群聊：使用群名
-        const group = await db.group_chats.get(parseInt(chatId));
+        const group = await getCachedGroupChat(parseInt(chatId));
         if (group) {
             charName = group.name || '群聊';
         }
@@ -50848,17 +53881,9 @@ async function generateChatSummary(chatType, chatId, accountId, chatHistory) {
             
             showToast(`正在总结第 ${ci + 1}/${chunks.length} 段...`);
             
-            const chunkPrompt = `你是一个专业的聊天记录总结助手。请根据以下聊天记录片段，生成一份简洁但完整的总结。
+            const chunkPrompt = `请总结以下聊天记录片段的核心内容。只保留：重要事件、关键决定、未来计划、重要时间点。使用"${userName}"和"${charName}"的名字。100-200字以内。
 
-总结要求：
-1. 必须使用第三人称视角，以旁观者角度客观描述
-2. 使用"${userName}"和"${charName}"的名字，严禁使用"AI"、"助手"、"机器人"、"用户"等词汇
-3. 提炼出主要话题和关键信息
-4. 如果有重要的情感变化或事件，要特别指出
-5. 总结长度控制在150-300字之间
-
-这是第 ${ci + 1}/${chunks.length} 段，时间范围：${chunkTimeRange}
-聊天记录如下：
+第 ${ci + 1}/${chunks.length} 段，时间：${chunkTimeRange}
 ${chunkContent}`;
             
             const chunkMessages = [
@@ -50872,22 +53897,10 @@ ${chunkContent}`;
         
         // 合并所有子总结为最终总结
         showToast('正在合并总结...');
-        const mergePrompt = `你是一个专业的聊天记录总结助手。下面是分段生成的聊天总结，请将它们合并为一份完整、连贯的总结。
+        const mergePrompt = `将以下分段总结合并为一份精简的记忆备忘。只保留：重要事件、关键决定、未来计划、重要时间点。去掉重复和无关紧要的细节。使用"${userName}"和"${charName}"的名字。200-400字。最后用【关键词】标注3-5个关键词。
 
-合并要求：
-1. **必须使用第三人称视角**：以旁观者角度客观描述，严禁使用"我"、"我们"、"你"等第一/第二人称
-2. **必须包含时间信息**：在总结开头注明时间段，例如"在X月X日至X月X日期间"
-3. **使用对话中的称呼**：总结中直接使用"${userName}"和"${charName}"的名字，严禁使用"AI"、"助手"、"机器人"、"用户"等词汇
-4. 用客观的叙事口吻描述双方的交流
-5. 按时间顺序组织，保留所有重要事件和情感变化
-6. 去除重复内容，使总结连贯流畅
-7. 总结长度控制在300-600字之间
-8. 如果能提取3-5个关键词，请在最后用【关键词】标注
+时间范围：${timeRange}，共 ${allMessages.length} 条消息
 
-总时间范围：${timeRange}
-共 ${allMessages.length} 条消息
-
-以下是各段总结：
 ${chunkSummaries.join('\n\n')}`;
         
         const mergeMessages = [
@@ -50900,22 +53913,15 @@ ${chunkSummaries.join('\n\n')}`;
         // 消息量不大，直接一次性总结
         const chatContent = allMessages.map(msgToText).join('\n');
         
-        const systemPrompt = `你是一个专业的聊天记录总结助手。请根据以下聊天记录，生成一份简洁但完整的总结。
+        const systemPrompt = `请总结以下聊天记录的核心内容，生成一份精简的记忆备忘。
 
-总结要求：
-1. **必须使用第三人称视角**：以旁观者角度客观描述，严禁使用"我"、"我们"、"你"等第一/第二人称
-2. **必须包含时间信息**：在总结开头注明时间段，例如"在X月X日至X月X日期间"
-3. **使用对话中的称呼**：总结中直接使用"${userName}"和"${charName}"的名字，严禁使用"AI"、"助手"、"机器人"、"用户"等词汇
-4. 用客观的叙事口吻描述双方的交流，例如："${userName}向${charName}表示..."、"${charName}回应道..."
-5. 提炼出主要话题和关键信息
-6. 如果有重要的情感变化或事件，要特别指出
-7. 总结长度控制在200-400字之间
-8. 使用自然流畅的中文表达
-9. 如果能提取3-5个关键词，请在最后用【关键词】标注
-10. 聊天记录包含线上聊天（微信消息）和线下见面（标注了[线下见面]）的内容，请一并总结，自然融合描述
+要求：
+1. 只保留：重要事件、关键决定、未来计划、重要时间点
+2. 使用"${userName}"和"${charName}"的名字，不要用"AI"、"用户"等词
+3. 150-300字以内
+4. 最后用【关键词】标注3-5个关键词
 
-聊天时间：${timeRange}
-聊天记录如下：
+时间：${timeRange}
 ${chatContent}`;
 
         const messages = [
@@ -51045,7 +54051,7 @@ async function checkAutoSummary(chatType, chatId, accountId) {
             console.warn('[checkAutoSummary] 读取线下记录失败:', e);
         }
     } else if (chatType === 'group') {
-        const group = await db.group_chats.get(parseInt(chatId));
+        const group = await getCachedGroupChat(parseInt(chatId));
         if (!group) return;
         autoSummaryEnabled = group.auto_summary_enabled;
         summaryInterval = group.summary_interval || 50;
@@ -51100,7 +54106,7 @@ async function loadSummarySettings(chatType, chatId) {
             document.getElementById('detail-summary-interval').value = char.summary_interval || '';
         }
     } else if (chatType === 'group') {
-        const group = await db.group_chats.get(parseInt(chatId));
+        const group = await getCachedGroupChat(parseInt(chatId));
         if (group) {
             document.getElementById('group-detail-auto-summary-switch').checked = !!group.auto_summary_enabled;
             document.getElementById('group-detail-summary-interval').value = group.summary_interval || '';
@@ -55976,10 +58982,12 @@ async function useAvatarAsProfile() {
     
     const oldAvatar = myChar.avatar || '';
     myChar.avatar = avatar.url;
-    if (avatar.url !== oldAvatar) {
-        markUserAvatarChanged(myChar);
-    }
     await safeCharacterPut(myChar);
+    
+    // 头像更换时，向所有聊天插入系统消息通知
+    if (avatar.url !== oldAvatar) {
+        await notifyAvatarChanged(myChar);
+    }
     
     hideAvatarPreview();
     showToast('头像设置成功');
@@ -56354,14 +59362,11 @@ async function acceptCoupleAvatar(btn, av1Id, av2Id, charId) {
             const myChar = await db.characters.get(myCharId);
             if (myChar) {
                 const oldAvatar = myChar.avatar || '';
+                myChar.avatar = userAvatar; // 先更新内存中的头像，确保 notifyAvatarChanged 能获取到新头像
+                await safeDexieUpdate(db.characters, myCharId, { avatar: userAvatar }, `情头用户`);
                 if (userAvatar !== oldAvatar) {
-                    markUserAvatarChanged(myChar);
-                    // 🔧 修复：同时持久化 avatarUpdatedAt，防止刷新后头像通知丢失
-                    await safeDexieUpdate(db.characters, myCharId, { avatar: userAvatar, avatarUpdatedAt: myChar.avatarUpdatedAt }, `情头用户`);
-                } else {
-                    await safeDexieUpdate(db.characters, myCharId, { avatar: userAvatar }, `情头用户`);
+                    await notifyAvatarChanged(myChar);
                 }
-                myChar.avatar = userAvatar;
             }
         }
         
@@ -56461,19 +59466,33 @@ async function executeUseImageAsAvatar(charId, accountId, imageIndex) {
         const char = await db.characters.get(charId);
         if (!char) return;
         
-        // 从聊天记录中收集用户发送的所有图片（从新到旧）
+        // 从聊天记录中收集所有可用的图片（从新到旧）
+        // 包括：用户发送的图片 + 头像更换通知中附带的头像图片
         let history = getChatHistory(char, accountId);
         let userImages = [];
         
         for (let i = history.length - 1; i >= 0; i--) {
             const msg = history[i];
+            // 用户发送的图片
             if (msg.role === 'user' && msg.content && msg.content.startsWith('[img:')) {
+                // 跳过表情包，表情包不能当头像
+                if (msg.isSticker || msg.imageDescription) continue;
                 // 提取图片URL
                 const imgUrl = msg.content.substring(5, msg.content.length - 1);
                 userImages.push({
                     url: imgUrl,
                     index: i,
-                    desc: msg.imageDescription || ''
+                    desc: msg.imageDescription || '',
+                    source: 'chat_image'
+                });
+            }
+            // 头像更换通知中附带的头像图片
+            if (msg.type === 'avatar_change' && msg.avatarImage) {
+                userImages.push({
+                    url: msg.avatarImage,
+                    index: i,
+                    desc: '用户的新头像',
+                    source: 'avatar_change'
                 });
             }
         }
@@ -56522,6 +59541,169 @@ async function executeUseImageAsAvatar(charId, accountId, imageIndex) {
     } catch (e) {
         console.error('[使用图片头像] 执行失败:', e);
     }
+}
+
+/**
+ * 角色裁剪用户发送的图片的局部区域作为头像
+ * AI 通过识图后指定裁剪区域的百分比坐标，用 Canvas 裁剪出局部当头像
+ * @param {string} charId - 角色ID
+ * @param {string} accountId - 账号ID
+ * @param {number} imageIndex - 第几张图片（从最近往前数，1=最近的）
+ * @param {number} cropLeft - 裁剪区域左边起始位置（百分比 0-100）
+ * @param {number} cropTop - 裁剪区域顶部起始位置（百分比 0-100）
+ * @param {number} cropWidth - 裁剪区域宽度（百分比 0-100）
+ * @param {number} cropHeight - 裁剪区域高度（百分比 0-100）
+ */
+async function executeCropImageAsAvatar(charId, accountId, imageIndex, cropLeft, cropTop, cropWidth, cropHeight) {
+    try {
+        const char = await db.characters.get(charId);
+        if (!char) return;
+        
+        // 从聊天记录中收集所有可裁剪的图片（从新到旧）
+        // 包括：用户发送的图片 + 头像更换通知中附带的头像图片
+        let history = getChatHistory(char, accountId);
+        let userImages = [];
+        
+        for (let i = history.length - 1; i >= 0; i--) {
+            const msg = history[i];
+            // 用户发送的图片
+            if (msg.role === 'user' && msg.content && msg.content.startsWith('[img:')) {
+                // 跳过表情包
+                if (msg.isSticker || msg.imageDescription) continue;
+                const imgUrl = msg.content.substring(5, msg.content.length - 1);
+                userImages.push({
+                    url: imgUrl,
+                    index: i,
+                    desc: msg.imageDescription || '',
+                    source: 'chat_image'
+                });
+            }
+            // 头像更换通知中附带的头像图片
+            if (msg.type === 'avatar_change' && msg.avatarImage) {
+                userImages.push({
+                    url: msg.avatarImage,
+                    index: i,
+                    desc: '用户的新头像',
+                    source: 'avatar_change'
+                });
+            }
+        }
+        
+        if (userImages.length === 0) {
+            console.log('[裁剪头像] 没有找到可裁剪的图片');
+            return;
+        }
+        
+        // 选择第 imageIndex 张（默认第1张 = 最近的）
+        const targetIdx = Math.max(0, Math.min((imageIndex || 1) - 1, userImages.length - 1));
+        const selectedImage = userImages[targetIdx];
+        
+        // 参数边界处理
+        const left = Math.max(0, Math.min(100, cropLeft || 0));
+        const top = Math.max(0, Math.min(100, cropTop || 0));
+        const width = Math.max(5, Math.min(100 - left, cropWidth || 30));
+        const height = Math.max(5, Math.min(100 - top, cropHeight || 30));
+        
+        console.log(`[裁剪头像] 选择第${targetIdx + 1}张图片，裁剪区域: left=${left}%, top=${top}%, width=${width}%, height=${height}%`);
+        
+        // 使用 Canvas 裁剪图片
+        const croppedDataUrl = await cropImageRegion(selectedImage.url, left, top, width, height);
+        
+        if (!croppedDataUrl) {
+            console.error('[裁剪头像] 图片裁剪失败');
+            return;
+        }
+        
+        // 更新角色头像（按账号隔离）
+        const _cropAid = getCurrentAccountId();
+        const avatarPayload = _cropAid
+            ? { [`avatar_by_user.${_cropAid}`]: croppedDataUrl }
+            : { avatar: croppedDataUrl };
+        await safeDexieUpdate(db.characters, charId, avatarPayload, `裁剪头像[${char.name}]`);
+        // 同步更新内存中的char对象
+        setCharAvatar(char, _cropAid, croppedDataUrl);
+        
+        console.log(`[裁剪头像] ${char.name} 使用了裁剪后的图片作为头像`);
+        
+        // 添加系统消息到聊天记录
+        history = getChatHistory(char, accountId);
+        history.push({
+            role: 'system',
+            content: `${char.name} 截取了你发的图片的一部分换成了头像`,
+            time: Date.now(),
+            type: 'avatar_change'
+        });
+        await setChatHistory(char, accountId, history);
+        
+        // 刷新UI
+        if (currentChatCharId === charId) {
+            const freshChar = await db.characters.get(charId);
+            if (freshChar) {
+                renderChatBody(freshChar, true);
+            }
+        }
+        
+        showToast(`${char.name} 截取了你发的图片的一部分当头像`);
+    } catch (e) {
+        console.error('[裁剪头像] 执行失败:', e);
+    }
+}
+
+/**
+ * 用 Canvas 裁剪图片的指定区域（百分比坐标），输出正方形头像
+ * @param {string} imageUrl - 图片URL或base64
+ * @param {number} leftPct - 左边起始百分比
+ * @param {number} topPct - 顶部起始百分比
+ * @param {number} widthPct - 宽度百分比
+ * @param {number} heightPct - 高度百分比
+ * @returns {Promise<string|null>} 裁剪后的 base64 DataURL
+ */
+function cropImageRegion(imageUrl, leftPct, topPct, widthPct, heightPct) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+            try {
+                const srcX = Math.round(img.naturalWidth * leftPct / 100);
+                const srcY = Math.round(img.naturalHeight * topPct / 100);
+                const srcW = Math.round(img.naturalWidth * widthPct / 100);
+                const srcH = Math.round(img.naturalHeight * heightPct / 100);
+                
+                // 输出正方形头像，尺寸取裁剪区域较大边，最大200px
+                const outputSize = Math.min(200, Math.max(srcW, srcH, 64));
+                
+                const canvas = document.createElement('canvas');
+                canvas.width = outputSize;
+                canvas.height = outputSize;
+                const ctx = canvas.getContext('2d');
+                
+                // 白色背景（防止透明区域）
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, outputSize, outputSize);
+                
+                // 等比缩放裁剪区域到正方形画布中央
+                const scale = Math.min(outputSize / srcW, outputSize / srcH);
+                const drawW = srcW * scale;
+                const drawH = srcH * scale;
+                const drawX = (outputSize - drawW) / 2;
+                const drawY = (outputSize - drawH) / 2;
+                
+                ctx.drawImage(img, srcX, srcY, srcW, srcH, drawX, drawY, drawW, drawH);
+                
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+                console.log(`[裁剪头像] Canvas裁剪完成，原图${img.naturalWidth}x${img.naturalHeight}，裁剪区域(${srcX},${srcY},${srcW},${srcH})，输出${outputSize}x${outputSize}`);
+                resolve(dataUrl);
+            } catch (e) {
+                console.error('[裁剪头像] Canvas处理失败:', e);
+                resolve(null);
+            }
+        };
+        img.onerror = () => {
+            console.error('[裁剪头像] 图片加载失败');
+            resolve(null);
+        };
+        img.src = imageUrl;
+    });
 }
 
 // 注册全局函数
@@ -61987,7 +65169,7 @@ async function showGroupChatThemeSelector() {
         if (!listContainer) return;
 
         // 获取当前群聊的主题ID
-        const group = await db.group_chats.get(window.currentGroupChatId);
+        const group = await getCachedGroupChat(window.currentGroupChatId);
         const currentThemeId = group?.chatThemeId || null;
         selectedThemeIdForApply = currentThemeId;
 
@@ -62047,7 +65229,7 @@ async function applyGroupChatTheme() {
     }
 
     try {
-        const group = await db.group_chats.get(window.currentGroupChatId);
+        const group = await getCachedGroupChat(window.currentGroupChatId);
         if (!group) {
             showToast('❌ 群聊不存在');
             return;
@@ -62084,7 +65266,7 @@ async function updateGroupChatDetailThemeDisplay() {
     if (!window.currentGroupChatId) return;
 
     try {
-        const group = await db.group_chats.get(window.currentGroupChatId);
+        const group = await getCachedGroupChat(window.currentGroupChatId);
         const themeId = group?.chatThemeId;
         
         const themeDisplay = document.getElementById('group-detail-current-theme');
